@@ -35,6 +35,8 @@ pub use model::{
     ATTRIBUTE_WOW_JOINT_WEIGHT, ATTRIBUTE_WOW_MERGED_SLOT,
 };
 mod adt;
+mod water_map;
+pub use water_map::set_state_dir;
 mod terrain;
 mod wdt;
 pub use adt::{chunk_to_mesh, chunks_to_mesh, AdtLoader, AdtTile, ChunkShading};
@@ -384,6 +386,7 @@ pub fn register_mpq_source(app: &mut App, data_dir: &Path) -> Result<()> {
         mpq: reader.clone(),
         loose: LooseFiles::install(),
     };
+    water_map::set_chain(reader.chain.clone());
     app.register_asset_source(
         MPQ_SOURCE,
         AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> { Box::new(reader.clone()) }),

@@ -356,6 +356,8 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             run_mode::unattended(),
         );
     }
+    // The map water classification caches under the state folder; none in a capture.
+    benilla_assets::set_state_dir(crate::local_state::home());
 
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.

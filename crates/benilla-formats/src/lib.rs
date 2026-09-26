@@ -176,7 +176,7 @@ pub use loading_route::{
 mod liquid;
 pub use liquid::{LiquidKind, LiquidMesh};
 mod liquid_planar;
-pub use liquid_planar::PlanarMap;
+pub use liquid_planar::{CellWater, PlanarMap, ProbeSpot, NO_SPOT};
 mod maps;
 pub use maps::{load_map_catalog, MapBattlegroundColumns, MapCatalog};
 mod anim_data;
