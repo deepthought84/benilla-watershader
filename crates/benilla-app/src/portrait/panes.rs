@@ -38,9 +38,8 @@ use crate::ui_pass::{UiQuad, UiQuads};
 
 /// The first pane booth layer. The pane block tops the booth ladder ([`super::GLUE_LAYER`]) and
 /// grows with the panes on screen: a layer is a camera's identity, for rendering and for the
-/// emitter-to-camera match.
-pub(crate) const PANE_LAYER_BASE: usize =
-    super::UI_MODEL_CAM_LAYER_BASE + super::UI_MODEL_CAM_LAYERS;
+/// emitter-to-camera match. It starts past the liquid render layers, which the world camera draws.
+pub(crate) const PANE_LAYER_BASE: usize = benilla_world::liquid::WATER_RENDER_LAYER + 1;
 
 /// Every pane booth camera's order: before the tile cameras and the UI pass, which sample them.
 /// Each renders its own target, so the shared order is no ambiguity.

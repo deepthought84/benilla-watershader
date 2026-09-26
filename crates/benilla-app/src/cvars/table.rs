@@ -869,6 +869,13 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
     ),
+    // benilla's own: which water look draws, `0` the reference's. The knob is
+    // [`benilla_world::liquid::WaterStyle`]. `$WOW_WATER_STYLE` overrides it for the session.
+    ours(
+        "waterStyle",
+        "0",
+        "benilla's own — the reference has one water and no dial for it",
+    ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is
     // [`crate::perf::FpsJournalSetting`].

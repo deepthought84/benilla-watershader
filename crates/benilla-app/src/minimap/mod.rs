@@ -382,6 +382,8 @@ fn emit_minimap(
         locks,
         poi_marker,
         pois,
+        dev,
+        probe_marks,
     ) = blip_inputs;
     // Hover resets every frame; the blip pass re-establishes it while the map draws.
     *blip_hover = blips::MinimapBlipHover::default();
@@ -722,6 +724,11 @@ fn emit_minimap(
             blips::emit_party_dots(
                 ctx, &group, &guids, &unit_pos, pet, icons, &mut quads, &mut hover,
             );
+            // The water's reflection probes, over everything: a debug overlay, off by default, and
+            // when it is on it is the thing being looked at.
+            if dev.water.probe_minimap {
+                blips::emit_probe_dots(ctx, &probe_marks, &mut quads);
+            }
         }
     }
     *blip_hover = hover;

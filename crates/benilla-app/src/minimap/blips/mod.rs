@@ -34,7 +34,9 @@
 
 mod dots;
 
-pub(super) use dots::{emit_party_dots, emit_quest_dots, emit_tracking_dots, SelfTracking};
+pub(super) use dots::{
+    emit_party_dots, emit_probe_dots, emit_quest_dots, emit_tracking_dots, SelfTracking,
+};
 
 use bevy::math::Rect;
 use bevy::prelude::*;
@@ -201,6 +203,9 @@ pub(super) type BlipInputs<'w, 's> = (
     Option<Res<'w, crate::go_templates::Locks>>,
     Res<'w, crate::poi_marker::PoiMarker>,
     Option<Res<'w, crate::area_poi::AreaPoiRes>>,
+    // The debug-panel toggle and the probe list the water overlay draws.
+    Res<'w, benilla_world::dev_state::DebugState>,
+    Res<'w, benilla_world::liquid::ProbeMarks>,
 );
 
 /// Every streamed object the classifier considers; our own avatar is the arrow, never a dot.
