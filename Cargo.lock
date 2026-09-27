@@ -507,6 +507,7 @@ dependencies = [
  "benilla-protocol",
  "benilla-srp",
  "benilla-ui",
+ "benilla-water",
  "benilla-world",
  "bevy",
  "bevy_egui",
@@ -678,6 +679,19 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "image",
+]
+
+[[package]]
+name = "benilla-water"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "benilla-adt",
+ "benilla-assets",
+ "benilla-formats",
+ "benilla-world",
+ "bevy",
+ "bytemuck",
 ]
 
 [[package]]

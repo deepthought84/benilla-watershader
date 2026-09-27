@@ -334,6 +334,8 @@ pub(crate) mod schedule_tests {
             connect: false,
             start: crate::client_state::ClientState::Login,
         });
+        #[cfg(feature = "improved-water")]
+        app.add_plugins(benilla_water::ImprovedWaterPlugin { cache_dir: None });
         more(&mut app);
         app.finish();
         app

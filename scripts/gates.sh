@@ -186,8 +186,10 @@ run pass-span-lint scripts/pass-span-lint.py
 # player-clippy: the player build's own lints, which no other gate sees. `clippy` runs the dev
 # feature set and player-tests compiles under `cfg(test)`, where test code uses imports and items
 # the shipped library does not; this lints the shipped library and the launcher, with no
-# `--all-targets`, so a warning confined to the player graph fails here.
-run player-clippy cargo clippy -p benilla -p benilla-app --no-default-features -- -D warnings
+# `--all-targets`, so a warning confined to the player graph fails here. It ships the Improved
+# Water plugin, so that is linted without `dev` too.
+run player-clippy cargo clippy -p benilla -p benilla-app --no-default-features \
+    --features improved-water -- -D warnings
 
 # player-tests: the player build, `benilla-app` without `dev`, which compiles out the debug panel,
 # perf HUD, inspector, capture harness and probes, so it fails when any other code names one of
@@ -197,11 +199,13 @@ run player-clippy cargo clippy -p benilla -p benilla-app --no-default-features -
 # the source tree; the state folder sits beside the binary), which no other gate runs. WOW_DATA, which
 # a player build reads too, goes in for the shipped-UI tests that read FrameXML off the install.
 # Without `dev` only $BENILLA_ADDON_CORPUS finds the addon corpus, so the link goes in by that name,
-# and BENILLA_REQUIRE_DATA refuses a skip here exactly where it does in `test`.
+# and BENILLA_REQUIRE_DATA refuses a skip here exactly where it does in `test`. The player build
+# ships the Improved Water plugin, so its graph is built with it.
 run player-tests env ${wow_data:+WOW_DATA="$wow_data"} \
     ${corpus:+BENILLA_ADDON_CORPUS="$root/wow-addons-vanilla"} \
     ${require_data:+BENILLA_REQUIRE_DATA=1} BENILLA_SKIP_LOG="$skips" \
-    "$root/scripts/unit-tests.sh" -p benilla-formats -p benilla-app --no-default-features --lib
+    "$root/scripts/unit-tests.sh" -p benilla-formats -p benilla-app --no-default-features \
+    --features benilla-app/improved-water --lib
 report_skips player-tests
 
 # enforcer: `benilla-worldview` boots the engine plugins with no server, login, UI or player, in a

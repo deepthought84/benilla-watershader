@@ -356,8 +356,6 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             run_mode::unattended(),
         );
     }
-    // The map water classification caches under the state folder; none in a capture.
-    benilla_assets::set_state_dir(crate::local_state::home());
 
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
@@ -454,6 +452,12 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     .add_plugins(game_plugins::GamePlugins {
         connect: !capturing,
         start: run_mode::start_state(),
+    });
+    // The Improved Water option's passes; its map classification caches under the state folder,
+    // none in a capture.
+    #[cfg(feature = "improved-water")]
+    app.add_plugins(benilla_water::ImprovedWaterPlugin {
+        cache_dir: crate::local_state::home(),
     });
 
     // benilla-assets' loaders go into the live `AssetServer`, so they register after `AssetPlugin`.
