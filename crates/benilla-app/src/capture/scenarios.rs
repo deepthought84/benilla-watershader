@@ -968,7 +968,106 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: Some(UiFixture::Trainer(TrainerList::Blacksmith)),
     },
+    // ---- The golden water scenes (`scripts/water-shots.sh`, [`water_scene_names`]) ----
+    // One per kind of water, first person. Most cameras are `/shot` records
+    // (`benilla-config/shots.txt`) taken level at a teleport spot, facing its `.gps` heading; the
+    // canal and the underwater eye are a vista's feet + 2 yd, heading and pitch. They stream in
+    // slowly, so the script waits 300 still frames, not 30.
+    //
+    // A big lake: Loch Modan from the shore by (-5240.0, -3117.0, 299.6), facing 270 across it.
+    Scenario {
+        name: "water-loch-modan",
+        map: Some(MAP_AZEROTH),
+        eye: [-5240.3, -3119.5, 300.8],
+        look: [-5240.2, -3169.5, 300.8],
+        minute: 720,
+        ui: None,
+    },
+    // A falls pool: `.tele ElwynnFalls` (-8322.0, -340.0, 145.35, orientation 0), a boat moored in
+    // front of the falls.
+    Scenario {
+        name: "water-elwynn-falls",
+        map: Some(MAP_AZEROTH),
+        eye: [-8322.0, -340.0, 147.2],
+        look: [-8272.0, -340.0, 147.2],
+        minute: 720,
+        ui: None,
+    },
+    // A flowing river: `.tele FalfarrenRiver`, Ashenvale (2666.18, -2545.89, 173.4, orientation
+    // 1.269).
+    Scenario {
+        name: "water-falfarren-river",
+        map: Some(MAP_KALIMDOR),
+        eye: [2666.2, -2545.9, 175.2],
+        look: [2681.0, -2498.1, 175.2],
+        minute: 720,
+        ui: None,
+    },
+    // The sea at a coast: `.tele TheSavageCoast`, Stranglethorn (-12619.3, -40.97, 28.07,
+    // orientation 1.305).
+    Scenario {
+        name: "water-savage-coast",
+        map: Some(MAP_AZEROTH),
+        eye: SAVAGE_COAST_EYE,
+        look: SAVAGE_COAST_LOOK,
+        minute: 720,
+        ui: None,
+    },
+    // A bay at sunset: `.tele MenethilBay` (-3977.14, -898.95, 8.84, orientation 0.525) at 19:40.
+    // The visible sun's 45° bearing is 15° left of the view, so its glint lies on the bay.
+    Scenario {
+        name: "water-menethil-sunset",
+        map: Some(MAP_AZEROTH),
+        eye: [-3977.1, -899.0, 10.6],
+        look: [-3933.9, -873.9, 10.6],
+        minute: 1180,
+        ui: None,
+    },
+    // A city canal (WMO liquid): Stormwind's canals from feet (-8748.7, 526.2, 96.4), facing 18,
+    // 10° down onto the moored boats, the bridge and the quay wall.
+    Scenario {
+        name: "water-stormwind-canal",
+        map: Some(MAP_AZEROTH),
+        eye: [-8748.7, 526.2, 98.4],
+        look: [-8655.04, 556.63, 81.04],
+        minute: 720,
+        ui: None,
+    },
+    // The sea at night: the Savage Coast camera at 22:44, the white moon up at +14.9° on the 45°
+    // bearing, 30° right of the view (`daynight::moon_direction`; the capture log prints it).
+    Scenario {
+        name: "water-savage-night",
+        map: Some(MAP_AZEROTH),
+        eye: SAVAGE_COAST_EYE,
+        look: SAVAGE_COAST_LOOK,
+        minute: 1364,
+        ui: None,
+    },
+    // Under water: 3 yd below Loch Modan's surface (297.6), facing 270, 15° up at the surface
+    // from below, the lake bed along the bottom edge.
+    Scenario {
+        name: "water-loch-modan-under",
+        map: Some(MAP_AZEROTH),
+        eye: [-5240.0, -3165.0, 294.6],
+        look: [-5240.0, -3261.59, 320.48],
+        minute: 720,
+        ui: None,
+    },
 ];
+
+/// The Savage Coast camera, `.tele TheSavageCoast`'s spot and heading, shared by the noon and night
+/// water scenes.
+pub(super) const SAVAGE_COAST_EYE: [f32; 3] = [-12619.3, -41.0, 29.9];
+pub(super) const SAVAGE_COAST_LOOK: [f32; 3] = [-12606.2, 7.3, 29.9];
+
+/// The golden water scenes, the [`ON_DEMAND`] rows named `water-*`, for `scripts/water-shots.sh`.
+/// The baseline's `water-noon` and `water-night` are in [`SCENARIOS`] and not among them.
+pub(super) fn water_scene_names() -> impl Iterator<Item = &'static str> {
+    ON_DEMAND
+        .iter()
+        .map(|s| s.name)
+        .filter(|n| n.starts_with("water-"))
+}
 
 /// The `name-close` subject: the `name-water` wolf's name, orbited at any distance. World text is
 /// the only consumer that draws the glyph sheet at other than 1:1, so a glyph-cell sampling defect
@@ -1072,6 +1171,29 @@ mod ui_opt_in_tests {
                  is what `UiFixture::Bare` is for.",
                 s.name
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod water_scene_tests {
+    use super::*;
+
+    /// The golden water scenes are capturable by name and stay out of the baseline sweep: each is
+    /// one `ON_DEMAND` row with a map, and no `SCENARIOS` row is listed with them.
+    #[test]
+    fn the_water_scenes_are_on_demand_and_pin_their_map() {
+        let names: Vec<&str> = water_scene_names().collect();
+        assert!(!names.is_empty(), "no golden water scene");
+        for (i, name) in names.iter().enumerate() {
+            assert!(!names[..i].contains(name), "`{name}` is listed twice");
+            assert!(
+                !SCENARIOS.iter().any(|s| s.name == *name),
+                "`{name}` is in the baseline sweep"
+            );
+            let s = by_name(name).expect("a listed scene resolves by name");
+            assert!(s.map.is_some(), "`{name}` must pin its map");
+            assert!(s.ui.is_none(), "`{name}` is a world capture");
         }
     }
 }

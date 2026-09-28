@@ -19,6 +19,13 @@
 //! away. `creature-indoor-front` is one: two runs of one build differ at MAE 4.518, confined to
 //! the subject's brightness, so a 4.518 there is the flake, not the change under test.
 //!
+//! ## Bursts
+//! `$WOW_CAPTURE_BURST=<n>` writes `n` shots after the age instead of one, `<stem>-000.png`,
+//! `<stem>-001.png`, … beside `$WOW_CAPTURE_OUT`, spaced `$WOW_CAPTURE_BURST_EVERY` fixed steps
+//! apart ([`BURST_EVERY`]). The clock is held while each shot is saved and released for exactly
+//! that many steps between two, so shot `i` stands at `age + i·every` steps on any machine; the log
+//! gives each shot's clock. A single shot has no time in it; a rate is measured across a burst.
+//!
 //! ## Running one capture by hand
 //! Run through Cargo, never a bare `target/debug/benilla`, which may be stale:
 //! ```text
@@ -230,8 +237,15 @@ pub(crate) const FXVIEW_POS: [f32; 3] = [-8960.0, -145.0, 90.0];
 const VISTA_EYE_HEIGHT: f32 = 2.0;
 
 /// Print the baseline scenario names, one per line, for `WOW_CAPTURE=list`; `scripts/visual.sh`
-/// reads its sweep from this. On-demand fixtures are not listed.
+/// reads its sweep from this. On-demand fixtures are not listed, except that
+/// `WOW_CAPTURE_LIST=water` prints the golden water scenes `scripts/water-shots.sh` sweeps.
 pub(crate) fn print_scenario_names() {
+    if std::env::var("WOW_CAPTURE_LIST").as_deref() == Ok("water") {
+        for name in scenarios::water_scene_names() {
+            println!("{name}");
+        }
+        return;
+    }
     for s in SCENARIOS {
         println!("{}", s.name);
     }
@@ -282,6 +296,39 @@ fn age_frames() -> u32 {
 /// the shutter in the same state every run. On a live clock two runs of one build differ by up to
 /// MAE 0.009, as much as a real render change.
 const CAPTURE_FRAME_DT: Duration = Duration::from_nanos(16_666_667);
+
+/// Fixed clock steps between two burst shots, 1/30 s: `$WOW_CAPTURE_BURST_EVERY` overrides it.
+const BURST_EVERY: u32 = 2;
+
+/// `$WOW_CAPTURE_BURST`: shots written after the age, 0 for the one shot at `$WOW_CAPTURE_OUT`.
+fn burst_shots() -> u32 {
+    std::env::var("WOW_CAPTURE_BURST")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+/// `$WOW_CAPTURE_BURST_EVERY`, at least one step, since the clock runs at least one between shots.
+fn burst_every() -> u32 {
+    std::env::var("WOW_CAPTURE_BURST_EVERY")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(BURST_EVERY)
+        .max(1)
+}
+
+/// Burst shot `shot`'s file: `<stem>-NNN.<ext>` beside `out`.
+fn burst_path(out: &str, shot: u32) -> String {
+    let path = Path::new(out);
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path
+        .extension()
+        .unwrap_or(std::ffi::OsStr::new("png"))
+        .to_string_lossy();
+    path.with_file_name(format!("{stem}-{shot:03}.{ext}"))
+        .to_string_lossy()
+        .into_owned()
+}
 
 /// Cap on frames waiting for the screenshot save, so a capture never hangs.
 const SAVE_TIMEOUT_FRAMES: u32 = 120;
@@ -334,6 +381,8 @@ enum Phase {
     Probing(u32),
     /// Screenshot requested; waiting for the async save's `Capturing` marker to appear and clear.
     Saving { frames: u32, seen: bool },
+    /// Burst only: clock released between two shots, running [`CaptureCtx::burst_every`] steps.
+    Stepping(u32),
     /// Save done; a few grace frames, then `AppExit`.
     Done(u32),
 }
@@ -368,6 +417,12 @@ struct CaptureCtx {
     /// The scenario's name, for the output path and the probe line.
     name: &'static str,
     out: String,
+    /// [`burst_shots`]: shots after the age, 0 for the one shot at `out`.
+    burst: u32,
+    /// [`burst_every`]: fixed clock steps between two burst shots.
+    burst_every: u32,
+    /// The burst shot being taken, `0..burst`.
+    shot: u32,
     phase: Phase,
     /// The UI fixture is seeded ([`seed_ui_fixture`]).
     ui_seeded: bool,
@@ -393,6 +448,17 @@ struct CaptureCtx {
     frames: u32,
     /// The deadline already fired; `AppExit` is written and no phase advances again.
     bailed: bool,
+}
+
+impl CaptureCtx {
+    /// Where the shot being taken goes: `out`, or the burst shot's [`burst_path`].
+    fn shot_path(&self) -> String {
+        if self.burst == 0 {
+            self.out.clone()
+        } else {
+            burst_path(&self.out, self.shot)
+        }
+    }
 }
 
 /// `$WOW_RESIZE=WxH`: resize the window (logical px) once the image first settles, then settle
@@ -679,6 +745,9 @@ impl Plugin for CapturePlugin {
                 scenario,
                 name: shot_name,
                 out,
+                burst: burst_shots(),
+                burst_every: burst_every(),
+                shot: 0,
                 phase: Phase::Building(0),
                 ui_seeded: false,
                 probe_frames,
@@ -710,7 +779,7 @@ impl Plugin for CapturePlugin {
                 )
                     .chain(),
             )
-            .add_systems(Last, drive_capture);
+            .add_systems(Last, (drive_capture, log_sky).chain());
     }
 }
 
@@ -723,6 +792,30 @@ fn accept_agreements(ctx: Res<CaptureCtx>, stock: crate::ui_script::glue::StockG
     if let Some(vm) = Some(stock.vm()).filter(|vm| vm.frame_visible("TOSFrame")) {
         glue_press::press_accept_agreements(vm);
     }
+}
+
+/// Log the sky once the image settles: the scene's minute and the visible sun's and moon's
+/// elevations, so a shot that needs a body above the horizon is checked from its log.
+fn log_sky(
+    ctx: Res<CaptureCtx>,
+    lighting: Option<Res<benilla_world::lighting::WowLighting>>,
+    mut logged: Local<bool>,
+) {
+    if *logged || matches!(ctx.phase, Phase::Building(_)) {
+        return;
+    }
+    *logged = true;
+    let (Some(scenario), Some(light)) = (ctx.scenario, lighting) else {
+        return;
+    };
+    let elevation = |to_body: Vec3| to_body.normalize_or_zero().y.asin().to_degrees();
+    info!(
+        "capture: {} at minute {}: sun elevation {:+.1}°, moon elevation {:+.1}°",
+        ctx.name,
+        scenario.minute,
+        elevation(light.celestial_dir),
+        elevation(light.moon_dir_white),
+    );
 }
 
 /// Each frame, force the capture conditions: pinned time of day, no perf HUD, the fixed camera.
@@ -928,10 +1021,11 @@ fn drive_capture(
                 _ => true,
             };
             if aged {
+                let path = ctx.shot_path();
                 commands
                     .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(ctx.out.clone()));
-                info!("capture: effect aged, writing {}", ctx.out);
+                    .observe(save_to_disk(path.clone()));
+                info!("capture: effect aged, writing {path}");
                 Phase::Saving {
                     frames: 0,
                     seen: false,
@@ -969,10 +1063,40 @@ fn drive_capture(
                 );
                 Phase::ProbeWarmup(0)
             } else {
+                let path = ctx.shot_path();
                 commands
                     .spawn(Screenshot::primary_window())
-                    .observe(save_to_disk(ctx.out.clone()));
-                info!("capture: scene aged, writing {}", ctx.out);
+                    .observe(save_to_disk(path.clone()));
+                if ctx.burst > 0 {
+                    info!(
+                        "capture: scene aged, burst of {} shots {} steps apart; shot 0 at {:.6} s, \
+                         writing {path}",
+                        ctx.burst,
+                        ctx.burst_every,
+                        game_time.elapsed_secs_f64(),
+                    );
+                } else {
+                    info!("capture: scene aged, writing {path}");
+                }
+                Phase::Saving {
+                    frames: 0,
+                    seen: false,
+                }
+            }
+        }
+        Phase::Stepping(n) => {
+            if n + 1 < ctx.burst_every {
+                Phase::Stepping(n + 1)
+            } else {
+                let path = ctx.shot_path();
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(path.clone()));
+                info!(
+                    "capture: burst shot {} at {:.6} s, writing {path}",
+                    ctx.shot,
+                    game_time.elapsed_secs_f64(),
+                );
                 Phase::Saving {
                     frames: 0,
                     seen: false,
@@ -1078,7 +1202,12 @@ fn drive_capture(
             let busy = !capturing.is_empty();
             let seen = seen || busy;
             if (seen && !busy) || frames + 1 >= SAVE_TIMEOUT_FRAMES {
-                Phase::Done(0)
+                if ctx.shot + 1 < ctx.burst {
+                    ctx.shot += 1;
+                    Phase::Stepping(0)
+                } else {
+                    Phase::Done(0)
+                }
             } else {
                 Phase::Saving {
                     frames: frames + 1,
@@ -1089,14 +1218,15 @@ fn drive_capture(
         Phase::Done(n) => {
             if n + 1 >= EXIT_GRACE_FRAMES {
                 // Exit on what is on disk: a save that timed out without a file is a failed
-                // capture, so `scripts/visual.sh`'s `set -e` stops the sweep at it.
-                if Path::new(&ctx.out).is_file() {
-                    info!("capture: saved {}, exiting", ctx.out);
+                // capture, so `scripts/visual.sh`'s `set -e` stops the sweep at it. A burst is
+                // judged on its last shot.
+                let path = ctx.shot_path();
+                if Path::new(&path).is_file() {
+                    info!("capture: saved {path}, exiting");
                     exit.write(AppExit::Success);
                 } else {
                     error!(
-                        "capture: FAILED — no file at {} after the save window; exiting nonzero",
-                        ctx.out
+                        "capture: FAILED — no file at {path} after the save window; exiting nonzero"
                     );
                     exit.write(AppExit::error());
                 }
@@ -1107,7 +1237,7 @@ fn drive_capture(
         }
     };
     // The clock runs only once the image has stopped changing ([`hold_clock`]): held while
-    // building and while saving, running while aging.
+    // building and while saving, running while aging and between burst shots.
     if ctx.frozen_clock {
         let held = match ctx.phase {
             Phase::Building(_) => true,
@@ -1321,5 +1451,18 @@ mod tests {
                     .len();
             assert_eq!(shows, 1, "{scenario}");
         }
+    }
+    /// Burst shots sit beside the single shot's path, numbered from 000, keeping its extension.
+    #[test]
+    fn burst_shots_are_numbered_beside_the_output() {
+        assert_eq!(
+            super::burst_path("/data/scratch/golden/water-canal.png", 0),
+            "/data/scratch/golden/water-canal-000.png"
+        );
+        assert_eq!(super::burst_path("shot.png", 7), "shot-007.png");
+        assert_eq!(
+            super::burst_path("target/visual/a.b.png", 12),
+            "target/visual/a.b-012.png"
+        );
     }
 }
