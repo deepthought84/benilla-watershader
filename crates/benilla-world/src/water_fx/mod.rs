@@ -56,6 +56,11 @@ const ONESHOT_DEPTH_FRAC: f32 = 0.4;
 /// CMovement+0xb4, the collision height, not `UNIT_FIELD_BOUNDINGRADIUS`.
 const GATE_DEPTH_FRAC: f32 = 2.0;
 
+/// The swim line: a unit swims past `0.75 × collision height` and stops `1/36` yd under it
+/// (`0x6030c0`, `0x8012cc`, `0x7ff9d0`), so a swimmer's feet are never above the lower line.
+const SWIM_DEPTH_FRAC: f32 = 0.75;
+const SWIM_HYSTERESIS: f32 = 1.0 / 36.0;
+
 /// Speed (yd/s) past which a streamed unit counts as translating: its `MOVEMENTFLAGS & 0xf` proxy.
 const MOVE_EPSILON: f32 = 0.5;
 /// Yaw rate (rad/s) past which a still streamed unit counts as turning: its `& 0x30` proxy.
@@ -257,6 +262,8 @@ fn drive_unit(
     water: &Query<(Entity, &WaterChunkInfo, &FoamPatch)>,
     index: &WaterIndex,
     now: f32,
+    // False on the stylised lane, whose wave field draws a swimmer's wake.
+    swim_wake: bool,
 ) {
     let gate = (GATE_DEPTH_FRAC * h).max(1.0);
     foam_state.active = true;
@@ -280,6 +287,14 @@ fn drive_unit(
     foam_state.wading = wading_now;
 
     if !oneshot && now < foam_state.ready {
+        return;
+    }
+    // A swimmer translating: the wake the stylised lane leaves to its wave field.
+    if !swim_wake
+        && !oneshot
+        && matches!(state, WadeState::Translating { .. })
+        && depth >= SWIM_DEPTH_FRAC * h - SWIM_HYSTERESIS
+    {
         return;
     }
     let Some(p) = foam_params(state, oneshot, scale, gate, depth, &mut foam_state.rng) else {
@@ -351,19 +366,10 @@ fn emit_water_foam(
     }
     // `0x68bda3`: the emitter makes no record while `waterRipples` is 0.
     let emits = ripples.is_none_or(|r| r.0 != 0);
-    // **The stylised look has its own wake and it is not painted.** These decals are the 1.12
-    // client's `CWater0Ripple` and they stay exactly as they are on the reference lane; under
-    // `waterStyle` Stylised the water is a live height field instead
-    // (`benilla_world::liquid::ripple_sim`), a swimmer is a moving source in it, and drawing a
-    // stencil of a wake on top of a wake would be two of them. Emission stops here rather than at
-    // the draw so the pool empties as well: the records already alive are left to age out, which
-    // is a second of fade rather than a frame of pop when the player flips the setting.
-    if style.is_some_and(|s| s.is_stylised()) {
-        for uf in foam.units.values_mut() {
-            uf.active = false;
-        }
-        return;
-    }
+    // The stylised lane's wave field (`benilla_water`'s `ripple_sim`) draws a swimmer's wake, so
+    // there the decal wake stays off for swimmers only; the rings, the step-in splash and a
+    // wader's wake are the reference's on both lanes.
+    let swim_wake = !style.is_some_and(|s| s.is_stylised());
     let now = time.elapsed_secs();
     let dt = time.delta_secs().max(1.0e-4);
 
@@ -406,7 +412,9 @@ fn emit_water_foam(
                     pool[alloc_slot(self_cursor, 0, SELF_SLOTS)] = Some(rec);
                 }
             };
-            drive_unit(uf, &mut alloc, body, state, scale, h, &water, &index, now);
+            drive_unit(
+                uf, &mut alloc, body, state, scale, h, &water, &index, now, swim_wake,
+            );
         }
 
         // Streamed units; `Without<ViewerUnit>` excludes the avatar's own wire ghost.
@@ -460,7 +468,7 @@ fn emit_water_foam(
                 }
             };
             drive_unit(
-                uf, &mut alloc, pos, state, unit.scale, h, &water, &index, now,
+                uf, &mut alloc, pos, state, unit.scale, h, &water, &index, now, swim_wake,
             );
         }
     }
@@ -670,13 +678,16 @@ mod tests {
         live
     }
 
-    /// The stylised look silences these decals, because it has a real wave field instead
-    /// (`liquid::ripple_sim`) and two wakes on one swimmer is one too many. The fence matters
-    /// because the failure is invisible from the code: the emitter still runs, the pool still
-    /// exists, and the only symptom is a painted ring drawn over a simulated one.
+    /// The stylised look keeps the reference's rings, step-in splash and wading wake, and leaves
+    /// only a swimmer's wake to its wave field (`benilla_water`'s `ripple_sim`). The fence matters
+    /// because both failures are invisible from the code: silenced decals leave idle and wading
+    /// water glassy, and a painted swim wake is drawn over the simulated one.
     #[test]
-    fn the_stylised_look_emits_no_painted_decals() {
-        let live = |style: Option<crate::liquid::WaterStyle>| {
+    fn the_stylised_look_leaves_only_the_swim_wake_to_the_wave_field() {
+        use crate::liquid::WaterStyle::{self, Reference, Stylised};
+        // (rings, wakes) from a unit (h = 2) that arrives `depth` under, stands 0.5 s, then walks
+        // 2 yd in 0.5 s.
+        let records = |style: Option<WaterStyle>, depth: f32| {
             let mut app = App::new();
             app.init_resource::<Time>()
                 .init_resource::<WaterIndex>()
@@ -709,37 +720,55 @@ mod tests {
                 ),
                 FoamPatch,
             ));
-            app.world_mut().spawn((
-                Transform::from_translation(wow_to_bevy([2.0, 2.0, 3.5])),
-                WorldUnit {
-                    wades: true,
-                    scale: 1.0,
-                    height: 2.0,
-                    bound: None,
-                },
-            ));
+            let unit = app
+                .world_mut()
+                .spawn((
+                    Transform::from_translation(wow_to_bevy([2.0, 2.0, 5.0 - depth])),
+                    WorldUnit {
+                        wades: true,
+                        scale: 1.0,
+                        height: 2.0,
+                        bound: None,
+                    },
+                ))
+                .id();
+            let half_second = std::time::Duration::from_millis(500);
             app.update();
-            app.world()
-                .resource::<WaterFoam>()
-                .pool
-                .iter()
-                .filter(|r| r.is_some())
-                .count()
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(half_second);
+            app.update();
+            app.world_mut()
+                .resource_mut::<Time>()
+                .advance_by(half_second);
+            app.world_mut()
+                .get_mut::<Transform>(unit)
+                .expect("spawned above")
+                .translation = wow_to_bevy([4.0, 2.0, 5.0 - depth]);
+            app.update();
+            let foam = app.world().resource::<WaterFoam>();
+            let rings = foam.pool.iter().flatten().filter(|r| r.ring).count();
+            (rings, foam.pool.iter().flatten().count() - rings)
         };
+        // A wader at 0.5 yd; a swimmer at its 1.5-yd rest depth, which arrives past the 0.8-yd
+        // step-in line, so its first ring is the one-shot.
+        for style in [Some(Reference), None] {
+            assert_eq!(
+                records(style, 0.5),
+                (2, 1),
+                "the reference look is what these decals ARE (no resource is its default)"
+            );
+            assert_eq!(records(style, 1.5), (2, 1), "the reference swimmer's wake");
+        }
         assert_eq!(
-            live(Some(crate::liquid::WaterStyle::Reference)),
-            1,
-            "the reference look is what these decals ARE — they must still fire"
+            records(Some(Stylised), 0.5),
+            (2, 1),
+            "the stylised look keeps a wader's standing ring and wake"
         );
         assert_eq!(
-            live(None),
-            1,
-            "no resource means the default, which is the reference look"
-        );
-        assert_eq!(
-            live(Some(crate::liquid::WaterStyle::Stylised)),
-            0,
-            "the stylised look draws its wake from the wave simulation, not from a stencil"
+            records(Some(Stylised), 1.5),
+            (2, 0),
+            "a swimmer keeps its step-in and idle rings; its wake is the wave simulation's"
         );
     }
 

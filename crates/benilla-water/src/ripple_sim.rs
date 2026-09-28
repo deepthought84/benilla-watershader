@@ -1,14 +1,15 @@
 //! The stylised water's **wave simulation** — a height field the world pushes on, so that a
 //! swimmer's wake is water actually moving rather than a picture of a wake.
 //!
-//! **This is the alternative to `water_fx`, not an addition to it.** That module is the reference's
-//! own `CWater0Ripple`: a pool of *records*, each a splash stencil (`splash.blp` / `wake.blp`)
-//! stretched over a static patch of geometry by a texture matrix as the record ages. It is
-//! byte-verified against the 1.12 client and it stays exactly as it is on the reference lane. What
-//! it cannot do is what a painted thing never can: two wakes crossing do not interfere, a wake does
-//! not reflect off the bank it runs into, and nothing that is not a unit can disturb the water at
-//! all. So on the stylised lane the decals are silenced ([`super::WaterStyle::Stylised`]) and this
-//! runs instead.
+//! **For a swimmer this is the alternative to `water_fx`'s wake, not an addition to it.** That
+//! module is the reference's own `CWater0Ripple`: a pool of *records*, each a splash stencil
+//! (`splash.blp` / `wake.blp`) stretched over a static patch of geometry by a texture matrix as the
+//! record ages. It is byte-verified against the 1.12 client and it stays exactly as it is on the
+//! reference lane. What it cannot do is what a painted thing never can: two wakes crossing do not
+//! interfere, a wake does not reflect off the bank it runs into, and nothing that is not a unit can
+//! disturb the water at all. So on the stylised lane a swimmer's decal wake is silenced
+//! ([`super::WaterStyle::Stylised`]) and this draws it; the rings, the step-in splash and a wader's
+//! wake stay decals.
 //!
 //! ## What it solves and how
 //!
