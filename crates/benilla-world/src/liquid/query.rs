@@ -476,6 +476,40 @@ pub(super) fn wet_footprint(
     )
 }
 
+/// A placement's per-cell mirror planes, voted in model space (a WMO pool's MLIQ), as world heights
+/// under `transform`: each plane taken at its cell's centre, the frame [`wet_footprint`] gives the
+/// cells, so the election compares them with ADT planes and the surface. NaN (no plane) stays NaN.
+pub(super) fn world_planes(lq: &LiquidMesh, transform: &Transform, planes: Vec<f32>) -> Vec<f32> {
+    let cols = lq.grid[0] as usize;
+    let xt = cols.saturating_sub(1);
+    planes
+        .into_iter()
+        .enumerate()
+        .map(|(k, h)| {
+            if h.is_nan() || xt == 0 {
+                return h;
+            }
+            let (i, j) = (k % xt, k / xt);
+            let corners = [
+                j * cols + i,
+                j * cols + i + 1,
+                (j + 1) * cols + i,
+                (j + 1) * cols + i + 1,
+            ];
+            let Some(ps) = corners
+                .iter()
+                .map(|&v| lq.positions.get(v))
+                .collect::<Option<Vec<_>>>()
+            else {
+                return h;
+            };
+            let cx = ps.iter().map(|p| p[0]).sum::<f32>() / 4.0;
+            let cy = ps.iter().map(|p| p[1]).sum::<f32>() / 4.0;
+            world_wow(transform, [cx, cy, h])[2]
+        })
+        .collect()
+}
+
 fn world_wow(transform: &Transform, local: [f32; 3]) -> [f32; 3] {
     bevy_to_wow(transform.transform_point(wow_to_bevy(local)))
 }
@@ -1017,6 +1051,40 @@ mod tests {
                 "yaw {deg}°: surface not level (got {z})"
             );
         }
+    }
+
+    /// A WMO pool's planes are voted in model space; under a lifted, yawed placement each lands at
+    /// its model height plus the lift, where the placed surface is, and a cell with no plane stays
+    /// without one. Stormwind's canals elected a mirror at -6.48 against water at ~95.5 without it.
+    #[test]
+    fn a_placements_planes_are_world_heights() {
+        let lift = 102.0_f32;
+        for deg in [0.0_f32, 30.0, 90.0, 200.0] {
+            let transform = Transform {
+                translation: Vec3::new(-400.0, lift, 250.0),
+                rotation: Quat::from_rotation_y(deg.to_radians()),
+                scale: Vec3::ONE,
+            };
+            let lq = flat_quad(-6.5);
+            let planes = world_planes(&lq, &transform, vec![-6.5]);
+            assert!(
+                (planes[0] - (lift - 6.5)).abs() < 1e-3,
+                "yaw {deg}°: plane {}",
+                planes[0]
+            );
+            let info = wet_footprint(&lq, &transform, LiquidSource::WmoGroup(orphan_pool()))
+                .with_planes(Some(planes));
+            let centre = bevy_to_wow(transform.transform_point(wow_to_bevy([5.0, 5.0, -6.5])));
+            let (plane, surface) = (
+                info.planar_z_at(centre[0], centre[1]),
+                info.surface_z_at(centre[0], centre[1]),
+            );
+            assert!(
+                matches!((plane, surface), (Some(p), Some(s)) if (p - s).abs() < 1e-3),
+                "yaw {deg}°: plane {plane:?} against surface {surface:?}"
+            );
+        }
+        assert!(world_planes(&flat_quad(1.0), &Transform::IDENTITY, vec![f32::NAN])[0].is_nan());
     }
 
     /// The surface at an XY is the bilinear of its cell's corners, never the grid's highest vertex.

@@ -12,7 +12,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::pbr::ExtendedMaterial;
 use bevy::prelude::*;
 
-use super::query::{wet_footprint, FoamPatch, LiquidSource, WmoPool};
+use super::query::{wet_footprint, world_planes, FoamPatch, LiquidSource, WmoPool};
 use super::{ripple, WaterStyle};
 use crate::collision::liquid_layers;
 use crate::lighting::WATER_SHININESS;
@@ -895,9 +895,10 @@ pub(crate) fn spawn_wmo_liquids<'a>(
             ))
             .id();
         // Every kind carries the swim grid, so lava and slime swim; their damage is not modelled.
+        // The planes are voted in the pool's model space; the election reads world heights.
         commands.entity(surface).insert(
             wet_footprint(lq, &transform, LiquidSource::WmoGroup(pool))
-                .with_planes(planar.map(|p| p.planes(lq))),
+                .with_planes(planar.map(|p| world_planes(lq, &transform, p.planes(lq)))),
         );
         if !lq.kind.is_fullbright() {
             commands.entity(surface).insert(FoamPatch);
