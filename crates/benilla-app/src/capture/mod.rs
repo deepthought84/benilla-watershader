@@ -262,9 +262,15 @@ fn stable_frames() -> u32 {
         .unwrap_or(STABLE_FRAMES)
 }
 
-/// Cap on held frames waiting for [`STABLE_FRAMES`], so a scene that never settles (a live UI
-/// animation) shoots anyway, with a warning that the shot is not reproducible.
+/// Held frames a scene may take to build before its stable run, so a scene that never settles (a
+/// live UI animation) shoots anyway, with a warning that the shot is not reproducible.
 const BUILD_CAP_FRAMES: u32 = 1800;
+
+/// The cap on the held build: [`BUILD_CAP_FRAMES`] plus the stable run the shutter waits for, so a
+/// longer `$WOW_CAPTURE_STABLE` does not eat into the frames the scene has to build.
+fn build_cap_frames() -> u32 {
+    BUILD_CAP_FRAMES + stable_frames()
+}
 
 /// Wall-clock ceiling on a capture run, past which it exits with an error. The other bounds count
 /// frames, and macOS can stop granting drawables to a window it is not compositing (about 1 s per
@@ -794,27 +800,41 @@ fn accept_agreements(ctx: Res<CaptureCtx>, stock: crate::ui_script::glue::StockG
     }
 }
 
-/// Log the sky once the image settles: the scene's minute and the visible sun's and moon's
-/// elevations, so a shot that needs a body above the horizon is checked from its log.
+/// Log the sky once the image settles: the scene's minute, the view's heading, and the visible
+/// sun's and moon's elevations and bearings off that heading, so a shot that needs a body above the
+/// horizon and ahead of the view is checked from its log. Headings are WoW's, counter-clockwise
+/// from north (+X), so a positive bearing off the view is to its left.
 fn log_sky(
     ctx: Res<CaptureCtx>,
     lighting: Option<Res<benilla_world::lighting::WowLighting>>,
+    cam: Query<&Transform, With<WorldCamera>>,
     mut logged: Local<bool>,
 ) {
     if *logged || matches!(ctx.phase, Phase::Building(_)) {
         return;
     }
     *logged = true;
-    let (Some(scenario), Some(light)) = (ctx.scenario, lighting) else {
+    let (Some(scenario), Some(light), Some(cam)) = (ctx.scenario, lighting, cam.iter().next())
+    else {
         return;
     };
     let elevation = |to_body: Vec3| to_body.normalize_or_zero().y.asin().to_degrees();
+    let heading = |dir: Vec3| {
+        let [x, y, _] = benilla_assets::coords::bevy_to_wow(dir);
+        y.atan2(x).to_degrees().rem_euclid(360.0)
+    };
+    let view = heading(*cam.forward());
+    let off_view = |to_body: Vec3| (heading(to_body) - view + 540.0).rem_euclid(360.0) - 180.0;
     info!(
-        "capture: {} at minute {}: sun elevation {:+.1}°, moon elevation {:+.1}°",
+        "capture: {} at minute {}, view heading {:.1}°: sun elevation {:+.1}°, {:+.1}° off the \
+         view; moon elevation {:+.1}°, {:+.1}° off the view",
         ctx.name,
         scenario.minute,
+        view,
         elevation(light.celestial_dir),
+        off_view(light.celestial_dir),
         elevation(light.moon_dir_white),
+        off_view(light.moon_dir_white),
     );
 }
 
@@ -960,7 +980,7 @@ fn drive_capture(
                     .spawn((Screenshot::primary_window(), StabilityShot))
                     .observe(watch_frame);
             }
-            let capped = n + 1 >= BUILD_CAP_FRAMES;
+            let capped = n + 1 >= build_cap_frames();
             if capped {
                 warn!(
                     "capture: the image never settled in {} frames ({} stable); the shot is not \

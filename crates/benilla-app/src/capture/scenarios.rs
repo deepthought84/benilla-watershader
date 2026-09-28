@@ -970,8 +970,9 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // ---- The golden water scenes (`scripts/water-shots.sh`, [`water_scene_names`]) ----
     // One per kind of water, first person. Most cameras are `/shot` records
-    // (`benilla-config/shots.txt`) taken level at a teleport spot, facing its `.gps` heading; the
-    // canal and the underwater eye are a vista's feet + 2 yd, heading and pitch. They stream in
+    // (`benilla-config/shots.txt`) taken level at a teleport spot, facing its `.gps` heading; a
+    // glint or moon scene faces the sun's and moon's 45° bearing instead. The canal, the night
+    // beach and the underwater eye are a vista's feet + 2 yd, heading and pitch. They stream in
     // slowly, so the script waits 300 still frames, not 30.
     //
     // A big lake: Loch Modan from the shore by (-5240.0, -3117.0, 299.6), facing 270 across it.
@@ -1008,18 +1009,18 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     Scenario {
         name: "water-savage-coast",
         map: Some(MAP_AZEROTH),
-        eye: SAVAGE_COAST_EYE,
-        look: SAVAGE_COAST_LOOK,
+        eye: [-12619.3, -41.0, 29.9],
+        look: [-12606.2, 7.3, 29.9],
         minute: 720,
         ui: None,
     },
-    // A bay at sunset: `.tele MenethilBay` (-3977.14, -898.95, 8.84, orientation 0.525) at 19:40.
-    // The visible sun's 45° bearing is 15° left of the view, so its glint lies on the bay.
+    // A bay at sunset: `.tele MenethilBay` (-3977.14, -898.95, 8.84) at 19:40, facing the visible
+    // sun's 45° bearing, so its glint lies on the bay ahead.
     Scenario {
         name: "water-menethil-sunset",
         map: Some(MAP_AZEROTH),
         eye: [-3977.1, -899.0, 10.6],
-        look: [-3933.9, -873.9, 10.6],
+        look: [-3941.7, -863.6, 10.6],
         minute: 1180,
         ui: None,
     },
@@ -1033,13 +1034,14 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
-    // The sea at night: the Savage Coast camera at 22:44, the white moon up at +14.9° on the 45°
-    // bearing, 30° right of the view (`daynight::moon_direction`; the capture log prints it).
+    // The sea at night: the Savage Coast beach at (-12727.1, -2.1, 0.4), 115 yd from the teleport
+    // spot, whose 45° bearing runs out over open sea, at 22:44, facing the white moon at +14.9° on
+    // that bearing (`daynight::moon_direction`; the capture log prints it).
     Scenario {
         name: "water-savage-night",
         map: Some(MAP_AZEROTH),
-        eye: SAVAGE_COAST_EYE,
-        look: SAVAGE_COAST_LOOK,
+        eye: [-12727.1, -2.1, 2.4],
+        look: [-12691.7, 33.3, 2.4],
         minute: 1364,
         ui: None,
     },
@@ -1054,11 +1056,6 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: None,
     },
 ];
-
-/// The Savage Coast camera, `.tele TheSavageCoast`'s spot and heading, shared by the noon and night
-/// water scenes.
-pub(super) const SAVAGE_COAST_EYE: [f32; 3] = [-12619.3, -41.0, 29.9];
-pub(super) const SAVAGE_COAST_LOOK: [f32; 3] = [-12606.2, 7.3, 29.9];
 
 /// The golden water scenes, the [`ON_DEMAND`] rows named `water-*`, for `scripts/water-shots.sh`.
 /// The baseline's `water-noon` and `water-night` are in [`SCENARIOS`] and not among them.
@@ -1194,6 +1191,22 @@ mod water_scene_tests {
             let s = by_name(name).expect("a listed scene resolves by name");
             assert!(s.map.is_some(), "`{name}` must pin its map");
             assert!(s.ui.is_none(), "`{name}` is a world capture");
+        }
+    }
+
+    /// The glint and moon scenes face the 45° bearing the visible sun and moon keep all day
+    /// (`daynight`'s constant azimuth), so the body and its path on the water are ahead of the view.
+    #[test]
+    fn the_glint_and_moon_scenes_face_the_celestial_bearing() {
+        for name in ["water-menethil-sunset", "water-savage-night"] {
+            let s = by_name(name).expect("a water scene");
+            let heading = (s.look[1] - s.eye[1])
+                .atan2(s.look[0] - s.eye[0])
+                .to_degrees();
+            assert!(
+                (heading - 45.0).abs() < 0.1,
+                "`{name}` faces {heading:.2}°, not the 45° bearing"
+            );
         }
     }
 }
