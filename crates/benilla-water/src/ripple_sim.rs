@@ -1,15 +1,16 @@
 //! The stylised water's **wave simulation** — a height field the world pushes on, so that a
 //! swimmer's wake is water actually moving rather than a picture of a wake.
 //!
-//! **For a swimmer this is the alternative to `water_fx`'s wake, not an addition to it.** That
+//! **Where this pushes, it is the alternative to `water_fx`'s wake, not an addition to it.** That
 //! module is the reference's own `CWater0Ripple`: a pool of *records*, each a splash stencil
 //! (`splash.blp` / `wake.blp`) stretched over a static patch of geometry by a texture matrix as the
 //! record ages. It is byte-verified against the 1.12 client and it stays exactly as it is on the
 //! reference lane. What it cannot do is what a painted thing never can: two wakes crossing do not
 //! interfere, a wake does not reflect off the bank it runs into, and nothing that is not a unit can
-//! disturb the water at all. So on the stylised lane a swimmer's decal wake is silenced
-//! ([`super::WaterStyle::Stylised`]) and this draws it; the rings, the step-in splash and a wader's
-//! wake stay decals.
+//! disturb the water at all. So on the stylised lane ([`super::WaterStyle::Stylised`]) this pushes
+//! for a moving unit from ankle depth to the reference's gate
+//! ([`crate::water_fx::params::wave_push`]), and there the decal wake is silenced; the rings, the
+//! step-in splash and the wake in shallower water stay decals.
 //!
 //! ## What it solves and how
 //!
@@ -161,18 +162,6 @@ const PUSH_BOW_OFFSET: f32 = 0.55;
 /// How far a body must move in one frame to count as moving at all, in yards. Small, but not zero:
 /// a streamed position that jitters by a thousandth of a yard is a body standing still.
 const MOVED_EPSILON: f32 = 1.0e-3;
-
-/// How deep the water has to be under a unit's feet before it disturbs anything, in yards. Ankle
-/// deep: shallower than this and the "wake" is a unit walking on wet sand.
-///
-/// The **upper** limit — a body that has gone under rather than along the surface — is not a
-/// number here at all: it is the reference's own gate, borrowed whole from
-/// [`crate::water_fx::params::depth_strength`]. A submerged body makes no wake because there is no
-/// longer a surface being pushed on, and the client already draws exactly that line at about two
-/// body heights, with a linear ramp over the last half of it. Reproducing it rather than inventing
-/// a second line keeps the two wake systems agreeing about where water stops being disturbed,
-/// which is the sort of thing that silently drifts apart otherwise.
-const PUSH_MIN_DEPTH: f32 = 0.35;
 
 /// The slope the encoded texture's full range stands for. The height field's units are arbitrary
 /// (see [`PUSH_PER_YARD`]); this is the one number that turns it into something the shader can add
@@ -556,12 +545,9 @@ fn drive_ripple_sim(
         // in the same place.
         *credit = (*credit - 1.0).min(1.0);
         let Some(depth) = depth_at(p) else { return };
-        if depth < PUSH_MIN_DEPTH {
-            return;
-        }
-        // …and nothing from a body that has gone under rather than along — the reference's own
-        // gate, with its own ramp (see [`PUSH_MIN_DEPTH`]).
-        let Some(reach) = crate::water_fx::params::depth_strength(height, depth) else {
+        // Nothing from ankle-deep water or from a body gone under: the band where the decals leave
+        // the wake to this, with the reference gate's ramp.
+        let Some(reach) = crate::water_fx::params::wave_push(height, depth) else {
             return;
         };
         // Born at the bow, not at the middle — see [`PUSH_BOW_OFFSET`].

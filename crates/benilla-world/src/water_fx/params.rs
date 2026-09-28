@@ -50,6 +50,20 @@ pub fn depth_strength(height: f32, depth: f32) -> Option<f32> {
     })
 }
 
+/// How deep the water under a unit's feet has to be before the stylised water's wave field pushes
+/// on it, in yd: ankle deep, since shallower the unit is walking on wet sand.
+pub const PUSH_MIN_DEPTH: f32 = 0.35;
+
+/// The stylised water's wave-field push strength for a unit at `depth`: nothing under
+/// [`PUSH_MIN_DEPTH`], then the reference gate's [`depth_strength`], so a body gone under pushes
+/// nothing. The decals leave a moving unit's wake to the wave field wherever this is `Some`.
+pub fn wave_push(height: f32, depth: f32) -> Option<f32> {
+    if depth < PUSH_MIN_DEPTH {
+        return None;
+    }
+    depth_strength(height, depth)
+}
+
 /// The driver's parameters for one emission: `scale` is `OBJECT_FIELD_SCALE_X`, `gate` the
 /// emission depth gate and `depth` the surface minus the feet, in yd.
 pub(super) fn foam_params(
@@ -254,6 +268,18 @@ mod tests {
         // while anything past the floor is under.
         assert!(depth_strength(0.2, 0.9).is_some_and(|k| k < 1.0));
         assert_eq!(depth_strength(0.2, 1.1), None);
+    }
+
+    /// The wave field pushes from ankle depth to the reference gate, which is also the band where
+    /// the stylised lane leaves a moving unit's wake to it.
+    #[test]
+    fn wave_push_is_the_gate_past_ankle_depth() {
+        let h = 2.03;
+        assert_eq!(wave_push(h, 0.34), None, "ankle deep: wet sand");
+        assert_eq!(wave_push(h, PUSH_MIN_DEPTH), Some(1.0), "the floor pushes");
+        assert_eq!(wave_push(h, 1.52), Some(1.0), "a floating swimmer");
+        assert_eq!(wave_push(h, 3.0), depth_strength(h, 3.0), "the gate's ramp");
+        assert_eq!(wave_push(h, 4.06), None, "a dive past two body heights");
     }
 
     #[test]
