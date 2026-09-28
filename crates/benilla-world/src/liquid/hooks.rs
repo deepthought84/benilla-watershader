@@ -134,8 +134,8 @@ pub struct ProbeCull {
     pub active: bool,
     /// The capture point, in Bevy world yards.
     pub at: Vec3,
-    /// How far around it to admit, in yards — the box's reach plus its ceiling, so anything the
-    /// projection can land on has been drawn.
+    /// How far around it to admit, in yards: the scenery the water's reflected rays meet
+    /// (`benilla_water`'s `PROBE_CULL_YD`).
     pub radius: f32,
     /// Frames remaining on the hold. Counted down by the capture driver, read as `active` by the
     /// cull.

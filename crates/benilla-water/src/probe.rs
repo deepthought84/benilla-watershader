@@ -66,37 +66,21 @@ use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::GpuImage;
 
 use super::WaterStyle;
+use benilla_formats::CellWater;
 use benilla_world::liquid::{ProbeCull, ProbeFace, ProbeMark, ProbeMarks};
 
 /// How far ABOVE the water the cube is captured from, in yards.
 ///
-/// **A probe standing exactly on the surface puts its own equator at the waterline**, and that is
-/// the wrong place for it. A reflected ray at a grazing angle leaves the surface a few degrees above
-/// horizontal, so it asks the cube for directions just above the equator — and at the waterline what
-/// stands there is the bank's dirt, a few yards away. The treeline and the buildings, which are what
-/// a reflection of a wooded shore should actually contain, sit HIGHER in the cube than those rays
-/// ever reach. The first capture did exactly this and the water came back browner and flatter than
-/// the march alone had left it.
+/// **A capture point exactly on the water plane is UNDERWATER as far as the client is concerned**,
+/// and the submerged treatment then fogs the whole cube: the distance dissolves into green haze,
+/// near trees stand as silhouettes in nothing, and buildings a little further off vanish. The lift
+/// clears the waterline and the submerged test.
 ///
-/// **It is zero, and the reasoning above is wrong** — kept because the mistake is instructive. Box
-/// projection returns `d * scalar + (p - centre)`, so the offset between the fragment and the
-/// capture point enters the lookup directly. A probe twelve yards above the water gives every
-/// surface fragment a twelve-yard DOWNWARD bias, and a shallow ray that lands on the box wall only
-/// ten yards up then points below the probe's horizon — where the cube holds bank and lakebed. The
-/// lift that was supposed to bring the treeline into view pushed the lookup under it instead.
-///
-/// For a PLANAR reflector the probe belongs on the plane, so zero was tried — and zero is worse,
-/// for a reason neither the optics nor the projection could have predicted. **A capture point
-/// exactly on the water plane is UNDERWATER as far as the client is concerned**, and the submerged
-/// treatment then fogs the whole cube: the distance dissolves into green haze, near trees survive
-/// as silhouettes standing in nothing, and buildings a little further off vanish entirely. Every one
-/// of those was read off the unwrapped cube and blamed on something else first — a broken face, a
-/// missing cull, sky bleeding through a face seam.
-///
-/// So the lift is small and load-bearing: enough to clear the waterline and the submerged test, few
-/// enough yards that the `(p - centre)` term it adds to the box lookup stays a minor bias rather
-/// than the twelve-yard one that pushed shallow rays under the horizon. Four is the compromise, and
-/// the two failure modes it sits between are both real and both were observed.
+/// It stays small because the cube is the view from the capture point and a reflection is the view
+/// from the water. `liquid.wgsl`'s `probe_dir_march` walks each reflected ray out from the water
+/// point and measures it against the cube's distances from the capture point, so the offset between
+/// the two is corrected wherever the ray meets something the cube holds. No correction restores
+/// what the capture point cannot see, and the higher it stands, the more the two views differ.
 const PROBE_LIFT: f32 = 4.0;
 
 /// How much of the ripple the cube lookup sees.
@@ -303,7 +287,12 @@ fn wow_xy(p: Vec2) -> (f32, f32) {
 }
 
 /// How far around the spot being captured the capture cull admits scenery, in yards
-/// ([`ProbeCull::radius`]): one reach for every spot.
+/// ([`ProbeCull::radius`]): one fixed reach for every spot, not derived from the spot.
+///
+/// It has to cover what the water's reflected rays meet. Past it a face still draws the terrain
+/// and whatever the world camera's own cull admits, but not the doodads and buildings off the
+/// view, and `liquid.wgsl`'s `probe_dir_march` looks out to `PROBE_MARCH_FAR` (400 yd) along a
+/// ray, so a grazing ray can pass through where such scenery stands and read what lies beyond it.
 const PROBE_CULL_YD: f32 = 205.0;
 
 /// How often the cube is re-captured, in seconds.
@@ -543,8 +532,6 @@ pub(crate) struct WaterProbe {
     cursor: usize,
 }
 
-/// Copy the slot list into [`ProbeMarks`]. Its own system rather than a tail on `drive_probe`,
-/// which returns early on several paths and would leave the overlay showing the frame before.
 /// A cell placement wants: where its probe stands.
 #[derive(Clone, Copy, Debug)]
 struct Wanted {
@@ -676,54 +663,28 @@ fn retire_replaced(slots: &mut [ProbeSlot], wanted: &[Wanted]) {
     }
 }
 
+/// Copy the slot list into [`ProbeMarks`], each slot with its share of the blend the water under
+/// the player reads. Its own system rather than a tail on `drive_probe`, which returns early on
+/// several paths and would leave the overlay showing the frame before.
 fn publish_probe_marks(
     probe: Res<WaterProbe>,
+    maps: Query<&super::WaterMapRef>,
     eye: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
+    viewer: Res<crate::view::Viewer>,
     mut marks: ResMut<ProbeMarks>,
 ) {
-    // **The marker shows CONTRIBUTION where the player stands, not mere availability.**
-    //
-    // It used to show `reach * hand`, and once availability stopped falling off with distance that
-    // made every captured probe read as fully active — true, and useless: the overlay exists to
-    // answer "which probes is the water actually reading", and every one of them answered yes.
-    //
-    // So it now mirrors, on the CPU and for display only, what the shader computes for a fragment
-    // at the player's feet: rank by weight, apply the same vanishing kernel with the first
-    // unsampled probe as the cutoff, normalise. Two or three probes come out lit and the rest dark,
-    // which is what the blend is really doing. Nothing here feeds the render — if this and the
-    // shader ever disagree, the shader is right and this is the thing to fix.
-    let eye = eye
-        .single()
-        .map(|e| Vec2::new(e.translation().x, e.translation().z))
-        .unwrap_or(Vec2::ZERO);
-    let taps = probe_taps() as usize;
-    // Heaviest first by availability over distance, as the shader ranks them.
-    let mut rank: Vec<(f32, usize)> = probe
-        .slots
-        .iter()
-        .enumerate()
-        .filter(|(_, s)| s.reach > 0.0)
-        .map(|(i, s)| {
-            (
-                s.reach / Vec2::new(s.at.x, s.at.z).distance(eye).max(1e-4),
-                i,
-            )
-        })
-        .collect();
-    rank.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let cut = rank.get(taps).map_or(0.0, |(u, _)| *u);
-    let mut weight = vec![0.0f32; probe.slots.len()];
-    let mut total = 0.0;
-    for &(u, i) in rank.iter().take(taps) {
-        let w = (u - cut).max(0.0);
-        weight[i] = w;
-        total += w;
-    }
-    if total > 1e-8 {
-        for w in &mut weight {
-            *w /= total;
-        }
-    }
+    // **The marker shows CONTRIBUTION where the player stands, not mere availability**: the overlay
+    // answers "which probes is the water reading", so it lights the probes the shader blends for a
+    // fragment at the player's feet ([`blend_shares`]). Nothing here feeds the render; if this and
+    // the shader ever disagree, the shader is right and this is the thing to fix.
+    let body = viewer
+        .at
+        .or_else(|| eye.single().ok().map(GlobalTransform::translation));
+    let cell = body.and_then(|b| {
+        let (x, y) = wow_xy(Vec2::new(b.x, b.z));
+        maps.iter().next()?.0.cell(x, y)
+    });
+    let weight = blend_shares(&probe.slots, cell);
 
     marks.0.clear();
     // A slot with no resident cell and no target has never captured anything and stands nowhere —
@@ -740,6 +701,52 @@ fn publish_probe_marks(
                 fade: if probe.armed { weight[i] } else { 0.0 },
             }),
     );
+}
+
+/// Each slot's share of the probe blend `liquid.wgsl` gives water in `cell`. A slot weighs its reach
+/// times its crossfade share ([`ProbeSlot::mix`]) times the share `cell` gives its spot; the
+/// [`probe_taps`] heaviest blend, each by how far it outweighs the heaviest slot left out, and the
+/// shares are normalised. All zero where `cell` is dry or names no spot a slot holds.
+fn blend_shares(slots: &[ProbeSlot], cell: Option<CellWater>) -> Vec<f32> {
+    let forced = probe_force();
+    let taps = if forced >= 0.0 {
+        1
+    } else {
+        probe_taps() as usize
+    };
+    // The share `cell` gives a slot's spot: the first spot's `1 - mix`, the second's `mix`.
+    let own = |s: &ProbeSlot| match (s.cell.and_then(spot_of), cell) {
+        (Some(id), Some(c)) => {
+            let first = if id == c.spots[0] { 1.0 - c.mix } else { 0.0 };
+            let second = if id == c.spots[1] { c.mix } else { 0.0 };
+            first + second
+        }
+        _ => 0.0,
+    };
+    // The slots [`probe_slot_lanes`] publishes: a captured cube with reach.
+    let mut rank: Vec<(f32, usize)> = slots
+        .iter()
+        .enumerate()
+        .filter(|&(i, s)| s.captured && s.reach > 0.001 && (forced < 0.0 || i == forced as usize))
+        .map(|(i, s)| (s.reach * s.mix * own(s), i))
+        .collect();
+    // Heaviest first; the sort is stable, so equal weights keep slot order as the shader's
+    // insertion does.
+    rank.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let cut = rank.get(taps).map_or(0.0, |&(u, _)| u);
+    let mut weight = vec![0.0f32; slots.len()];
+    let mut total = 0.0;
+    for &(u, i) in rank.iter().take(taps) {
+        let w = (u - cut).max(0.0);
+        weight[i] = w;
+        total += w;
+    }
+    if total > 1e-8 {
+        for w in &mut weight {
+            *w /= total;
+        }
+    }
+    weight
 }
 
 /// The probe markers ride [`UNMIRRORED_RENDER_LAYER`](super::UNMIRRORED_RENDER_LAYER) — the layer
@@ -868,8 +875,8 @@ fn face_image() -> Image {
     image
 }
 
-/// Spawn the six capture cameras, inactive, aimed at the probe's six faces. They stand nowhere
-/// until [`drive_probe`] seats them on a spot's capture point, before a burst renders.
+/// Spawn the six capture cameras, inactive, aimed at the probe's six faces. They stand at the
+/// world origin until [`drive_probe`] seats them on a spot's capture point, before a burst renders.
 ///
 /// They share the mirror's view-key shape for the same reason the mirror has one: a second view
 /// needs its pipelines to match something, and `Msaa::Off` + `Hdr` + `Tonemapping::None` with no
@@ -1611,7 +1618,8 @@ pub(crate) fn probe_depth_proxy() -> f32 {
     2.0
 }
 
-/// Steps of the march against the cube's distances.
+/// The fixed point's steps against the cube's distances (`probe_extra.w`); the march takes its own
+/// `PROBE_MARCH_STEPS`.
 pub(crate) fn probe_march_steps() -> f32 {
     4.0
 }
@@ -1641,9 +1649,28 @@ pub(crate) fn probe_taps() -> f32 {
     3.0
 }
 
-/// Which slot the lat-long debug view unwraps.
-pub(crate) fn probe_debug_slot() -> f32 {
-    0.0
+/// Which slot the lat-long debug view (`$WOW_PROBE_CUBE`) unwraps: the captured slot nearest the
+/// eye, so it shows the cube of the spot being looked at; 0 while no slot holds a cube.
+pub(crate) fn probe_debug_slot(probe: Option<&WaterProbe>, eye: Option<Vec3>) -> f32 {
+    let (Some(probe), Some(eye)) = (probe, eye) else {
+        return 0.0;
+    };
+    nearest_cube(&probe.slots, eye).map_or(0.0, |i| i as f32)
+}
+
+/// The published slot holding a captured cube whose capture point is nearest `eye`.
+fn nearest_cube(slots: &[ProbeSlot], eye: Vec3) -> Option<usize> {
+    slots
+        .iter()
+        .take(PROBE_SLOT_MAX)
+        .enumerate()
+        .filter(|(_, s)| s.captured)
+        .min_by(|a, b| {
+            a.1.at
+                .distance_squared(eye)
+                .total_cmp(&b.1.at.distance_squared(eye))
+        })
+        .map(|(i, _)| i)
 }
 
 pub(crate) fn probe_slot_lanes(probe: Option<&WaterProbe>) -> [f32; PROBE_SLOT_MAX * 16] {
@@ -1872,5 +1899,71 @@ mod tests {
         );
         full[0].reach = 0.0;
         assert_eq!(next_capture(&mut full, &wanted, Vec2::ZERO, true), Some(0));
+    }
+
+    /// A slot holding spot `id`'s cube, captured and at full reach, with its capture point at `at`.
+    fn holding(id: u16, at: Vec3) -> ProbeSlot {
+        ProbeSlot {
+            cell: Some(spot_key(id)),
+            at,
+            captured: true,
+            reach: 1.0,
+            ..Default::default()
+        }
+    }
+
+    /// **The overlay lights the probes the water under the player reads**: the spots the cell
+    /// names, by the shares it gives them, as `liquid.wgsl` blends them; never a probe of some
+    /// other water however near, and none on dry ground.
+    #[test]
+    fn the_overlay_lights_the_probes_the_water_underfoot_reads() {
+        use benilla_formats::NO_SPOT;
+        // Spot 2's probe is the nearest and holds no share of this cell.
+        let slots = [
+            holding(0, Vec3::new(300.0, 0.0, 0.0)),
+            holding(1, Vec3::new(0.0, 0.0, 300.0)),
+            holding(2, Vec3::new(1.0, 0.0, 1.0)),
+            ProbeSlot::default(),
+        ];
+        let between = CellWater {
+            spots: [0, 1],
+            mix: 0.25,
+            ..CellWater::DRY
+        };
+        let shares = blend_shares(&slots, Some(between));
+        for (got, want) in shares.iter().zip([0.75, 0.25, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-6, "shares {shares:?}");
+        }
+
+        // One spot: its probe carries the blend alone, and a slot not captured yet adds nothing.
+        let mut pending = slots;
+        pending[1].captured = false;
+        let own = CellWater {
+            spots: [1, NO_SPOT],
+            ..CellWater::DRY
+        };
+        assert_eq!(blend_shares(&slots, Some(own)), [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(blend_shares(&pending, Some(own)), [0.0; 4]);
+
+        assert_eq!(blend_shares(&slots, Some(CellWater::DRY)), [0.0; 4]);
+        assert_eq!(blend_shares(&slots, None), [0.0; 4]);
+    }
+
+    /// `$WOW_PROBE_CUBE` unwraps a cube that exists: the captured slot nearest the eye, whichever
+    /// slot the capture landed in.
+    #[test]
+    fn the_lat_long_view_unwraps_the_nearest_captured_cube() {
+        let eye = Vec3::new(0.0, 5.0, 0.0);
+        let mut slots = [
+            ProbeSlot::default(),
+            holding(4, Vec3::new(90.0, 0.0, 0.0)),
+            holding(3, Vec3::new(10.0, 0.0, 0.0)),
+        ];
+        assert_eq!(nearest_cube(&slots, eye), Some(2));
+        slots[2].captured = false;
+        assert_eq!(nearest_cube(&slots, eye), Some(1));
+        slots[1].captured = false;
+        assert_eq!(nearest_cube(&slots, eye), None, "no cube yet");
+        assert_eq!(probe_debug_slot(None, Some(eye)), 0.0);
     }
 }

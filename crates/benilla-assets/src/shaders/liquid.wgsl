@@ -1000,9 +1000,6 @@ fn foam_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
     return out;
 }
 
-/// One probe's contribution: correct the reflected direction against THAT probe's proxy, then read
-/// its own slice of the cube array. `idx` is the slot, which is also the array index — the capture
-/// writes six layers starting at `slot * 6`, and a cube-array lookup addresses them as one cube.
 /// The positive `t` where the ray `o + t*d` (with `o` measured from the capture point) is `dist`
 /// away from that point — one step of the depth correction, in closed form.
 ///
@@ -1129,6 +1126,10 @@ fn probe_lod(d_probe: f32, d_geom: f32) -> f32 {
     return clamp(lo + log2(max(err / texel0, 1.0)), lo, hi);
 }
 
+/// One probe's contribution: correct the reflected direction against THAT probe's stored distances,
+/// then read its own slice of the cube array. `idx` is the slot, which is also the array index —
+/// the capture writes six layers starting at `slot * 6`, and a cube-array lookup addresses them as
+/// one cube.
 fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32) -> vec3<f32> {
     // `probe_extra.z` picks the correction against the cube's stored distances: the march by
     // default, the fixed point otherwise.
@@ -1990,9 +1991,10 @@ fn stylised_water(
         let lon = (uv.x * 2.0 - 1.0) * 3.14159265;
         let lat = (1.5 - 2.0 * uv.y) * 3.14159265;
         let dir = vec3<f32>(cos(lat) * sin(lon), sin(lat), cos(lat) * cos(lon));
-        // Slot 0's cube — the debug unwraps ONE probe, because a lat-long of "whichever probe is
+        // One slot's cube — the debug unwraps ONE probe, because a lat-long of "whichever probe is
         // nearest this fragment" would be a mosaic of several and unreadable as a check on any of
-        // them. `probe_extra.y` picks which.
+        // them. `probe_extra.y` picks which: the captured slot nearest the eye
+        // (`benilla_water`'s `probe_debug_slot`).
         let texel = textureSampleLevel(
             probe_tex,
             probe_samp,

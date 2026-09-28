@@ -509,7 +509,7 @@ impl PlanarMap {
         })
     }
 
-    /// The cell whose centre is WoW `(x, y)`, if the map holds water there.
+    /// The cell holding WoW `(x, y)`, if the map holds water there.
     pub fn cell(&self, x: f32, y: f32) -> Option<CellWater> {
         let (ck, slot) = chunk_of(key_of([x, y], self.cell));
         match self.chunks.get(&ck)? {
@@ -902,6 +902,10 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 impl WaterClasses for PlanarMap {
     fn cells(&self, lq: &LiquidMesh) -> Vec<CellWater> {
         PlanarMap::cells(self, lq)
+    }
+
+    fn cell(&self, x: f32, y: f32) -> Option<CellWater> {
+        PlanarMap::cell(self, x, y)
     }
 
     fn corner(&self, x: f32, y: f32) -> f32 {
