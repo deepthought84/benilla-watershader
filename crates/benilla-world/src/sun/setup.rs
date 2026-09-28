@@ -1,6 +1,7 @@
 //! The celestial layer's startup spawn.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::image::Image;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -13,6 +14,7 @@ use benilla_formats::load_m2_mesh;
 use super::materials::{CelestialExt, CelestialMaterial, StarExt, StarMaterial, DISC_HORIZON_FADE};
 use super::mesh::{quad_mesh, radial_sprite, star_field_mesh};
 use super::{MoonPart, MoonSprite, StarDome, SunPart, SunSprite};
+use crate::liquid::UNMIRRORED_RENDER_LAYER;
 use crate::sky_order;
 
 pub(super) fn setup_sun(
@@ -93,6 +95,8 @@ pub(super) fn setup_sun(
         SunSprite {
             part: SunPart::Glare,
         },
+        // The lens flare is the eye's, not the sky's: no mirror or probe draws it.
+        RenderLayers::layer(UNMIRRORED_RENDER_LAYER),
     ));
     // The white moon, `moon.blp`, opaque but for its feathered texture alpha.
     let moon_tex = world_assets
@@ -174,6 +178,8 @@ pub(super) fn setup_sun(
         MoonSprite {
             part: MoonPart::Glare,
         },
+        // The sun glare's layer, for the same reason.
+        RenderLayers::layer(UNMIRRORED_RENDER_LAYER),
     ));
 
     // The stars: `Stars.m2`'s patches on a unit dome, or the procedural field without assets.
@@ -263,5 +269,53 @@ pub(super) fn setup_sun(
             Transform::default(),
             StarDome { weight: 1.0 },
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two glares ride the unmirrored layer, so no mirror or probe draws them; the discs and
+    /// the stars stay on layer 0 with the rest of the sky the mirror reflects.
+    #[test]
+    fn the_glares_ride_the_unmirrored_layer_and_the_sky_bodies_do_not() {
+        let mut app = App::new();
+        app.insert_resource(Assets::<Mesh>::default());
+        app.insert_resource(Assets::<Image>::default());
+        app.insert_resource(Assets::<CelestialMaterial>::default());
+        app.insert_resource(Assets::<StarMaterial>::default());
+        // No `WorldAssets`: the generated sprites and the procedural star field.
+        app.add_systems(Update, setup_sun);
+        app.update();
+        let world = app.world_mut();
+        let unmirrored = RenderLayers::layer(UNMIRRORED_RENDER_LAYER);
+        // The world camera draws that layer; the mirrors and probe faces, on layer 0 alone, do not.
+        assert!(unmirrored.intersects(&crate::liquid::world_camera_layers()));
+        assert!(!unmirrored.intersects(&RenderLayers::default()));
+        let mut glares = 0;
+        let mut bodies = 0;
+        let mut q = world.query::<(
+            Option<&SunSprite>,
+            Option<&MoonSprite>,
+            Has<StarDome>,
+            Option<&RenderLayers>,
+        )>();
+        for (sun, moon, star, layers) in q.iter(world) {
+            let glare = matches!(sun.map(|s| s.part), Some(SunPart::Glare))
+                || matches!(moon.map(|m| m.part), Some(MoonPart::Glare));
+            if glare {
+                glares += 1;
+                assert_eq!(layers, Some(&unmirrored), "a glare off layer 0");
+            } else if sun.is_some() || moon.is_some() || star {
+                bodies += 1;
+                assert_eq!(layers, None, "a disc or the stars, mirrored with the sky");
+            }
+        }
+        assert_eq!(
+            (glares, bodies),
+            (2, 4),
+            "sun and moon glares; sun, moon, moon02, stars"
+        );
     }
 }

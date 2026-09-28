@@ -38,6 +38,7 @@ mod real_data;
 mod ripple;
 mod spatial;
 mod surface;
+pub(crate) use hooks::world_camera_layers;
 pub use hooks::{
     mirror_view_shape, ProbeCull, ProbeFace, ProbeMark, ProbeMarks, ReflectionCamera,
     WaterPassImages, WaterPassSet, DOME_LANES, MARCH_LANES, MIRROR2_LANES, PROBE_LANES,

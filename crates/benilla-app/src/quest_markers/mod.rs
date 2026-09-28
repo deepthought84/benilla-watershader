@@ -27,8 +27,10 @@ use query::query_statuses;
 
 use std::collections::HashMap;
 
+use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 
+use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::{BillboardInfo, M2Model};
 use benilla_formats::BoneScaleAnim;
 
@@ -105,6 +107,19 @@ struct MarkerSeat {
 /// A billboard card's model-local pivot, [`BillboardCard::re_place`]'s second argument.
 #[derive(Component)]
 struct MarkerCardPivot(Vec3);
+
+/// One marker mesh's draw components, cards and plain geometry alike. The marker is a label over
+/// the unit, not part of the scene, so it rides the overhead names' layer and no mirror or probe
+/// draws it (`benilla_world::liquid::UNMIRRORED_RENDER_LAYER`).
+fn marker_mesh(mesh: Handle<Mesh>, material: Handle<WowModelMaterial>, tag: u32) -> impl Bundle {
+    (
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        MeshTag(tag),
+        Transform::IDENTITY,
+        RenderLayers::layer(benilla_world::liquid::UNMIRRORED_RENDER_LAYER),
+    )
+}
 
 /// Despawns the root (its cards cascade) and the seat, which lives under the unit's joint; a
 /// despawned unit has already taken the seat with it.
@@ -329,15 +344,14 @@ fn build_markers(
                 Some(info) => {
                     let child = commands
                         .spawn((
-                            Mesh3d(
+                            marker_mesh(
                                 stat_forms
                                     .get(pi)
                                     .map(|(h, _)| h.clone())
                                     .unwrap_or_default(),
+                                material,
+                                spawn_tag(0, 1.0),
                             ),
-                            MeshMaterial3d(material),
-                            MeshTag(spawn_tag(0, 1.0)),
-                            Transform::IDENTITY,
                             BillboardCard::new(info, Transform::IDENTITY)
                                 .with_seq_translation(seq_loop(info, ANIM_MARKER_LOW), arm_ms),
                             MarkerCardPivot(info.pivot),
@@ -358,12 +372,7 @@ fn build_markers(
                             .unwrap_or_default()
                     };
                     let child = commands
-                        .spawn((
-                            Mesh3d(mesh),
-                            MeshMaterial3d(material),
-                            MeshTag(spawn_tag(marker_slot, 1.0)),
-                            Transform::IDENTITY,
-                        ))
+                        .spawn(marker_mesh(mesh, material, spawn_tag(marker_slot, 1.0)))
                         .id();
                     if let Some(h) = &host {
                         if use_rig {
@@ -560,6 +569,27 @@ mod tests {
             no_anchor: false,
             raised: None,
         }
+    }
+
+    /// Every marker mesh, card or plain, is off layer 0, which the water's mirrors and probe faces
+    /// draw, and on the unmirrored layer, which the world camera draws.
+    #[test]
+    fn marker_meshes_ride_the_unmirrored_layer() {
+        let mut world = World::new();
+        let mesh = world
+            .spawn(marker_mesh(Handle::default(), Handle::default(), 0))
+            .id();
+        let layers = world
+            .entity(mesh)
+            .get::<RenderLayers>()
+            .expect("a marker mesh carries its own layer: layers do not propagate");
+        assert!(
+            !layers.intersects(&RenderLayers::default()),
+            "on layer 0 the mirror draws the marker upside down in the lake"
+        );
+        assert!(layers.intersects(&RenderLayers::layer(
+            benilla_world::liquid::UNMIRRORED_RENDER_LAYER
+        )));
     }
 
     /// A mount keeps the rider's visual and so the seat, so only this comparison sees the slot

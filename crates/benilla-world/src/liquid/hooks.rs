@@ -23,19 +23,34 @@ use bevy::render::renderer::RenderDevice;
 pub const WATER_RENDER_LAYER: usize = 31;
 
 /// The render layer for **world geometry that must never appear in the mirror** — the overhead unit
-/// names and the raid target marks.
+/// names, the raid target marks, the questgiver `!` and `?` markers, and the sun's and moon's
+/// lens-flare glares.
 ///
 /// They are not UI. The 1.12 client draws overhead names inside the world pass, depth-tested, as
 /// real camera-facing billboard meshes (`benilla_app::nameplates`), which is why walls occlude
 /// them — and it is also why the mirrored camera drew them, floating under the surface of every
 /// lake, back to front. A name is a label attached to the viewer's own eye; it has no reflection,
-/// any more than a cursor does.
+/// any more than a cursor does. A questgiver marker is the same kind of label, and a glare is the
+/// eye's own: 1.12 draws it on its lens-flare path (`0x483740 → 0x6d48c0 → 0x7e57e0`) at
+/// `cam + 12·dir`, sized by where the camera looks, so a mirror or probe that drew the quad would
+/// show the viewer's lens, not the sky. Layers do not propagate: every such mesh carries this one
+/// itself.
 ///
 /// Distinct from [`WATER_RENDER_LAYER`] even though both mean "the world camera draws it, the
 /// mirror does not", because the two say different things and only one of them is also a statement
 /// about the water: liquid is excluded so it cannot wash the image teal from in front of the
 /// mirrored lens, and merging them would make that reason cover labels too.
 pub const UNMIRRORED_RENDER_LAYER: usize = 30;
+
+/// The world camera's layers: the world, the labels over it, and the water. A mesh on none of them
+/// belongs to a booth's own camera and scene.
+pub(crate) fn world_camera_layers() -> bevy::camera::visibility::RenderLayers {
+    bevy::camera::visibility::RenderLayers::from_layers(&[
+        0,
+        UNMIRRORED_RENDER_LAYER,
+        WATER_RENDER_LAYER,
+    ])
+}
 
 /// The world camera renders the world, the water, and the labels over it; the reflection camera
 /// renders only the world. One system rather than a component at the spawn, because there are three
@@ -52,13 +67,7 @@ pub(super) fn stamp_world_camera_layers(
     >,
 ) {
     for entity in &cameras {
-        commands
-            .entity(entity)
-            .insert(bevy::camera::visibility::RenderLayers::from_layers(&[
-                0,
-                UNMIRRORED_RENDER_LAYER,
-                WATER_RENDER_LAYER,
-            ]));
+        commands.entity(entity).insert(world_camera_layers());
     }
 }
 

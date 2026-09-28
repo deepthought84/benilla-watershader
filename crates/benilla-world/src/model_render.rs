@@ -769,6 +769,12 @@ type PartItem<'a> = (
     bool,
 );
 
+/// A batch on none of the world camera's layers is a booth's, with its own camera and scene and no
+/// world water; one on the unmirrored layer (a questgiver marker) is still the world's.
+fn booth_layered(layers: Option<&bevy::camera::visibility::RenderLayers>) -> bool {
+    layers.is_some_and(|l| !l.intersects(&crate::liquid::world_camera_layers()))
+}
+
 /// Classify one batch. `used` collects the live near identities for the twin GC's mark; the
 /// reactive path passes `None`.
 fn classify_part(
@@ -780,9 +786,7 @@ fn classify_part(
     used: Option<&mut std::collections::HashSet<AssetId<WowModelMaterial>>>,
     (entity, gt, layers, mut mat, authority_owned, marked, tag, straddling): PartItem<'_>,
 ) {
-    use bevy::camera::visibility::RenderLayers;
-    // A booth-layered batch has its own camera and scene, with no world water.
-    if layers.is_some_and(|l| !l.intersects(&RenderLayers::default())) {
+    if booth_layered(layers) {
         return;
     }
     let cur = mat.0.id();
@@ -1192,5 +1196,26 @@ mod tests {
         // The marker word stays f32-exact with every bit up to `FAR_SIDE_MARKER` set.
         let all = src | super::FAR_SIDE_MARKER | 0x0f;
         assert_eq!(f32::from(all) as u16, all);
+    }
+
+    /// The water-side split skips only a booth's batches: one on the unmirrored layer (a
+    /// questgiver `!`) is the world camera's, and splits at the water plane like any world model.
+    #[test]
+    fn an_unmirrored_batch_still_takes_the_water_side_split() {
+        use crate::liquid::{UNMIRRORED_RENDER_LAYER, WATER_RENDER_LAYER};
+        use bevy::camera::visibility::RenderLayers;
+        assert!(!super::booth_layered(None), "an unlayered world batch");
+        assert!(!super::booth_layered(Some(&RenderLayers::default())));
+        assert!(
+            !super::booth_layered(Some(&RenderLayers::layer(UNMIRRORED_RENDER_LAYER))),
+            "off the mirror, still in the world"
+        );
+        assert!(!super::booth_layered(Some(&RenderLayers::layer(
+            WATER_RENDER_LAYER
+        ))));
+        assert!(
+            super::booth_layered(Some(&RenderLayers::layer(1))),
+            "a booth's own layer, which no world camera draws"
+        );
     }
 }
