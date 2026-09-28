@@ -14,7 +14,8 @@
 //! A probe captured at the mirror of the eye is arithmetically the planar capture — it needs no
 //! parallax correction and it serves exactly one water height, so it re-inherits the single-plane
 //! limitation that probes exist to escape. Anchoring to the water instead is what buys anything, and
-//! it buys a parallax error in exchange, which is what [`probe_dir`]'s sphere proxy is for.
+//! it buys a parallax error in exchange, which the march against the cube's stored distances
+//! corrects.
 //!
 //! **This is the second time a probe tier has been built here**, and the first one was measured and
 //! removed. What that work established, and what this design is shaped by:
@@ -26,16 +27,8 @@
 //!   identically once a coverage gate was added. So this starts at one, deliberately.
 //! * **The hard problem is not where probes go, it is which probe a fragment reads.** A metric
 //!   selector hands a fragment the cube of a pond behind a bank, and the failure is invisible in a
-//!   screenshot because a cube of somewhere else is still a plausible picture. With one probe that
-//!   problem does not exist — which is most of why starting at one is right.
-//!
-//! ## The falloff is three-dimensional, and that is not fussiness
-//!
-//! A 220-yard box around this lake holds **three** separate water bodies: the lake at y = 48.64, a
-//! second at 55.9, and a stream running 108 to 130 with slopes of up to 12 yards across one chunk.
-//! A fragment sixty yards above the lake reading the lake's cubemap gets a picture of somewhere
-//! else — the "cube of a pond behind a bank" failure, reproduced by a single probe with no selector
-//! in sight. So the weight falls off with **height as well as distance** ([`PROBE_FADE_UP`]).
+//!   screenshot because a cube of somewhere else is still a plausible picture. So a fragment reads
+//!   only the probes of the fixed spots its own cell names (`benilla_formats::PlanarMap`).
 //!
 //! ## What is Bevy's and what is ours
 //!
@@ -75,18 +68,6 @@ use bevy::render::texture::GpuImage;
 use super::WaterStyle;
 use benilla_world::liquid::{ProbeCull, ProbeFace, ProbeMark, ProbeMarks};
 
-/// Where the one probe stands, in **Bevy world yards**.
-///
-/// Mirror Lake, Elwynn Forest — raw WoW `(-9385, 420, 48.64)` through
-/// `benilla_assets::coords::wow_to_bevy`, which is `(-y, z, -x)`. The position was not guessed: the
-/// MCLQ census (`benilla-formats --example water_here`) reports this point ringed by chunks that are
-/// 64/64 wet at a dead-flat surface height of 48.640, which is open water rather than a bank.
-///
-/// It is a constant because there is exactly one probe. The day there are two, this becomes a
-/// component on a probe entity and the shader gains a selector — and the note above about which
-/// probe a fragment reads becomes the whole problem again.
-const PROBE_AT: Vec3 = Vec3::new(-420.0, 48.64, 9385.0);
-
 /// How far ABOVE the water the cube is captured from, in yards.
 ///
 /// **A probe standing exactly on the surface puts its own equator at the waterline**, and that is
@@ -118,91 +99,9 @@ const PROBE_AT: Vec3 = Vec3::new(-420.0, 48.64, 9385.0);
 /// the two failure modes it sits between are both real and both were observed.
 const PROBE_LIFT: f32 = 4.0;
 
-/// How far PAST the shoreline the projection box reaches, in yards.
-///
-/// **The box must bound the SCENERY, not the water**, and getting that wrong is subtle enough to
-/// survive a working implementation. Box projection assumes the environment lies on the box
-/// surface: every reflected ray is told the world stands where the wall is. Walls derived from the
-/// liquid footprint alone sit exactly at the waterline — true of the bank, false of the treeline a
-/// few yards behind it and the buildings behind that — so the entire scene collapses onto the
-/// shoreline plane and the reflection compresses into a thin band of bank colour. Against a true
-/// mirrored render the difference is stark: the mirror shows trunks descending at their real
-/// distance and the house below the house, while the unexpanded box showed orange bank and almost
-/// nothing else.
-///
-/// Unreal states the rule as *place the shape so the geometry you want reflected sits just inside
-/// it*, and the trap is that "the geometry you want reflected" is not the surface you are
-/// reflecting it in. Thirty yards puts the near treeline and the lakeside buildings inside the box;
-/// what stands further out than that is far enough away that the parallax error is small anyway.
-const PROBE_BOX_OUT: f32 = 30.0;
-
-/// How far above the water the projection box reaches, in yards — its ceiling.
-///
-/// **The box is not a region of influence. It is a stand-in for where the reflected scenery
-/// actually stands**, and that distinction is the whole technique. Unity calls this box projection
-/// and Unreal sizes its capture shapes by the same rule: *place them so the part of the level you
-/// want reflected sits just inside the shape, because the level is reprojected onto it*. A shape
-/// that does not match the geometry reflects the wrong thing at the wrong size, and the failure is
-/// smooth and plausible rather than obviously broken.
-///
-/// A sphere was tried first and is the wrong shape for a lake. A lake is a floor with walls: the
-/// bank stands at the shoreline in every direction and the sky is overhead. A box has exactly that
-/// form — shallow rays meet a WALL and find the bank and its trees, steep rays meet the CEILING and
-/// find sky. A sphere curves away uniformly, so at any radius large enough to clear the near bank
-/// it also arcs over the far treeline, and every lookup lands in open sky. That is precisely what
-/// happened: at 110 yards and again at 45, the probe returned a soft blue wash and the lane looked
-/// identical to the one without it.
-///
-/// The walls come from the water body itself ([`super::WaterChunkInfo`]'s footprint), so
-/// they sit on the shoreline by construction rather than by tuning. Only the ceiling is authored,
-/// because no liquid footprint knows how tall the trees are.
-const PROBE_BOX_UP: f32 = 55.0;
-
-/// How far below the surface the projection box reaches, in yards — its floor.
-///
-/// Shallow, because water reflects UP: the only rays that ever meet this face are near-vertical
-/// ones from a fragment almost directly above the probe, and what is under a lake is its bed.
-const PROBE_BOX_DOWN: f32 = 8.0;
-
 /// How much of the ripple the cube lookup sees.
 pub(crate) fn probe_normal() -> f32 {
     0.15
-}
-
-/// How far out the proxy box gathers water chunks, in yards — **not** [`PROBE_FADE_YD`].
-///
-/// These are two different questions and they were sharing one number. The fade radius asks *how
-/// far this probe's influence reaches*; the box radius asks *where the geometry it reflects stands*.
-///
-/// Unreal's sizing rule is the one to follow: **the shape must contain the geometry you want
-/// reflected**, because the scene is reprojected onto it. A wall that stands closer than the real
-/// geometry does not merely blur the reflection, it substitutes a different part of the cube: a
-/// grazing ray from far water travels a long way almost horizontally, and if it meets the proxy
-/// wall while still only a few yards above the surface, the direction that comes back points at the
-/// BANK rather than at the treeline standing behind it.
-///
-/// **60 yards, measured — and it used to be 28 for a reason that turned out to be wrong.** 28 was
-/// chosen when there was one probe, by sweeping the box until the reflection matched the planar
-/// mirror's SIZE at one camera. That made the box a magnification trim rather than a proxy, and it
-/// left the walls well inside the treeline; the visible result was a broad orange band across the
-/// far water, the bank showing where the canopy belonged. With probes on a lattice the density
-/// bounds the magnification error, so the box is free to do its actual job.
-///
-/// The measurement is the far-water strip at the Mirror Lake pin, scored as red-minus-blue against
-/// the planar mirror's `+39.7`: reach 28 gives `+70.5` (the orange band), 40 `+47.8`, 50 `+46.9`,
-/// 55 `+41.7`, **60 `+39.9`**, 65 `+38.6`, 80 `+37.8` — crossing the mirror between 60 and 65 and
-/// flat thereafter. Agreement with the mirror over the whole surface more than doubled at the same
-/// time, from `+0.258` to `+0.538`.
-const PROBE_BOX_REACH: f32 = 60.0;
-
-/// How far the probe's proxy box reaches out over land, in yards.
-fn box_reach() -> f32 {
-    PROBE_BOX_REACH
-}
-
-/// The proxy box's scale about its capture point.
-fn box_scale() -> f32 {
-    1.0
 }
 
 /// The surface ripple's scale in the cube lookup.
@@ -214,18 +113,6 @@ fn ripple_scale() -> f32 {
 fn probe_raw() -> bool {
     false
 }
-
-/// The sphere proxy's radius; 0 uses the box.
-fn probe_sphere() -> f32 {
-    0.0
-}
-
-/// The fallback half-extent in yards, for the frames before any liquid footprint has arrived.
-///
-/// A box of zero size makes every ray-box factor zero and sends the whole lookup to one texel, so
-/// there has to be something. This is only ever seen for the frames between boot and the first
-/// water chunk streaming in.
-const PROBE_BOX_FALLBACK: f32 = 60.0;
 
 /// The near plane of every face camera, in yards.
 ///
@@ -277,8 +164,7 @@ fn probe_slots() -> usize {
 
 pub(crate) use benilla_world::liquid::PROBE_SLOT_MAX;
 
-/// One live probe: the lattice cell it answers for, the point its cube was taken from, and its own
-/// proxy box.
+/// One live probe: the lattice cell it answers for and the point its cube was taken from.
 ///
 /// **The lattice is anchored to the WORLD, not to the player.** A cube is only valid for the point
 /// it was taken from, so a probe that follows the player is invalidated by every step they take and
@@ -289,15 +175,13 @@ pub(crate) use benilla_world::liquid::PROBE_SLOT_MAX;
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ProbeSlot {
     /// **Resident state — what is actually in this slot's six layers right now.** The cell the cube
-    /// was taken for, the point it was taken from, and the proxy fitted to that point. `None` until
-    /// the slot's first capture has landed.
+    /// was taken for and the point it was taken from. `None` until the slot's first capture has
+    /// landed.
     ///
-    /// These four move together and only ever at the instant a capture completes, so the cube's
+    /// These move together and only ever at the instant a capture completes, so the cube's
     /// contents and the projection applied to it can never disagree.
     cell: Option<IVec2>,
     at: Vec3,
-    box_min: Vec3,
-    box_max: Vec3,
     /// Whether the resident cube is valid. Read by the shader as the slot's `at.w`.
     captured: bool,
     /// **Target state — the cell this slot SHOULD hold.** Differs from the resident cell exactly
@@ -310,8 +194,6 @@ pub(crate) struct ProbeSlot {
     /// where it was taken, until the replacement is ready; the swap is then one atomic promotion.
     want: Option<IVec2>,
     want_at: Vec3,
-    want_box_min: Vec3,
-    want_box_max: Vec3,
     /// How much of this slot's contribution is currently being drawn, 0 to 1.
     ///
     /// **The shape of this is DISTANCE, not time.** A probe does not switch on when the lattice
@@ -342,17 +224,13 @@ impl Default for ProbeSlot {
     fn default() -> Self {
         Self {
             cell: None,
-            at: PROBE_AT,
-            box_min: PROBE_AT - Vec3::splat(PROBE_BOX_FALLBACK),
-            box_max: PROBE_AT + Vec3::splat(PROBE_BOX_FALLBACK),
+            at: Vec3::ZERO,
             captured: false,
             reach: 0.0,
             retire: false,
             mix: 1.0,
             want: None,
-            want_at: PROBE_AT,
-            want_box_min: PROBE_AT - Vec3::splat(PROBE_BOX_FALLBACK),
-            want_box_max: PROBE_AT + Vec3::splat(PROBE_BOX_FALLBACK),
+            want_at: Vec3::ZERO,
             dirty: false,
         }
     }
@@ -373,11 +251,11 @@ impl ProbeSlot {
     /// probes far apart, and midway between two of them both sat past the cutoff, so neither was
     /// eligible and the water had nothing to read. A probe's usefulness does not end at a radius
     /// drawn around the player — it ends where its cube stops resembling what the fragment should
-    /// see, which is a per-FRAGMENT question that `probe_weight` already answers over 150 yards.
+    /// see, which is a per-FRAGMENT question.
     ///
     /// So availability is now binary in intent and ramped only so a newly captured probe arrives
-    /// rather than appears. Distance is left to the two mechanisms that were always better placed
-    /// to judge it: the kernel, which weights by fragment distance, and `probe_weight`.
+    /// rather than appears. Which probe a fragment reads is the shader's: the fixed spots its own
+    /// cell names.
     fn reach_target(&self) -> f32 {
         f32::from(self.captured && !self.retire)
     }
@@ -424,22 +302,9 @@ fn wow_xy(p: Vec2) -> (f32, f32) {
     (-p.y, -p.x)
 }
 
-/// How far from [`PROBE_AT`], horizontally, the probe's weight reaches zero — in yards.
-const PROBE_FADE_YD: f32 = 150.0;
-
-/// How far above or below the probe's own height its weight reaches zero — in yards.
-///
-/// **Much tighter than the horizontal reach, and the module doc says why**: the bodies stacked
-/// around this lake are separated by tens of yards vertically and a few hundred horizontally, so
-/// height is the axis that actually distinguishes them. A stream sixty yards up must not read the
-/// lake's cube.
-///
-/// Measured from the CAPTURE point, which [`PROBE_LIFT`] puts twelve yards above the water — so
-/// this has to clear the lift and still exclude the stream. At 26 the falloff has not begun by the
-/// time it reaches the surface twelve yards below (it starts at half the reach), the second pool
-/// seven yards up is comfortably inside, and the stream forty-eight yards further up is outside it
-/// entirely. Shrink the lift and this shrinks with it; they are one number in two halves.
-const PROBE_FADE_UP: f32 = 26.0;
+/// How far around the spot being captured the capture cull admits scenery, in yards
+/// ([`ProbeCull::radius`]): one reach for every spot.
+const PROBE_CULL_YD: f32 = 205.0;
 
 /// How often the cube is re-captured, in seconds.
 ///
@@ -680,13 +545,11 @@ pub(crate) struct WaterProbe {
 
 /// Copy the slot list into [`ProbeMarks`]. Its own system rather than a tail on `drive_probe`,
 /// which returns early on several paths and would leave the overlay showing the frame before.
-/// A cell placement wants: where its probe stands, and its proxy box.
+/// A cell placement wants: where its probe stands.
 #[derive(Clone, Copy, Debug)]
 struct Wanted {
     cell: IVec2,
     at: Vec3,
-    lo: Vec3,
-    hi: Vec3,
 }
 
 /// Which slot to capture next, **double-buffered**: a wanted cell with no cube is captured into a
@@ -780,8 +643,6 @@ fn next_capture(
     let s = &mut slots[i];
     s.want = Some(next.cell);
     s.want_at = next.at;
-    s.want_box_min = next.lo;
-    s.want_box_max = next.hi;
     Some(i)
 }
 
@@ -1007,7 +868,8 @@ fn face_image() -> Image {
     image
 }
 
-/// Spawn the six capture cameras, inactive, aimed at the probe's six faces.
+/// Spawn the six capture cameras, inactive, aimed at the probe's six faces. They stand nowhere
+/// until [`drive_probe`] seats them on a spot's capture point, before a burst renders.
 ///
 /// They share the mirror's view-key shape for the same reason the mirror has one: a second view
 /// needs its pipelines to match something, and `Msaa::Off` + `Hdr` + `Tonemapping::None` with no
@@ -1037,8 +899,7 @@ fn setup_probe(mut commands: Commands, mut images: ResMut<Assets<Image>>, probe:
                     is_active: false,
                     ..default()
                 },
-                Transform::from_translation(PROBE_AT + Vec3::Y * PROBE_LIFT)
-                    .looking_to(Vec3::from_array(*look), Vec3::from_array(*up)),
+                Transform::IDENTITY.looking_to(Vec3::from_array(*look), Vec3::from_array(*up)),
             ))
             // Overridden AFTER the bundle rather than inside it: `mirror_view_shape` already carries a
             // `Camera3d`, and a tuple bundle holding the same component twice panics on spawn.
@@ -1054,70 +915,10 @@ fn setup_probe(mut commands: Commands, mut images: ResMut<Assets<Image>>, probe:
     }
 }
 
-/// Run the capture a face at a time, and publish the probe's lanes.
-///
-/// **One face per frame, not six.** Six extra views in one frame is a visible hitch on the frame the
-/// player walks into range, and the cube is a picture of a static world — there is nothing to
-/// synchronise, so spreading it costs only that the first few frames sample an incomplete cube,
-/// which the strength lane holds at zero until it is whole.
-/// The projection box for the water under the probe, in Bevy world yards.
-///
-/// Unions the footprints of every liquid chunk whose box lies within the probe's horizontal reach,
-/// so the walls land on the shoreline of the body the probe is standing in. WoW XY maps to Bevy XZ
-/// with both axes negated and swapped (`benilla_assets::coords::wow_to_bevy` is `(-y, z, -x)`),
-/// which is why a WoW x-range becomes a Bevy z-range here.
-fn derive_box(chunks: &Query<&super::WaterChunkInfo>, at: Vec3) -> Option<(Vec3, Vec3)> {
-    let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
-    let mut any = false;
-    let reach = box_reach();
-    let (mut seen, mut bounded, mut near, mut nearest) = (0usize, 0usize, 0usize, f32::MAX);
-    for info in chunks {
-        seen += 1;
-        let Some([[min_x, min_y], [max_x, max_y]]) = info.xy_bounds() else {
-            continue;
-        };
-        bounded += 1;
-        // WoW (x, y) -> Bevy (x = -y, z = -x), so each range flips and swaps axis.
-        let b_lo = Vec2::new(-max_y, -max_x);
-        let b_hi = Vec2::new(-min_y, -min_x);
-        let centre = (b_lo + b_hi) * 0.5;
-        let d = centre.distance(Vec2::new(at.x, at.z));
-        nearest = nearest.min(d);
-        if d > box_reach() {
-            continue;
-        }
-        near += 1;
-        lo = lo.min(b_lo);
-        hi = hi.max(b_hi);
-        any = true;
-    }
-    if std::env::var("WOW_PROBE_TRACE").as_deref() == Ok("1") {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static TICK: AtomicU32 = AtomicU32::new(0);
-        let t = TICK.fetch_add(1, Ordering::Relaxed);
-        if t.is_multiple_of(120) {
-            warn!(
-                "derive_box: {seen} chunks seen, {bounded} with bounds, {near} within {reach} yd                  of the probe; nearest centre {nearest:.1} yd; probe at ({}, {})",
-                at.x, at.z
-            );
-        }
-    }
-    any.then(|| {
-        // Out past the shoreline, so the walls stand where the TREES do — see [`PROBE_BOX_OUT`].
-        let out = Vec2::splat(PROBE_BOX_OUT);
-        let (lo, hi) = (lo - out, hi + out);
-        (
-            Vec3::new(lo.x, at.y - PROBE_BOX_DOWN, lo.y),
-            Vec3::new(hi.x, at.y + PROBE_BOX_UP, hi.y),
-        )
-    })
-}
-
 /// Aim the probes at the map's fixed spots nearest the player (`benilla_formats::PlanarMap`), each
 /// serving its own region, and put them to sleep while none is near.
 fn place_probes(
     style: Res<WaterStyle>,
-    chunks: Query<&super::WaterChunkInfo>,
     maps: Query<&super::WaterMapRef>,
     eye: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
     viewer: Res<crate::view::Viewer>,
@@ -1150,25 +951,15 @@ fn place_probes(
     probe.wanted = near
         .into_iter()
         .take(probe_slots().saturating_sub(1).max(1))
-        .map(|(id, water)| {
-            let at = water + Vec3::Y * PROBE_LIFT;
-            let (lo, hi) = derive_box(&chunks, at).unwrap_or((
-                at - Vec3::splat(PROBE_BOX_FALLBACK),
-                at + Vec3::splat(PROBE_BOX_FALLBACK),
-            ));
-            Wanted {
-                cell: spot_key(id),
-                at,
-                lo,
-                hi,
-            }
+        .map(|(id, water)| Wanted {
+            cell: spot_key(id),
+            at: water + Vec3::Y * PROBE_LIFT,
         })
         .collect();
 }
 
-/// On the planar lane the probe wakes when probe water comes this near the player, in yards:
-/// past [`PROBE_FADE_YD`], where its weight on the water reaches zero, by the ground a flying
-/// mount covers while the probe warms up, so a cube is ready before any water can show it.
+/// On the planar lane the probe wakes when probe water comes this near the player, in yards, so a
+/// cube is ready before that water is near enough to show it.
 const PROBE_WAKE_YD: f32 = 200.0;
 
 /// …and sleeps again only past this, so standing at the edge does not toggle it.
@@ -1182,11 +973,6 @@ fn wake_reach(awake: bool) -> f32 {
     } else {
         PROBE_WAKE_YD
     }
-}
-
-/// The planar lane binds its probes to the map's fixed spots (`benilla_formats::PlanarMap`).
-pub(crate) fn probes_bound(style: WaterStyle) -> bool {
-    style == WaterStyle::Stylised
 }
 
 /// A fixed spot's slot key: its id in `x`, and a `y` no lattice cell reaches.
@@ -1317,7 +1103,7 @@ pub(super) fn drive_probe(
         // Arm the cull a frame BEFORE the faces render, so the burst never captures a world with
         // no trees in it. Around the TARGET, which is where the cameras are about to look.
         cull.at = probe.slots[next].want_at;
-        cull.radius = PROBE_FADE_YD + PROBE_BOX_UP;
+        cull.radius = PROBE_CULL_YD;
         cull.hold = PROBE_BURST + 4;
         cull.active = true;
         return;
@@ -1326,7 +1112,7 @@ pub(super) fn drive_probe(
     let at = probe.slots[slot].want_at;
     // Re-arm every frame of the capture, so the hold always outruns it.
     cull.at = at;
-    cull.radius = PROBE_FADE_YD + PROBE_BOX_UP;
+    cull.radius = PROBE_CULL_YD;
     cull.hold = PROBE_BURST + 4;
     cull.active = true;
 
@@ -1365,14 +1151,12 @@ pub(super) fn drive_probe(
         );
     }
     // **Promote target to resident in one step**, on the same frame the blit writes the layers.
-    // Cube contents, capture point and proxy change together or not at all; a slot is never showing
-    // one place's cube through another place's projection.
+    // Cube contents and capture point change together or not at all; a slot is never showing one
+    // place's cube through another place's projection.
     {
         let sl = &mut probe.slots[slot];
         sl.cell = sl.want;
         sl.at = sl.want_at;
-        sl.box_min = sl.want_box_min;
-        sl.box_max = sl.want_box_max;
         sl.captured = true;
         sl.dirty = false;
         sl.retire = false;
@@ -1754,21 +1538,14 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
             for (i, slot) in p.slots.iter().enumerate() {
                 let Some(cell) = slot.cell else { continue };
                 warn!(
-                    "probe slot {i}: cell {:?} at {:?} half-extent {:?} yd | captured {} dirty {} \
-                     reach {:.3}",
-                    cell,
-                    slot.at,
-                    (slot.box_max - slot.box_min) * 0.5,
-                    slot.captured,
-                    slot.dirty,
-                    slot.reach,
+                    "probe slot {i}: cell {:?} at {:?} | captured {} dirty {} reach {:.3}",
+                    cell, slot.at, slot.captured, slot.dirty, slot.reach,
                 );
             }
         }
     }
     (
-        // The CAPTURE point, not the water anchor: a cubemap's directions are only meaningful about
-        // the place it was taken from, so the box projection has to subtract THIS position.
+        // `xyz` spare: each slot carries its own capture point (see [`probe_slot_lanes`]).
         //
         // `w` marks the lane as **reflection-only** — and it is now OFF by default, because the
         // reason for it has expired.
@@ -1784,18 +1561,18 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
         // +0.312 against the shore and -0.210 against the shore flipped. So the tier goes back to
         // being water: Fresnel, body and depth tint like every other tier.
         [
-            PROBE_AT.x,
-            PROBE_AT.y + PROBE_LIFT,
-            PROBE_AT.z,
+            0.0,
+            0.0,
+            0.0,
             f32::from(probe.is_some_and(|p| p.armed) && probe_raw()),
         ],
         // A pure gate now: the look knob is a Fresnel boost two rows down, because scaling the
         // tier's own weight could not make it more visible — it already owns the composited
-        // reflection outright wherever it contributes.
+        // reflection outright wherever it contributes. `y` and `z` spare.
         [
             f32::from(live),
-            PROBE_FADE_YD,
-            PROBE_FADE_UP,
+            0.0,
+            0.0,
             // The debug lane is a small enum, not a flag: 0 = off, 1 = this tier's own sample,
             // 2 = the whole composited reflection. Two switches would have wanted two lanes, and
             // this row has no spare.
@@ -1809,14 +1586,9 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
                 f32::from(probe_show())
             },
         ],
-        // **These two rows are `w` carriers now and nothing else.** The proxy box moved onto the
-        // slots, where it belongs — every probe needs its own, because a box fitted to one capture
-        // point's surroundings says nothing about another's. The `xyz` here would be a box for a
-        // probe that no longer exists, so it is written as zero rather than left looking meaningful.
-        //
-        // `w` carries the surface ripple scale — see [`ripple_scale`].
         // `x` = the slot every fragment is pinned to (-1: none); `y` the angle a mip-0 texel subtends,
-        // `z` the blur floor — both read by `liquid.wgsl`'s `probe_lod`; `w` the ripple scale.
+        // `z` the blur floor — both read by `liquid.wgsl`'s `probe_lod`; `w` the ripple scale (see
+        // [`ripple_scale`]).
         [
             probe_force(),
             core::f32::consts::FRAC_PI_2 / PROBE_FACE as f32,
@@ -1824,7 +1596,7 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
             ripple_scale(),
         ],
         // `x` = the probe tier's Fresnel boost; `y` the tap count; `z` the deepest mip the water
-        // may read; `w` spare. The sphere radius is per-slot — see [`probe_slot_lanes`].
+        // may read; `w` spare.
         [
             probe_strength(),
             probe_taps(),
@@ -1889,21 +1661,14 @@ pub(crate) fn probe_slot_lanes(probe: Option<&WaterProbe>) -> [f32; PROBE_SLOT_M
         if !slot.captured || slot.reach <= 0.001 {
             continue;
         }
-        // Scale the proxy about THIS probe's capture point, which is what its projection rebases
-        // onto — see [`box_scale`], which is 1.0 and a diagnostic.
-        let k = box_scale();
-        let (lo, hi) = (
-            slot.at + (slot.box_min - slot.at) * k,
-            slot.at + (slot.box_max - slot.at) * k,
-        );
         let k = i * 16;
         // `w` is the fade, not a flag: the shader weights the probe by it, so a slot on its way
         // somewhere else leaves the picture smoothly instead of vanishing on one frame.
         // `at.w` is REACH — has a cube, and how far it carries — which is what makes a slot
-        // eligible at all. `box_min.w` is its share of the blend — see [`ProbeSlot::mix`].
+        // eligible at all. `box_min.w` is its share of the blend — see [`ProbeSlot::mix`]; the
+        // rest of `box_min` and all of `box_max` are spare.
         out[k..k + 4].copy_from_slice(&[slot.at.x, slot.at.y, slot.at.z, slot.reach]);
-        out[k + 4..k + 8].copy_from_slice(&[lo.x, lo.y, lo.z, slot.mix]);
-        out[k + 8..k + 12].copy_from_slice(&[hi.x, hi.y, hi.z, probe_sphere()]);
+        out[k + 7] = slot.mix;
         // The fixed spot this slot holds — see [`spot_key`].
         out[k + 12] = slot.cell.and_then(spot_of).map_or(-1.0, |id| id as f32);
     }
@@ -2064,8 +1829,6 @@ mod tests {
         let wanted = [Wanted {
             cell: new,
             at: Vec3::new(12.0, 0.0, 0.0),
-            lo: Vec3::ZERO,
-            hi: Vec3::ZERO,
         }];
 
         let mut slots = vec![showing, ProbeSlot::default()];

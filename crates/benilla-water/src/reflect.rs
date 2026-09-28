@@ -230,8 +230,8 @@ pub(crate) struct WaterReflect {
 /// per-frame scalar. They are written unconditionally — the water's glitter needs them on exactly
 /// the frames the reflection is off.
 #[derive(Resource, Clone, Copy, ExtractResource)]
-/// The reflection row block: 48 floats of shared lanes, then three `vec4`s per probe slot
-/// (capture point + validity, proxy box minimum, proxy box maximum) for
+/// The reflection row block: 48 floats of shared lanes, then four `vec4`s per probe slot
+/// (capture point + validity, blend share in `w`, a spare row, the fixed spot) for
 /// [`probe::PROBE_SLOT_MAX`] slots, then the sky dome's seven rows ([`DOME_LANES`]). The slot block
 /// is sized to the CEILING rather than to `probe_slots()`, because the shader's array length is
 /// fixed at compile time and the unused tail simply carries a zero validity flag.
@@ -1141,8 +1141,8 @@ pub(super) fn drive_reflection(
     // default, on Improved Water only.
     let ssr_on = f32::from(style.is_stylised() && dev.water.ssr);
     data.0[24..28].copy_from_slice(&[reflect_blur(), 0.0, ssr_on, 0.0]);
-    // The probe's own two rows (`liquid::probe`) — centre + proxy radius, then strength, the two
-    // falloff reaches and its debug switch. Written here rather than by the probe itself because
+    // The probe's own rows (`probe::probe_lanes`) — the reflection-only switch, then strength and
+    // its debug switch, then its look knobs. Written here rather than by the probe itself because
     // this buffer has ONE writer; a second system reaching into it is how two tiers end up
     // disagreeing about which frame they are on.
     let (probe_at, probe_cfg, box_min, box_max) = super::probe::probe_lanes(probe.as_deref());
@@ -1155,7 +1155,8 @@ pub(super) fn drive_reflection(
         super::probe::probe_normal(),
         // y = which slot the lat-long debug unwraps.
         super::probe::probe_debug_slot(),
-        // z = use the cube's stored distances rather than the analytic proxy; w = its step count.
+        // z = march the cube's stored distances (2) or run the fixed point (1); w = the fixed
+        // point's step count.
         super::probe::probe_depth_proxy(),
         super::probe::probe_march_steps(),
     ]);
@@ -1166,8 +1167,8 @@ pub(super) fn drive_reflection(
         f32::from(pass_behind()),
         ripple_origin(),
         probe_soft(),
-        // The probes stand on the map's fixed spots, each fragment reading its own region's.
-        f32::from(super::probe::probes_bound(*style)),
+        // `w` spare.
+        0.0,
     ]);
     let mut dome = crate::sky::dome_uniforms(&light);
     dome[6].z = f32::from(sky_read_snapshot());

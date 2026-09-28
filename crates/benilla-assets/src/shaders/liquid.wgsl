@@ -84,21 +84,17 @@ const PROBE_TAPS_MAX: i32 = 3;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var wake_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var wake_samp: sampler;
 
-// One cubemap reflection probe: where its cube was taken from, and the proxy the parallax
-// correction intersects against.
-//
-// **Every probe carries its own box.** A box-projected cube is exact only where its proxy wall
-// coincides with real geometry, so a proxy fitted to one probe's surroundings is meaningless at
-// another's; sharing one box between probes would reintroduce the error the probes exist to remove.
+// One cubemap reflection probe: where its cube was taken from, its share of the blend, and the
+// fixed spot it holds. The parallax correction marches the cube's own stored distances.
 struct ProbeSlot {
     // xyz = the capture point in world yards; w = 1 when this slot holds a cube FOR ITS CURRENT
     // CELL. Zero while it is being filled, and zero the moment it is reassigned — a cube of
     // somewhere else is still a plausible reflection, which is exactly why the check has to be
     // structural rather than something the eye is trusted to catch.
     at: vec4<f32>,
-    // w spare.
+    // w = this slot's share of the blend (`probe::ProbeSlot::mix`); xyz spare.
     box_min: vec4<f32>,
-    // w = the sphere proxy's radius, 0 meaning "use the box".
+    // Spare.
     box_max: vec4<f32>,
     // x = the fixed probe spot this slot holds (`benilla_formats::PlanarMap`), -1 for none; yzw
     // spare.
@@ -223,20 +219,20 @@ struct WaterReflect {
     /// gate the shader actually reads is `z`. The row is full at four lanes and the params buffer
     /// is sized to it, so a dead lane is the cheapest place for the blur to live.
     flags: vec4<f32>,
-    // The cubemap probe (`benilla_world::liquid::probe`): xyz = the probe's world position, w = the
-    // radius of the sphere proxy its parallax correction intersects against.
+    // The cubemap probe (`benilla_water`'s `probe::probe_lanes`): xyz spare, the capture points
+    // are per-slot in `probes`; w = draw the probe tier's reflection alone.
     probe_at: vec4<f32>,
-    // x = strength (0 until every face has been captured, and on the reference lane); y = the
-    // horizontal reach its weight fades out over; z = the VERTICAL reach, which is much tighter and
-    // is what stops a stream sixty yards uphill reading a lake's cube; w = the probe debug view.
+    // x = strength (0 until every face has been captured, and on the reference lane); y/z spare;
+    // w = the probe debug view.
     probe_cfg: vec4<f32>,
-    // The projection box in world yards, `w` unused on both. Its walls are the water body's own
-    // footprint and its ceiling is authored — see `liquid::probe`'s `PROBE_BOX_UP`.
-    // `probe_box_min.w` is the surface ripple scale. `probe_box_max.x` is the probe tier's Fresnel
-    // boost; the proxy boxes themselves are per-slot and live in `probes`.
+    // `probe_box_min`: x = the slot every fragment is pinned to (-1: none), y = the angle a mip-0
+    // texel subtends, z = the blur floor, w = the surface ripple scale. `probe_box_max`: x = the
+    // probe tier's Fresnel boost, y = the tap count, z = the deepest mip, w spare.
     probe_box_min: vec4<f32>,
     probe_box_max: vec4<f32>,
-    // x = how much of the water's ripple the CUBE lookup sees; y/z/w spare.
+    // x = how much of the water's ripple the CUBE lookup sees; y = the slot the lat-long debug
+    // unwraps; z = march the cube's stored distances (2) or run the fixed point (1); w = the fixed
+    // point's steps.
     probe_extra: vec4<f32>,
     // One entry per probe slot — see `liquid::probe::probe_slot_lanes`. Fixed at PROBE_SLOT_MAX
     // rather than at the live count, because a WGSL array length is a compile-time constant; the
@@ -249,8 +245,8 @@ struct WaterReflect {
     dome: DomeColors,
     // The march's own switches. `x` = rays may pass BEHIND a tile once they are behind the
     // thickness slab of its farthest surface (see
-    // [`ssr_trace`]); `y` = the ripple's shift of the ray origin; `z` = the probe's softening; `w` = 1
-    // when the probes stand on fixed spots and each fragment reads its own region's (the planar lane).
+    // [`ssr_trace`]); `y` = the ripple's shift of the ray origin; `z` = the probe's softening; `w`
+    // spare.
     march: vec4<f32>,
     // The second planar mirror: the same four as `params` (plane, strength, distortion,
     // tolerance), zero while it is off.
@@ -997,64 +993,6 @@ fn foam_noise(p: vec2<f32>, t: f32, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise
     return out;
 }
 
-/// The probe's lookup direction, **box-projected** — the whole of what makes a cubemap anchored to
-/// the water worth more than one anchored to the eye.
-///
-/// A cube is a picture taken from ONE point, so reading it in the raw reflected direction is right
-/// only for a fragment standing at that point; everywhere else the reflection slides as the camera
-/// moves. The correction decides where the ray would actually LAND and looks up the direction from
-/// the probe to that landing instead.
-///
-/// **Against a box, not a sphere, and that is the difference between this working and not.** This
-/// is Unity's box projection and Unreal's box capture, and the rule both state is that the proxy
-/// has to match where the reflected scenery stands, because the scene is reprojected onto it. A
-/// lake is a floor with walls: bank at the shoreline in every direction, sky overhead. A box has
-/// that shape, so a shallow ray meets a WALL and finds the bank and its trees while a steep one
-/// meets the CEILING and finds sky. A sphere curves away uniformly — at any radius big enough to
-/// clear the near bank it also arcs over the far treeline — so every lookup landed in open sky and
-/// the tier returned a blue wash at 110 yards and again at 45.
-///
-/// The arithmetic is the standard one: for each axis, how far along the ray the relevant face lies;
-/// the smallest of the three is the face actually hit; then rebase onto the probe.
-fn probe_dir(p: vec3<f32>, d: vec3<f32>, centre: vec3<f32>, lo: vec3<f32>, hi: vec3<f32>) -> vec3<f32> {
-    // A zero component gives an infinite factor, which `min` discards — that axis is never hit.
-    let factors = (select(lo, hi, d > vec3<f32>(0.0)) - p) / d;
-    let scalar = min(min(factors.x, factors.y), factors.z);
-    return d * scalar + (p - centre);
-}
-
-/// The same correction against a **sphere** — the environment painted on a shell at one distance,
-/// with the water showing that shell's inside.
-///
-/// Where the box assumes flat walls at a different distance per bearing, this assumes one distance
-/// in every direction, which is the better fit when a body of water is ringed at a roughly even
-/// remove. The far root is the one wanted: a reflection looks at what the ray meets on its way OUT
-/// of the shell, and the near root lies behind the fragment.
-fn probe_dir_sphere(p: vec3<f32>, d: vec3<f32>, centre: vec3<f32>, radius: f32) -> vec3<f32> {
-    let oc = p - centre;
-    let b = dot(oc, d);
-    let c = dot(oc, oc) - radius * radius;
-    let disc = b * b - c;
-    if (disc <= 0.0) {
-        return d;
-    }
-    let t = -b + sqrt(disc);
-    if (t <= 0.0) {
-        return d;
-    }
-    return p + d * t - centre;
-}
-
-/// How much this fragment believes the probe, by where it stands — **in three dimensions**.
-///
-/// The horizontal term is the obvious one: a cube of this lake should not be reflecting in the next
-/// valley. The vertical term is the one that matters, and it is much tighter. Water bodies stack:
-/// the box around this probe holds a lake, a second pool seven yards up and a stream running sixty
-/// to eighty above that. They are tens of yards apart in height and hundreds in plan, so height is
-/// the axis that actually tells them apart. Without this term one probe reproduces the "cube of a
-/// pond behind a bank" failure on its own, with no second probe and no selector required — and it
-/// does so invisibly, because a cube of somewhere else is still a plausible reflection.
-
 /// One probe's contribution: correct the reflected direction against THAT probe's proxy, then read
 /// its own slice of the cube array. `idx` is the slot, which is also the array index — the capture
 /// writes six layers starting at `slot * 6`, and a cube-array lookup addresses them as one cube.
@@ -1185,19 +1123,13 @@ fn probe_lod(d_probe: f32, d_geom: f32) -> f32 {
 }
 
 fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32) -> vec3<f32> {
-    // `probe_extra.z` picks the proxy: the depth correction by default, the old analytic shapes
-    // so the two can be compared in one build rather than across two.
+    // `probe_extra.z` picks the correction against the cube's stored distances: the march by
+    // default, the fixed point otherwise.
     var dir: vec3<f32>;
     if (water_reflect.probe_extra.z > 1.5) {
         dir = probe_dir_march(p, r, sl.at.xyz, idx);
-    } else if (water_reflect.probe_extra.z > 0.5) {
-        dir = probe_dir_depth(p, r, sl.at.xyz, idx, steps);
     } else {
-        dir = select(
-            probe_dir(p, r, sl.at.xyz, sl.box_min.xyz, sl.box_max.xyz),
-            probe_dir_sphere(p, r, sl.at.xyz, sl.box_max.w),
-            sl.box_max.w > 0.5,
-        );
+        dir = probe_dir_depth(p, r, sl.at.xyz, idx, steps);
     }
     // Level 0 for the DISTANCE and a chosen level for the colour. The chain's alpha carries the
     // centre tap's distance rather than a blurred one, but reading it at level 0 keeps the geometry
@@ -1221,13 +1153,6 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir + t2, idx, lod).rgb;
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t2, idx, lod).rgb;
     return sum * 0.2;
-}
-
-fn probe_weight(p: vec3<f32>, centre: vec3<f32>, reach: f32, lift: f32) -> f32 {
-    let flat = length(p.xz - centre.xz);
-    let rise = abs(p.y - centre.y);
-    return (1.0 - smoothstep(reach * 0.6, reach, flat))
-        * (1.0 - smoothstep(lift * 0.5, lift, rise));
 }
 
 // ---- lava ------------------------------------------------------------------------------------
@@ -1946,13 +1871,8 @@ fn stylised_water(
     //
     // The strength lane is zero until every face has been captured, so the frames while the six
     // cameras take their turns show the sky mix rather than a half-built cube.
-    // **Pick the nearest few live probes.** Not a convenience: a box-projected cube's error is
-    // identically zero at its own capture point — there the ray-box hit rebased onto the centre
-    // collapses to the true reflected direction, whatever the proxy is — and grows with the
-    // distance from it. So "which probe" IS the error bound, and nearest is the whole reason there
-    // is more than one.
     //
-    // **Considering a probe is free; SAMPLING one is not.** The loop below is distance arithmetic
+    // **Considering a probe is free; SAMPLING one is not.** The loop below is weight arithmetic
     // over every slot and costs no memory traffic, while each tap is a colour fetch plus its depth
     // march — five cube reads at the default march depth. That is why the answer to "how many
     // probes blend" is "look at all of them, read the best few": `PROBE_TAPS + 1` are tracked, the
@@ -1965,14 +1885,11 @@ fn stylised_water(
         1,
         forced >= 0,
     );
-    // **Ranked by weight, not by distance.** A probe's weight is its availability over its
-    // distance, and the taps are the heaviest few; the next one is the cutoff each tap's weight is
-    // measured above. A probe fading in starts at weight zero, so it cannot push a contributing
-    // probe out of the taps, and it takes a tap only at the weight of the probe it replaces, which
-    // is where both sit at zero above the cutoff. Ranked by distance, a probe arriving at nearly
-    // zero strength displaced a contributing one on its first frame, and the water blinked.
-    // `march.w`: the probes stand on fixed spots and each fragment reads its own.
-    let bound = water_reflect.march.w > 0.5;
+    // **Ranked by weight.** A probe's weight is its availability times the share this fragment's
+    // cell gives its spot, and the taps are the heaviest few; the next one is the cutoff each tap's
+    // weight is measured above. A probe fading in starts at weight zero, so it cannot push a
+    // contributing probe out of the taps, and it takes a tap only at the weight of the probe it
+    // replaces, which is where both sit at zero above the cutoff.
     var idx = array<i32, 4>(-1, -1, -1, -1);
     var wt = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
     for (var i = 0; i < PROBE_SLOT_MAX; i = i + 1) {
@@ -1980,18 +1897,13 @@ fn stylised_water(
         if (sl.at.w <= 0.0 || (forced >= 0 && i != forced)) {
             continue;
         }
-        // Horizontal distance: probes stand on the water they answer for, so the vertical component
-        // is noise from the lift.
+        // The probes stand on the map's fixed spots: a fragment reads only its own region's probes,
+        // by the share its cell gives each — never the nearest probe of some other water.
         // Availability times share (`box_min.w`, 1 except in the live probe's crossfade).
-        var u = sl.at.w * sl.box_min.w / max(distance(world_pos.xz, sl.at.xz), 1e-4);
-        // Bound to fixed spots (the planar lane): a fragment reads only its own region's probes, by
-        // the share its cell gives each — never the nearest probe of some other water.
-        if (bound) {
-            let id = sl.bind.x;
-            let own = select(0.0, 1.0 - planar.w, abs(id - planar.y) < 0.5)
-                + select(0.0, planar.w, abs(id - planar.z) < 0.5);
-            u = sl.at.w * sl.box_min.w * own;
-        }
+        let id = sl.bind.x;
+        let own = select(0.0, 1.0 - planar.w, abs(id - planar.y) < 0.5)
+            + select(0.0, planar.w, abs(id - planar.z) < 0.5);
+        let u = sl.at.w * sl.box_min.w * own;
         // Insertion into the short list, heaviest first, shifting the tail down.
         for (var k = 0; k <= taps; k = k + 1) {
             if (u > wt[k]) {
@@ -2029,10 +1941,11 @@ fn stylised_water(
         // is off by the slope, and the reflected ray twice that.
         let r = reflect(-to_view, flat_n);
         let probe_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
-        // The tier's strength is the weighted mean, over the taps, of each probe's availability
-        // and its own distance falloff (`probe_weight`), so it does not depend on which tap ranks
-        // first. The taps are blended by weight and nothing cleverer: the probe is a soft term
-        // under the screen-space march, not an attempt to place reflections exactly.
+        // The tier's strength is the weighted mean, over the taps, of each probe's availability, so
+        // it does not depend on which tap ranks first. A probe serves its whole region, so it does
+        // not fade with distance from it. The taps are blended by weight and nothing cleverer: the
+        // probe is a soft term under the screen-space march, not an attempt to place reflections
+        // exactly.
         var strength = 0.0;
         for (var k = 0; k < taps; k = k + 1) {
             if (w[k] <= 0.0) {
@@ -2040,18 +1953,7 @@ fn stylised_water(
             }
             let sl = water_reflect.probes[idx[k]];
             let share = w[k] / wsum;
-            // A bound probe serves its whole region, so it does not fade with distance from it.
-            let falloff = select(
-                probe_weight(
-                    world_pos,
-                    sl.at.xyz,
-                    water_reflect.probe_cfg.y,
-                    water_reflect.probe_cfg.z,
-                ),
-                1.0,
-                bound,
-            );
-            strength = strength + share * sl.at.w * falloff;
+            strength = strength + share * sl.at.w;
             probe_rgb = probe_rgb
                 + sample_probe(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w)) * share;
         }
