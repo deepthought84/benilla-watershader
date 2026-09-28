@@ -178,8 +178,12 @@ pub const MARCH_LANES: std::ops::Range<usize> = DOME_LANES.end..DOME_LANES.end +
 /// The second mirror's row: plane, strength, distortion, tolerance — the same four as the first
 /// mirror's `params`, zero while it is off.
 pub const MIRROR2_LANES: std::ops::Range<usize> = MARCH_LANES.end..MARCH_LANES.end + 4;
+/// The stylised water's clock, every phase already reduced by its own period: eight map offsets
+/// (the five ripple octaves, then the shore bubbles' three reads) and a row of cycles (flow
+/// restart, shore swell) — the shader's `WaterReflect::drift` and `cycle`.
+pub const CLOCK_LANES: std::ops::Range<usize> = MIRROR2_LANES.end..MIRROR2_LANES.end + 20;
 /// The reflection block's length in floats — `liquid.wgsl`'s `WaterReflect`.
-pub const REFLECT_FLOATS: usize = MIRROR2_LANES.end;
+pub const REFLECT_FLOATS: usize = CLOCK_LANES.end;
 
 /// The pass targets and the reflection block every liquid material binds. The reference water
 /// never samples them; the Improved Water plugin publishes its own in [`WaterPassSet`], and

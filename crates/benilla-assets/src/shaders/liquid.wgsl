@@ -251,6 +251,12 @@ struct WaterReflect {
     // The second planar mirror: the same four as `params` (plane, strength, distortion,
     // tolerance), zero while it is off.
     mirror2: vec4<f32>,
+    // The stylised surface's clock (`benilla_water`'s `clock`): every phase reduced by its own
+    // period on the CPU, so none jumps when `globals.time` wraps at the hour. The map offsets, in
+    // tiles: the five ripple octaves longest first, then the shore bubbles' warp and two octaves.
+    drift: array<vec2<f32>, 8>,
+    // x = the flow restart phase, y = the shore swell's, as fractions of their periods; zw spare.
+    cycle: vec4<f32>,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> water_reflect: WaterReflect;
@@ -324,6 +330,8 @@ fn sun_sheen(world_normal: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     return wow_light.light_spec.rgb * pow(ndoth, max(w.kind.w, 1.0));
 }
 
+// The authored sheet's clock (flip, scroll) and the magma grade's; the stylised water runs on
+// `water_reflect.drift` and `cycle` instead.
 fn anim_time() -> f32 {
     return w.anim.w * globals.time;
 }
@@ -409,8 +417,8 @@ const FOAM_EDGE_WARP: f32 = 0.22;
 /// How far past the line the bubbles carry before there is only water, in yards.
 const FOAM_BUBBLE_YARDS: f32 = 0.62;
 
-/// **The swell** — how far the waterline runs up and back down the shore, in yards, and how long
-/// one breath of it takes, in seconds.
+/// **The swell** — how far the waterline runs up and back down the shore, in yards; one breath of it
+/// takes the clock's `SHORE_SWELL_S` (`water_reflect.cycle.y`).
 ///
 /// The band was fixed in world space, which is the one thing a shoreline never is: the water's edge
 /// is the most obviously *still* part of a frame that is otherwise moving. Advancing and retreating
@@ -420,7 +428,6 @@ const FOAM_BUBBLE_YARDS: f32 = 0.62;
 /// Deliberately small against the band's own width: this is a swell lapping, not a tide coming in.
 const TAU: f32 = 6.2831855;
 const SHORE_RUNUP_YARDS: f32 = 0.16;
-const SHORE_SWELL_SECS: f32 = 5.5;
 
 /// How far apart two stretches of coast are before they breathe out of step, in yards. Without this
 /// every shoreline on the map advances and retreats in unison, which reads as the whole world
@@ -751,14 +758,14 @@ const WAKE_BODY_DEPTH: f32 = 0.22;
 /// there would light every wave as though its crests ran at an angle to the wave itself.
 fn ripple_layer(
     world_xz: vec2<f32>,
-    drift: vec2<f32>,
+    // The layer's drift so far, in map tiles (`water_reflect.drift`).
+    offset: vec2<f32>,
     inv_wavelength: f32,
     weight: f32,
-    t: f32,
     rot: vec2<f32>,
 ) -> vec2<f32> {
     let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
-    let uv = (r * world_xz) * inv_wavelength + drift * t;
+    let uv = (r * world_xz) * inv_wavelength + offset;
     // **Fade the octave out once a pixel covers more than a texel of it.**
     //
     // This is the Nyquist limit, not a taste setting. A layer whose texels are smaller than the
@@ -953,14 +960,14 @@ struct FoamNoise {
     fw: f32,
 }
 
-fn foam_noise(p: vec2<f32>, t: f32, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
+fn foam_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
     // cos/sin of ~33.9 degrees — a turn that is not a neat fraction of one.
     let rot = vec2<f32>(0.8305, 0.5570);
     let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
     let warp = textureSampleGrad(
         ripples,
         ripples_samp,
-        p * 0.031 + vec2<f32>(0.004, -0.003) * t,
+        p * 0.031 + water_reflect.drift[5],
         ddx * 0.031,
         ddy * 0.031,
     ).rg * 2.0 - 1.0;
@@ -969,7 +976,7 @@ fn foam_noise(p: vec2<f32>, t: f32, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise
     let a = textureSampleGrad(
         ripples,
         ripples_samp,
-        p * 0.83 + warp * 0.35 + vec2<f32>(0.010, 0.014) * t,
+        p * 0.83 + warp * 0.35 + water_reflect.drift[6],
         a_dx,
         a_dy,
     );
@@ -978,7 +985,7 @@ fn foam_noise(p: vec2<f32>, t: f32, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise
     let b = textureSampleGrad(
         ripples,
         ripples_samp,
-        (r * p) * 1.97 + warp * 0.20 + vec2<f32>(-0.021, 0.008) * t,
+        (r * p) * 1.97 + warp * 0.20 + water_reflect.drift[7],
         b_dx,
         b_dy,
     );
@@ -1601,26 +1608,24 @@ const FLOW_PERIOD_S: f32 = 1.6;
 /// [`ripple_layer`], carried along `flow` (world XZ yards a second).
 fn ripple_flowing(
     world_xz: vec2<f32>,
-    drift: vec2<f32>,
+    offset: vec2<f32>,
     inv_wavelength: f32,
     weight: f32,
-    t: f32,
     rot: vec2<f32>,
     flow: vec2<f32>,
 ) -> vec2<f32> {
-    let ph0 = fract(t / FLOW_PERIOD_S);
+    let ph0 = water_reflect.cycle.x;
     let ph1 = fract(ph0 + 0.5);
     let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
     // The second phase reads another stretch of the map, or the two restarts would show one
     // pattern pulsing; scaled by the current, so still water keeps its one pattern.
     let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) / inv_wavelength;
-    let a = ripple_layer(world_xz - flow * ph0 * FLOW_PERIOD_S, drift, inv_wavelength, weight, t, rot);
+    let a = ripple_layer(world_xz - flow * ph0 * FLOW_PERIOD_S, offset, inv_wavelength, weight, rot);
     let b = ripple_layer(
         world_xz - flow * ph1 * FLOW_PERIOD_S + apart,
-        drift,
+        offset,
         inv_wavelength,
         weight,
-        t,
         rot,
     );
     return a * w0 + b * (1.0 - w0);
@@ -1652,7 +1657,6 @@ fn stylised_water(
     lit: vec3<f32>,
     room_fog: u32,
 ) -> vec4<f32> {
-    let t = anim_time();
     let xz = world_pos.xz;
     // In uniform control flow, before anything branches — see [`surface_tilt`].
     let tilt = surface_tilt(world_pos);
@@ -1681,13 +1685,12 @@ fn stylised_water(
     // The drifts on the two longest layers are the other half of that: at the old rates the far
     // water moved a third of a yard a second, which over a horizon-sized wave is no motion at all.
     let slope =
-        ripple_layer(xz, vec2<f32>(0.012, 0.007), inv_tile / 9.2, 0.85, t, vec2<f32>(1.0, 0.0))
+        ripple_layer(xz, water_reflect.drift[0], inv_tile / 9.2, 0.85, vec2<f32>(1.0, 0.0))
         + ripple_layer(
             xz,
-            vec2<f32>(0.016, 0.021),
+            water_reflect.drift[1],
             inv_tile / 3.4,
             1.00,
-            t,
             vec2<f32>(0.8572, 0.5150),
         )
         // The two middle layers are what the broken highlight is MADE of: at twelve and at
@@ -1695,19 +1698,17 @@ fn stylised_water(
         // reference's sun column, so lifting them is what turns a smooth sheet into a mottle.
         + ripple_flowing(
             xz,
-            vec2<f32>(-0.021, 0.010),
+            water_reflect.drift[2],
             inv_tile,
             1.00,
-            t,
             vec2<f32>(0.4540, 0.8910),
             flow,
         )
         + ripple_flowing(
             xz,
-            vec2<f32>(0.014, -0.026),
+            water_reflect.drift[3],
             inv_tile / 0.30,
             0.70,
-            t,
             vec2<f32>(-0.2924, 0.9563),
             flow,
         )
@@ -1715,10 +1716,9 @@ fn stylised_water(
         // crinkle under a tight highlight is the texture of oil on water.
         + ripple_flowing(
             xz,
-            vec2<f32>(0.041, 0.033),
+            water_reflect.drift[4],
             inv_tile / 0.12,
             0.20,
-            t,
             vec2<f32>(-0.8572, 0.5150),
             flow,
         );
@@ -2259,7 +2259,7 @@ fn stylised_water(
             d_xz_dx / SHORE_SWELL_SPREAD,
             d_xz_dy / SHORE_SWELL_SPREAD,
         ).b * TAU;
-        let swell = sin(t * (TAU / SHORE_SWELL_SECS) + swell_phase);
+        let swell = sin(TAU * water_reflect.cycle.y + swell_phase);
         let edge = (FOAM_LINE_YARDS + SHORE_RUNUP_YARDS * swell) * (1.0 + FOAM_EDGE_WARP * warp);
         line = 1.0 - smoothstep(edge - aa, edge + aa, to_shore);
 
@@ -2271,7 +2271,7 @@ fn stylised_water(
         // Fine on purpose: the band is barely a yard, so the flecks have to be a good deal smaller
         // than that or only one spans it and the break-up never reads as bubbles at all — and
         // non-repeating, which at that size the map is not on its own (see [`foam_noise`]).
-        let raw = foam_noise(xz, t, d_xz_dx, d_xz_dy);
+        let raw = foam_noise(xz, d_xz_dx, d_xz_dy);
         // Spread before cutting. The map's height channel is a sum of Perlin octaves normalised on
         // its single largest texel, so its values crowd hard around 0.5 and only the extremes ever
         // approach 0 or 1 (`benilla_world::liquid::ripple`). Cut at a threshold sweeping the whole

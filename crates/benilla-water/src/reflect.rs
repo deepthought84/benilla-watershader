@@ -53,8 +53,8 @@ use super::WaterStyle;
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_world::liquid::{
-    mirror_view_shape, ReflectionCamera, DOME_LANES, MARCH_LANES, MIRROR2_LANES, PROBE_LANES,
-    REFLECT_FLOATS,
+    mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, MARCH_LANES, MIRROR2_LANES,
+    PROBE_LANES, REFLECT_FLOATS,
 };
 
 /// How far from the eye a water surface may be and still be the **fallback** plane — the "water
@@ -232,7 +232,8 @@ pub(crate) struct WaterReflect {
 #[derive(Resource, Clone, Copy, ExtractResource)]
 /// The reflection row block: 48 floats of shared lanes, then four `vec4`s per probe slot
 /// (capture point + validity, blend share in `w`, a spare row, the fixed spot) for
-/// [`probe::PROBE_SLOT_MAX`] slots, then the sky dome's seven rows ([`DOME_LANES`]). The slot block
+/// [`probe::PROBE_SLOT_MAX`] slots, then the sky dome's seven rows ([`DOME_LANES`]), the march's
+/// and the second mirror's rows, and the surface's clock ([`CLOCK_LANES`]). The slot block
 /// is sized to the CEILING rather than to `probe_slots()`, because the shader's array length is
 /// fixed at compile time and the unused tail simply carries a zero validity flag.
 pub(crate) struct WaterReflectData(pub(crate) [f32; REFLECT_FLOATS]);
@@ -1124,7 +1125,7 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    time: Res<Time>,
+    (time, clock): (Res<Time>, Res<super::clock::WaterClock>),
     world_cam: Query<(&GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut mirror: MirrorCamera,
     probe: Option<Res<super::probe::WaterProbe>>,
@@ -1180,6 +1181,8 @@ pub(super) fn drive_reflection(
     let (zenith, horizon) = (light.sky[0], light.sky[4]);
     data.0[8..12].copy_from_slice(&[zenith[0], zenith[1], zenith[2], 0.0]);
     data.0[12..16].copy_from_slice(&[horizon[0], horizon[1], horizon[2], 0.0]);
+    // The surface's phases, each reduced by its own period ([`super::clock`]).
+    data.0[CLOCK_LANES].copy_from_slice(&clock.lanes());
     let mut first = None;
     let mut second_cam = None;
     for (tf, cam, proj, target, which) in mirror.iter_mut() {
@@ -1399,6 +1402,21 @@ mod tests {
         assert!(
             march < mirror2,
             "the second mirror's row comes after the march row"
+        );
+        // The clock: eight `vec2` offsets (stride 8 in a storage buffer), then one `vec4` of cycles.
+        assert_eq!(CLOCK_LANES.start, MIRROR2_LANES.end);
+        assert_eq!(CLOCK_LANES.len(), 8 * 2 + 4);
+        assert_eq!(REFLECT_FLOATS, CLOCK_LANES.end);
+        let drift = body.find("drift: array<vec2<f32>, 8>").unwrap();
+        let cycle = body.find("cycle: vec4<f32>").unwrap();
+        assert!(
+            mirror2 < drift && drift < cycle,
+            "the clock's offsets, then its cycles, come after the second mirror's row"
+        );
+        assert_eq!(
+            body[cycle..].trim_end(),
+            "cycle: vec4<f32>,",
+            "the clock's cycles are the struct's last member"
         );
     }
 

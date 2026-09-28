@@ -2,8 +2,9 @@
 //! (`benilla_world::liquid::hooks`): the whole-map classification of which water the planar
 //! mirrors serve and where the fixed cube probes stand (`liquid_planar`, cached by `water_map`),
 //! the two planar mirrors (`reflect`), the probes (`probe`), the depth pyramid and scene colour
-//! the screen-space march reads (`depth`, `hiz`, `scene_color`) and the wave simulation
-//! (`ripple_sim`). The surface shading is `liquid.wgsl`'s stylised lane, in the engine.
+//! the screen-space march reads (`depth`, `hiz`, `scene_color`), the wave simulation
+//! (`ripple_sim`) and the surface's clock (`clock`). The surface shading is `liquid.wgsl`'s stylised
+//! lane, in the engine.
 //!
 //! Every pass is inert on the reference lane (`WaterStyle::Reference`); the plugin only makes
 //! the Improved Water option draw what it names.
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
+mod clock;
 mod depth;
 mod flow;
 mod hiz;
@@ -49,8 +51,9 @@ impl Plugin for ImprovedWaterPlugin {
         bevy::asset::embedded_asset!(app, "shaders/probe_face.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/probe_filter.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/hiz_reduce.wgsl");
-        // The mirrors' block and targets, then the wave simulation, the depth passes and the
-        // probes, each inert unless the Improved Water look is selected.
+        // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
+        // passes and the probes, each pass inert unless the Improved Water look is selected.
+        clock::register(app);
         reflect::register(app);
         ripple_sim::register(app);
         hiz::register(app);
