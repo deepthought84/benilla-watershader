@@ -36,6 +36,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::prelude::*;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
@@ -169,11 +170,17 @@ impl Node for WaterSceneColorNode {
         if main.width() != gpu.size.width || main.height() != gpu.size.height {
             return Ok(());
         }
-        render_context.command_encoder().copy_texture_to_texture(
+        // `render/water_snapshot` on Vulkan and DX12: the perf journal's `gpu_water`. A copy has
+        // no pass, so the span brackets it on the encoder.
+        let diagnostics = render_context.diagnostic_recorder();
+        let encoder = render_context.command_encoder();
+        let timed = diagnostics.time_span(encoder, "water_snapshot");
+        encoder.copy_texture_to_texture(
             main.as_image_copy(),
             gpu.texture.as_image_copy(),
             gpu.size,
         );
+        timed.end(encoder);
         Ok(())
     }
 }

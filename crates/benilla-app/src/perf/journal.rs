@@ -7,7 +7,8 @@
 //! The GPU columns read bevy's per-pass render diagnostics, which exist only where the device
 //! has `TIMESTAMP_QUERY_INSIDE_PASSES` (Vulkan and DX12, never an Apple GPU); elsewhere the cells
 //! stay empty, not zero. `gpu_ms` is the sum of every pass, and an unnamed pass lands in
-//! `gpu_other`.
+//! `gpu_other`. `gpu_water` is the Improved Water passes outside the transparent pass (`water_*`:
+//! the depth pyramid and the colour snapshot); the water's own shading is in `gpu_transp`.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -32,7 +33,7 @@ pub(crate) struct FpsJournalSetting(pub(crate) bool);
 const JOURNAL_HEADER: &str = "t,x,y,z,mean_ms,p95_ms,streamed,entities,cpu_ms,mats,meshes,images,\
                               m2,uv,tint,pmat,emat,skin,cmat,tex,cgeo,evicted,fx,fy,fz,main_ms,\
                               gpu_ms,gpu_opaque,gpu_static,gpu_transp,gpu_glow,gpu_post,gpu_ui,\
-                              gpu_other\n";
+                              gpu_other,gpu_water\n";
 
 /// The `fpsJournal` change callback: a flag, int-parsed and `!= 0`.
 pub(crate) fn on_cvar(
@@ -103,9 +104,12 @@ enum GpuBucket {
     Ui,
     /// Every span this file does not name, counted, never dropped.
     Other,
+    /// Improved Water's own passes (`water_*`): the depth pyramid's seed and reduce, the colour
+    /// snapshot.
+    Water,
 }
 
-const GPU_BUCKETS: usize = 7;
+const GPU_BUCKETS: usize = 8;
 
 /// Which column a diagnostics path lands in; `None` for anything but a top-level GPU span (a
 /// nested span's parent already carries it).
@@ -119,6 +123,7 @@ fn gpu_bucket(path: &str) -> Option<GpuBucket> {
         "static_gx" => GpuBucket::Static,
         "main_transparent_pass_3d" | "main_transmissive_pass_3d" => GpuBucket::Transparent,
         p if p.starts_with("ffx_glow") => GpuBucket::Glow,
+        p if p.starts_with("water_") => GpuBucket::Water,
         "tonemapping" | "upscaling" | "msaa_writeback" | "postprocessing" => GpuBucket::Post,
         "main_opaque_pass_2d" | "main_transparent_pass_2d" | "ui" | "ui_gamma_decode" => {
             GpuBucket::Ui
@@ -423,6 +428,9 @@ mod tests {
         assert_eq!(b("render/ui/elapsed_gpu"), Some(Ui));
         assert_eq!(b("render/ui_gamma_decode/elapsed_gpu"), Some(Ui));
         assert_eq!(b("render/main_transparent_pass_2d/elapsed_gpu"), Some(Ui));
+        assert_eq!(b("render/water_hiz_seed/elapsed_gpu"), Some(Water));
+        assert_eq!(b("render/water_hiz_reduce/elapsed_gpu"), Some(Water));
+        assert_eq!(b("render/water_snapshot/elapsed_gpu"), Some(Water));
         assert_eq!(
             b("render/early_mesh_preprocessing/elapsed_gpu"),
             Some(Other)
@@ -482,9 +490,9 @@ mod tests {
         assert_eq!(acc.frames, 2);
         let cols = acc.columns();
         // gpu_ms = (2 + 3 + 0.8 + 4) / 2; opaque (2 + 4) / 2; static 3 / 2; post 0.8 / 2.
-        assert_eq!(cols, ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00");
+        assert_eq!(cols, ",4.90,3.00,1.50,0.00,0.00,0.40,0.00,0.00,0.00");
         // The reset: a second with nothing read writes empty cells, one per column.
-        assert_eq!(acc.columns(), ",,,,,,,,");
+        assert_eq!(acc.columns(), ",,,,,,,,,");
         // And a later frame is still read after the reset.
         push(
             &mut store,
@@ -493,7 +501,10 @@ mod tests {
             1.0,
         );
         acc.fold(&store);
-        assert_eq!(acc.columns(), ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00");
+        assert_eq!(
+            acc.columns(),
+            ",1.00,1.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00"
+        );
     }
 
     #[test]
@@ -510,7 +521,8 @@ mod tests {
                 "gpu_glow",
                 "gpu_post",
                 "gpu_ui",
-                "gpu_other"
+                "gpu_other",
+                "gpu_water"
             ]
         );
         // An empty second writes exactly one cell per GPU column.

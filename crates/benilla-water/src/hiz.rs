@@ -42,6 +42,7 @@ use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::core_pipeline::FullscreenShader;
 use bevy::prelude::*;
 use bevy::render::camera::ExtractedCamera;
+use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
@@ -542,6 +543,10 @@ impl Node for WaterHizNode {
             )
         };
 
+        // `render/water_hiz_seed` and `render/water_hiz_reduce` (one per level, summed) on Vulkan
+        // and DX12: the perf journal's `gpu_water`.
+        let diagnostics = render_context.diagnostic_recorder();
+
         // Mip 0 of both pyramids and the linear depth, one compute pass over the pyramid's texels.
         let dst0 = level_view(0);
         let (layout, source) = if samples > 1 {
@@ -568,9 +573,11 @@ impl Node for WaterHizNode {
                         label: Some("hiz_seed"),
                         timestamp_writes: None,
                     });
+            let timed = diagnostics.pass_span(&mut pass, "water_hiz_seed");
             pass.set_pipeline(seed_pipeline);
             pass.set_bind_group(0, &seed_bind, &[]);
             pass.dispatch_workgroups(p.dst_size.x.div_ceil(8), p.dst_size.y.div_ceil(8), 1);
+            timed.end(&mut pass);
         }
 
         let pass = |ctx: &mut RenderContext,
@@ -595,9 +602,11 @@ impl Node for WaterHizNode {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            let timed = diagnostics.pass_span(&mut p, "water_hiz_reduce");
             p.set_render_pipeline(pipeline);
             p.set_bind_group(0, bind, &[]);
             p.draw(0..3, 0..1);
+            timed.end(&mut p);
         };
 
         // **Top down, and it cannot be reordered**: each level reads the one above it.
