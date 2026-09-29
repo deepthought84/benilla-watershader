@@ -30,8 +30,8 @@ def noisy(rgb, sd=4.0, seed=1, w=W, h=H):
     return np.clip(flat(rgb, w, h) + rng.normal(0, sd, (h, w, 1)), 0, 255).astype(np.float32)
 
 
-def banded_column(push, edge, h=900):
-    """Y along a column of the albedo view: a linear ramp through ART-2's three bands,
+def banded_column(push, edge, h=900, span=180.0):
+    """Y along a column of the albedo view: a linear ramp through the body's three bands,
     xb = mix(x, band_soft(x), push), with
     band_soft = (floor(3x) + smoothstep(.5 − e, .5 + e, fract(3x))) / 3."""
     x = np.linspace(0.0, 1.0, h, endpoint=False)
@@ -43,11 +43,19 @@ def banded_column(push, edge, h=900):
     else:
         s = (f >= 0.5).astype(np.float64)
     xb = (1 - push) * x + push * (np.floor(y) + s) / 3.0
-    return 40.0 + 180.0 * xb
+    return 40.0 + span * xb
 
 
 def view_of(column, w=8):
     return np.repeat(np.repeat(column[:, None, None], w, axis=1), 3, axis=2).astype(np.float32)
+
+
+def png(a):
+    """An image through an 8-bit PNG and back, as a capture reaches the metrics."""
+    buf = io.BytesIO()
+    Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8)).save(buf, "PNG")
+    buf.seek(0)
+    return wm.load_rgb(buf)
 
 
 def hsv_patch(h_deg, s, v):
@@ -57,20 +65,47 @@ def hsv_patch(h_deg, s, v):
 
 
 class BandStep(unittest.TestCase):
+    """Each case as float codes and through an 8-bit PNG, the way a capture arrives."""
+
+    box = [0, 0, 8, 900]
+
     def test_a_hard_band_scores_infinity(self):
         v = view_of(banded_column(0.5, 0.0))
-        self.assertTrue(math.isinf(wm.band_step(v, [0, 0, 8, 900])["value"]))
+        for img in (v, png(v)):
+            r = wm.band_step(img, self.box)
+            self.assertTrue(math.isinf(r["value"]))
+            self.assertEqual(r["row"], 150)  # fract(3x) crosses 0.5 at x = 1/6
 
     def test_a_soft_band_scores_its_analytic_slope(self):
-        # Push 0.5, edge 0.22: max slope 0.5 + 0.5 · 1.5 / 0.44 = 2.2045 times the ramp's.
+        # Push 0.5, edge 0.22: max slope 0.5 + 0.5 · 1.5 / 0.44 = 2.2045 times the ramp's; the
+        # 40-row window rounds the smoothstep's peak off by about 1.5%.
         v = view_of(banded_column(0.5, 0.22))
-        r = wm.band_step(v, [0, 0, 8, 900])["value"]
-        self.assertAlmostEqual(r, 2.2045, delta=0.02)
-        self.assertTrue(wm.judge(r, wm.ROWS["band_step"].gate))
+        for img in (v, png(v)):
+            r = wm.band_step(img, self.box)["value"]
+            self.assertAlmostEqual(r, 2.2045, delta=0.05)
+            self.assertTrue(wm.judge(r, wm.ROWS["band_step"].gate))
 
     def test_an_unbanded_ramp_scores_one(self):
-        v = view_of(banded_column(0.0, 0.22))
-        self.assertAlmostEqual(wm.band_step(v, [0, 0, 8, 900])["value"], 1.0, delta=0.01)
+        for col in (banded_column(0.0, 0.22), banded_column(0.0, 0.22, h=400, span=60.0)):
+            v = view_of(col)
+            for img in (v, png(v)):
+                r = wm.band_step(img, [0, 0, 8, len(col)])["value"]
+                self.assertAlmostEqual(r, 1.0, delta=0.02)
+
+    def test_a_silhouette_in_the_box_is_not_water(self):
+        # A rock over one band's span of water, in the view and the still alike: only the still's
+        # mask keeps its edge from reading as a hard band.
+        view = view_of(banded_column(0.5, 0.22), w=40)
+        still = view * 0.6  # the lit water: ≥ 16 codes off the view everywhere
+        view[300:600, 10:30] = still[300:600, 10:30] = [30, 40, 20]
+        view, still = png(view), png(still)
+        box = [0, 0, 40, 900]
+        self.assertTrue(math.isinf(wm.band_step(view, box)["value"]))
+        r = wm.band_step(view, box, still=still)["value"]
+        self.assertAlmostEqual(r, 2.2045, delta=0.05)
+
+    def test_a_flat_view_has_no_ramp_to_band(self):
+        self.assertIsNone(wm.band_step(flat([90, 120, 130]), [0, 0, W, H])["value"])
 
 
 class DeepWater(unittest.TestCase):
@@ -330,6 +365,31 @@ max = 1.0
                 rc = wm.main([str(d), "--regions", str(regions), "--baseline", str(out)])
             self.assertEqual(rc, 0)
             self.assertNotIn("WORSE", printed.getvalue())
+
+    def test_band_step_reads_the_albedo_capture_over_the_stills_water(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-band.toml").write_text(
+                """[[row]]
+metric = "band_step"
+box = [0, 0, 40, 900]
+[[row]]
+metric = "band_step"
+label = "unmasked"
+box = [0, 0, 40, 900]
+still = false
+"""
+            )
+            view = view_of(banded_column(0.5, 0.22), w=40)
+            still = view * 0.6
+            view[300:600, 10:30] = still[300:600, 10:30] = [30, 40, 20]
+            Image.fromarray(np.rint(view).astype(np.uint8)).save(d / "wg-band@albedo.png")
+            Image.fromarray(np.rint(still).astype(np.uint8)).save(d / "wg-band.png")
+            res = wm.measure(d, d, ["wg-band"])["wg-band"]
+            self.assertAlmostEqual(res["band_step"]["value"], 2.2045, delta=0.05)
+            self.assertTrue(res["band_step"]["pass"])
+            self.assertTrue(math.isinf(res["unmasked"]["value"]))
+            self.assertFalse(res["unmasked"]["pass"])
 
     def test_every_row_has_a_definition_and_a_direction_or_none(self):
         for name, row in wm.ROWS.items():

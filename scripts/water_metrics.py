@@ -420,23 +420,56 @@ def deep_chroma(img, box, transmittance=None, fog=None):
     return {"value": chroma(c), "rgb": [round(float(v), 1) for v in c]}
 
 
-def band_step(view, box):
-    """Soft bands, on the albedo view: per column, the steepest |∂Y/∂y| over the column's mean
-    |∂Y/∂y| (its unbanded ramp); the max over columns. Analytic 2.2 for 3 bands at push 0.5,
-    edge 0.22; a hard band, a one-pixel step no neighbour shares, is ∞. Pass ≤ 3."""
+def water_mask(view, still, thr=3.0, erode=2):
+    """Water pixels of a full frame: where a WATER_VIEW capture differs from the final still by
+    more than `thr` codes in some channel (a view repaints water only), eroded by `erode` px so
+    the pixels a silhouette's edge mixes with water drop out."""
+    m = np.abs(view[..., :3] - still[..., :3]).max(axis=-1) > thr
+    return box_mean(m, erode) > 1.0 - 1e-9 if erode > 0 else m
+
+
+def ls_slopes(y: np.ndarray, w: int) -> np.ndarray:
+    """Least-squares slope of y over every run of w consecutive samples."""
+    k = np.arange(w) - (w - 1) / 2.0
+    return np.convolve(y, (k / (k @ k))[::-1], mode="valid")
+
+
+def band_step(view, box, still=None, window=None, hard=4.0):
+    """Soft bands, on the albedo view, over water: the steepest least-squares slope of luma down
+    a column over `window` rows, over the box's mean |∂Y/∂y| on water (its unbanded ramp). The
+    window defaults to the rows that mean slope takes to climb 8 codes (4 to 128), so 8-bit steps
+    average out; a column's run of water rows shorter than 2 windows + 3 rows is skipped. Water is
+    where the view differs from `still` (the final frame; water_mask), else the whole box.
+    Analytic 2.2 for 3 bands at push 0.5, edge 0.22, 1 unbanded. A hard band is ∞: a rise within
+    2 rows of ≥ `hard` codes and over 4 times what the window above or below climbs in 2 rows,
+    plus a code per end for rounding. Pass ≤ 3."""
     Y = crop(luma(view), box).astype(np.float64)
-    g = np.abs(np.diff(Y, axis=0))
-    worst = 0.0
-    for col in g.T:
-        mean = col.mean()
-        if mean <= 1e-9:
-            continue
-        k = int(np.argmax(col))
-        nb = max(col[k - 1] if k > 0 else 0.0, col[k + 1] if k + 1 < len(col) else 0.0)
-        if col[k] > 4 * mean and nb < 0.25 * col[k]:
-            return {"value": math.inf, "column": None}
-        worst = max(worst, float(col[k] / mean))
-    return {"value": worst}
+    m = crop(water_mask(view, still), box) if still is not None else np.ones(Y.shape, dtype=bool)
+    both = m[1:] & m[:-1]
+    d = np.abs(np.diff(Y, axis=0))
+    mean = float(d[both].mean()) if both.any() else 0.0
+    if mean <= 0:
+        return {"value": None, "window": None, "runs": 0}
+    w = int(window) if window else int(np.clip(math.ceil(8.0 / mean), 4, 128))
+    worst, runs = 0.0, 0
+    for c in range(Y.shape[1]):
+        edges = np.flatnonzero(np.diff(np.concatenate([[0], m[:, c].astype(np.int8), [0]])))
+        for a, b in zip(edges[::2], edges[1::2]):
+            y = Y[a:b, c]
+            n = len(y)
+            if n < 2 * w + 3:
+                continue
+            i = np.arange(w, n - w - 2)
+            rise = np.abs(y[i + 2] - y[i])
+            around = np.maximum(np.abs(y[i] - y[i - w]), np.abs(y[i + 2 + w] - y[i + 2])) / w
+            jump = (rise >= hard) & (rise > 2.0 + 4.0 * 2.0 * around)
+            if jump.any():
+                k = int(i[np.argmax(jump)])
+                at = int(box[1] + a + k + 1 + np.argmax(np.abs(np.diff(y[k : k + 3]))))
+                return {"value": math.inf, "column": int(box[0]) + c, "row": at, "window": w}
+            worst = max(worst, float(np.abs(ls_slopes(y, w)).max()))
+            runs += 1
+    return {"value": worst / mean if runs else None, "window": w, "runs": runs}
 
 
 def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=None):
@@ -692,7 +725,9 @@ def halo_count(img, box, thr=12.0):
 # applied unless a region row overrides it.
 #
 # needs: what each argument is read from, as (kind, argument, default name, required):
-#   ("still", arg)                 the lane's still        ("ref", "ref")   the Reference twin
+#   ("still", arg[, required])     the lane's still; optional (False) is skipped when absent or
+#                                  when the region row sets `arg = false`
+#   ("ref", "ref")                 the Reference twin
 #   ("burst", mode)                the lane's burst, or a view's (row parameter `view`), cropped
 #                                  to `box` as luma ("luma") or RGB ("rgb"), or whole ("full")
 #   ("times",) / ("poses",)        the burst's clock (the log, else `every` steps of 1/60 s) / poses
@@ -735,7 +770,12 @@ ROWS: dict[str, Row] = {
     ),
     "deep_luma": Row(deep_luma, STILL + DEEP_VIEWS, "higher", slack=3.0),
     "deep_chroma": Row(deep_chroma, STILL + DEEP_VIEWS, "higher", factor=0.8),
-    "band_step": Row(band_step, [("view", "view", "albedo", True)], "lower", {"max": 3.0}),
+    "band_step": Row(
+        band_step,
+        [("view", "view", "albedo", True), ("still", "still", False)],
+        "lower",
+        {"max": 3.0},
+    ),
     "shade_ratio": Row(
         shade_ratio,
         STILL + [("view", "in_scatter", "in_scatter", False)],
@@ -877,8 +917,13 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
     for need in row.needs:
         kind = need[0]
         if kind == "still":
-            args[need[1]] = scene.image(base)
-            if args[need[1]] is None:
+            arg, required = need[1], need[2] if len(need) > 2 else True
+            if not required and params.pop(arg, None) is False:
+                continue
+            img = scene.image(base)
+            if img is not None:
+                args[arg] = img
+            elif required:
                 missing.append(f"{scene.name}{base}.png")
         elif kind == "ref":
             args["ref"] = scene.image("-ref")
