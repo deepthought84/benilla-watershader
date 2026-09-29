@@ -935,6 +935,7 @@ pub(super) fn setup_liquid(
     config: Option<Res<RenderConfig>>,
     world_assets: Option<ResMut<WorldAssets>>,
     style: Res<WaterStyle>,
+    caps: Res<super::WaterPipelineCaps>,
     pass: Option<Res<super::WaterPassImages>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
@@ -942,6 +943,7 @@ pub(super) fn setup_liquid(
     let (Some(_config), Some(mut world_assets), Some(pass)) = (config, world_assets, pass) else {
         return; // no client data → no terrain, so no water either
     };
+    let (style_flag, style_bits) = style_lanes(*style, *caps);
     // Light, fog and the water swatches come off the shared global-light buffer, as for terrain.
     let mut assets = LiquidAssets::default();
     // The stylised look's ripple map: ONE generated 256² texture, shared by every liquid material
@@ -1022,12 +1024,13 @@ pub(super) fn setup_liquid(
                         WATER_SHININESS,
                     ),
                     // Which of the reference's three liquid renderers `liquid.wgsl` runs; the
-                    // stylised lane (rewritten by [`apply_water_style`]); magma rather than slime.
+                    // stylised lane and its pipeline variants (both rewritten by
+                    // [`apply_water_style`]); magma rather than slime.
                     path: Vec4::new(
                         path.shader_id(),
-                        style.shader_flag(),
+                        style_flag,
                         if kind == LiquidKind::Magma { 1.0 } else { 0.0 },
-                        0.0,
+                        style_bits,
                     ),
                     // x reserved; y = frame count; z = scroll; w = clock enable (0 on a
                     // deterministic run: frame 0, scroll 0).
@@ -1060,15 +1063,28 @@ pub(super) fn setup_liquid(
     commands.insert_resource(assets);
 }
 
-/// Push the current [`WaterStyle`] onto every liquid material's `path.y`: a uniform write, not a
-/// rebuild, change-gated on the resource.
+/// The `path.y` and `path.w` lanes for a look: the stylised flag, and the pipeline variant bits on
+/// the stylised lane only (0 on the reference lane, whose pipeline has no variants).
+fn style_lanes(style: WaterStyle, caps: super::WaterPipelineCaps) -> (f32, f32) {
+    let bits = if style.is_stylised() {
+        caps.bits() as f32
+    } else {
+        0.0
+    };
+    (style.shader_flag(), bits)
+}
+
+/// Push the current [`WaterStyle`] and [`super::WaterPipelineCaps`] onto every liquid material's
+/// `path.y` and `path.w`: a uniform write, not a rebuild, change-gated on both resources.
 pub(super) fn apply_water_style(
     style: Res<WaterStyle>,
+    caps: Res<super::WaterPipelineCaps>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
 ) {
-    let flag = style.shader_flag();
+    let (flag, bits) = style_lanes(*style, *caps);
     for (_, material) in materials.iter_mut() {
         material.extension.path.y = flag;
+        material.extension.path.w = bits;
     }
 }
 

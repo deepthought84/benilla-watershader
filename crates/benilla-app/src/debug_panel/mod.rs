@@ -639,6 +639,20 @@ fn debug_panel_ui(
                             ui.checkbox(&mut wa.probe_world, "probes in the world");
                             ui.checkbox(&mut wa.probe_off, "probe off");
                             ui.checkbox(&mut wa.ssr, "screen-space reflection");
+                            // The debug views: a pipeline variant, compiled on first use.
+                            use benilla_world::dev_state::WATER_VIEWS;
+                            egui::ComboBox::from_label("debug view")
+                                .selected_text(
+                                    WATER_VIEWS
+                                        .get(usize::from(wa.view))
+                                        .copied()
+                                        .unwrap_or("?"),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (id, name) in (0u8..).zip(WATER_VIEWS) {
+                                        ui.selectable_value(&mut wa.view, id, name);
+                                    }
+                                });
                         });
                 });
 

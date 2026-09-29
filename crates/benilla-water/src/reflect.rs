@@ -1136,12 +1136,14 @@ pub(super) fn drive_reflection(
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();
     data.0[20..24].copy_from_slice(&[to_moon.x, to_moon.y, to_moon.z, moon_visible.0]);
-    // The flag row: `x` the mirror capture's blur radius in capture texels, `y` a debug view of the
-    // march (off), `z` the march's strength, `w` the old layered composite (off).
+    // The flag row: `x` the mirror capture's blur radius in capture texels, `y` the debug view
+    // (`WaterDebug::view`, read only by the `WATER_VIEW` variant), `z` the march's strength, `w`
+    // the old layered composite (off).
     // `z` = the march's own strength: the debug panel's "screen-space reflection", off by
     // default, on Improved Water only.
     let ssr_on = f32::from(style.is_stylised() && dev.water.ssr);
-    data.0[24..28].copy_from_slice(&[reflect_blur(), 0.0, ssr_on, 0.0]);
+    let view = f32::from(dev.water.view);
+    data.0[24..28].copy_from_slice(&[reflect_blur(), view, ssr_on, 0.0]);
     // The probe's own rows (`probe::probe_lanes`) — the reflection-only switch, then strength and
     // its debug switch, then its look knobs. Written here rather than by the probe itself because
     // this buffer has ONE writer; a second system reaching into it is how two tiers end up

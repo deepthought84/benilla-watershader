@@ -377,9 +377,67 @@ impl MaterialExtension for WdlExt {
 /// `ocean0_s.bls` combine), WMO exterior and interior water, and magma and slime.
 pub type LiquidMaterial = ExtendedMaterial<StandardMaterial, LiquidExt>;
 
+/// The liquid pipeline key: what a material's own lanes say its pipeline must compile, read from the
+/// lanes the shader branches on, so the key and the branch never disagree. Zero on the reference
+/// lane; magma and slime are [`Self::FULLBRIGHT`] on both lanes.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default, Debug)]
+pub struct LiquidKey(u16);
+
+impl LiquidKey {
+    /// `path.y > 0.5`: the stylised lane.
+    pub const STYLISED: u16 = 1 << 0;
+    /// `kind.x > 0.5`: magma and slime, whose sheet is the body.
+    pub const FULLBRIGHT: u16 = 1 << 1;
+    /// `WATER_VIEW`, the debug views: `path.w` bit 0.
+    pub const VIEW: u16 = 1 << 2;
+    /// `path.w` holds the key's cap bits shifted down by this.
+    pub const CAPS_SHIFT: u16 = 2;
+    /// The key bits `path.w` may set.
+    pub const CAPS_MASK: u16 = 0x3FC;
+
+    /// The key of a material with these `kind` and `path` lanes. Magma and slime return
+    /// [`Self::FULLBRIGHT`] before any other lane is read, so both lanes share their pipeline.
+    pub fn from_lanes(kind: Vec4, path: Vec4) -> Self {
+        if kind.x > 0.5 {
+            return Self(Self::FULLBRIGHT);
+        }
+        if path.y <= 0.5 {
+            return Self(0);
+        }
+        let caps = (path.w.max(0.0) as u32 as u16) << Self::CAPS_SHIFT;
+        Self(Self::STYLISED | (caps & Self::CAPS_MASK))
+    }
+
+    /// Stylised water, not magma or slime: the only pipelines an Improved Water def reaches.
+    pub fn composite(self) -> bool {
+        self.0 & (Self::STYLISED | Self::FULLBRIGHT) == Self::STYLISED
+    }
+
+    /// Whether the key carries `bit`.
+    pub fn has(self, bit: u16) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key.
+    pub fn frag_defs(self) -> Vec<&'static str> {
+        let mut defs = Vec::new();
+        if self.composite() && self.has(Self::VIEW) {
+            defs.push("WATER_VIEW");
+        }
+        defs
+    }
+}
+
+impl From<&LiquidExt> for LiquidKey {
+    fn from(e: &LiquidExt) -> Self {
+        Self::from_lanes(e.kind, e.path)
+    }
+}
+
 /// Liquid inputs: the animated frames and the per-material lanes; all light comes off the shared
 /// global light. The `Vec4` uniforms pack into binding 102, in the WGSL struct's field order.
 #[derive(Asset, AsBindGroup, Clone, TypePath)]
+#[bind_group_data(LiquidKey)]
 pub struct LiquidExt {
     /// The kind's animated frames (`lake_a`, `fast_a`, `ocean_h`): RGB near-black, alpha ripple.
     #[texture(100, dimension = "2d_array", visibility(fragment))]
@@ -433,7 +491,9 @@ pub struct LiquidExt {
     /// `x` = the renderer (`liquid::surface::LiquidPath`): `0` ADT MCLQ, `1` WMO exterior, `2` WMO
     /// interior.
     /// `y` = the stylised look (`benilla_world::liquid::WaterStyle`), rewritten on toggle. `z` =
-    /// magma rather than slime, read by the stylised lane only.
+    /// magma rather than slime, read by the stylised lane only. `w` = the stylised pipeline's
+    /// variant bits (`benilla_world::liquid::WaterPipelineCaps::bits`, [`LiquidKey`]), 0 on the
+    /// reference lane.
     #[uniform(102)]
     pub path: Vec4,
     /// `y` = frame count, `z` = scroll flag, `w` = clock enable.
@@ -522,15 +582,22 @@ impl MaterialExtension for LiquidExt {
     /// `sky_order::WATER_BIAS` (−2e4) is a sort rung, kept out of the rasterizer: as a depth-bias
     /// constant it would move the waterline, by an amount that doubles at every float exponent
     /// boundary, so neighbouring triangles' shorelines would disagree.
+    ///
+    /// The [`LiquidKey`] defs go to the fragment stage before the attribute check returns: WMO
+    /// liquid and the warm quads carry none of those attributes and take the defs all the same.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialExtensionKey<Self>,
+        key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         // Clear the depth bias that StandardMaterial would have added
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.bias.constant = 0;
+        }
+        if let Some(f) = descriptor.fragment.as_mut() {
+            f.shader_defs
+                .extend(key.bind_group_data.frag_defs().into_iter().map(Into::into));
         }
 
         // Our own attributes, where the mesh carries them, each behind its shader def.
@@ -1502,5 +1569,49 @@ mod tests {
         );
         // The tail and the shortfall are deep-end only.
         assert_eq!(at(0), shallow, "row 0 is the shallow endpoint verbatim");
+    }
+
+    /// The liquid key reads the lanes the shader branches on: magma and slime are fullbright
+    /// whatever their other lanes say, the reference lane is zero, and a stylised material
+    /// carries its `path.w` bits.
+    #[test]
+    fn the_liquid_key_follows_the_lanes() {
+        use super::LiquidKey;
+        use bevy::math::Vec4;
+        let key = |fullbright: f32, stylised: f32, caps: f32| {
+            LiquidKey::from_lanes(
+                Vec4::new(fullbright, 0.0, 0.0, 6.0),
+                Vec4::new(0.0, stylised, 0.0, caps),
+            )
+        };
+        assert_eq!(
+            key(0.0, 0.0, 0.0),
+            LiquidKey::default(),
+            "the reference lane"
+        );
+        assert_eq!(
+            key(0.0, 0.0, 1.0),
+            LiquidKey::default(),
+            "no variant off the stylised lane"
+        );
+        for caps in [0.0, 1.0, 255.0] {
+            for stylised in [0.0, 1.0] {
+                let k = key(1.0, stylised, caps);
+                assert!(k.has(LiquidKey::FULLBRIGHT) && !k.has(LiquidKey::STYLISED));
+                assert!(!k.has(LiquidKey::VIEW) && !k.composite());
+                assert!(
+                    k.frag_defs().is_empty(),
+                    "magma and slime take no Improved Water def, or a def's code drops their draw"
+                );
+            }
+        }
+        let plain = key(0.0, 1.0, 0.0);
+        assert!(plain.composite() && !plain.has(LiquidKey::VIEW));
+        assert!(!plain.frag_defs().contains(&"WATER_VIEW"));
+        let view = key(0.0, 1.0, 1.0);
+        assert!(view.composite() && view.has(LiquidKey::VIEW));
+        assert!(view.frag_defs().contains(&"WATER_VIEW"));
+        // A negative lane reads as no bits.
+        assert_eq!(key(0.0, 1.0, -3.0), plain);
     }
 }

@@ -210,10 +210,10 @@ struct WaterReflect {
     // none.
     moon: vec4<f32>,
     /// `x` = the mirror capture's blur radius in capture texels (0 = off —
-    /// see [`sample_mirror`]); `y` = paint the march's confidence instead of the water
-    /// (off); `z` = the march's OWN strength — 0 unless the debug toggle asks for it, and
-    /// pointedly independent of `params.y`, which is the mirror's; `w` = composite the tiers the
-    /// old layered way (off).
+    /// see [`sample_mirror`]); `y` = the debug view's id (`WaterDebug::view`, read only by the
+    /// `WATER_VIEW` variant, [`water_view_id`]); `z` = the march's OWN strength — 0 unless the
+    /// debug toggle asks for it, and pointedly independent of `params.y`, which is the mirror's;
+    /// `w` = composite the tiers the old layered way (off).
     ///
     /// `x` once carried a march kill switch and was dead weight even then: the
     /// gate the shader actually reads is `z`. The row is full at four lanes and the params buffer
@@ -1632,6 +1632,26 @@ fn ripple_flowing(
     return a * w0 + b * (1.0 - w0);
 }
 
+#ifdef WATER_VIEW
+// ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
+//
+// Compiled only into the `WATER_VIEW` variant, which the stylised pipelines take while a view is
+// chosen. The id rides `flags.y`; `benilla_world::dev_state::WATER_VIEWS` names each one.
+const WV_MIRROR1: u32 = 1u;
+const WV_MIRROR2: u32 = 2u;
+const WV_PROBE: u32 = 3u;
+const WV_TIERS: u32 = 4u;
+const WV_FLAT: u32 = 5u;
+const WV_FLOW: u32 = 6u;
+const WV_FOAM: u32 = 7u;
+const WV_THICKNESS: u32 = 8u;
+const WV_FRESNEL: u32 = 9u;
+
+fn water_view_id() -> u32 {
+    return u32(water_reflect.flags.y + 0.5);
+}
+#endif
+
 fn stylised_water(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
@@ -1778,11 +1798,17 @@ fn stylised_water(
     // arc for the same tilt — so the two tiers are being asked different questions and the
     // comparison says nothing. Flattening removes the wave from both sides at once.
     let ripple_scale = water_reflect.probe_box_min.w;
-    let n = normalize(vec3<f32>(
+    let rippled_n = normalize(vec3<f32>(
         (slope.x * NORMAL_STRENGTH + wake_slope.x) * ripple_scale,
         1.0,
         (slope.y * NORMAL_STRENGTH + wake_slope.y) * ripple_scale,
     ));
+#ifdef WATER_VIEW
+    // `flat` is a mode, not a paint: the whole look runs on the unrippled normal.
+    let n = select(rippled_n, flat_n, water_view_id() == WV_FLAT);
+#else
+    let n = rippled_n;
+#endif
 
     // Body: the zone's own swatch, deepening with V. sqrt, not linear — absorption in real water is
     // exponential, and the square root keeps the shallows a distinct band instead of a thin gradient.
@@ -2316,6 +2342,51 @@ fn stylised_water(
         soft = saturate(thickness / SOFT_EDGE_YARDS);
     }
     let alpha = max(mix(shallow.w, deep.w, sqrt(depth)) * soft, foam);
+#ifdef WATER_VIEW
+    // The debug views paint one quantity over the water, opaque and unfogged.
+    let view_id = water_view_id();
+    if (view_id != 0u && view_id != WV_FLAT) {
+        var v = vec3<f32>(0.0);
+        if (view_id == WV_MIRROR1) {
+            v = m1.rgb;
+        } else if (view_id == WV_MIRROR2) {
+            v = m2.rgb;
+        } else if (view_id == WV_PROBE) {
+            v = probe_rgb;
+        } else if (view_id == WV_TIERS) {
+            // Each tier's share of `refl` as the chain above mixed them: the probe over the sky,
+            // the mirrors over both, the march over all. Sky grey, probe green, the first mirror
+            // blue, the second cyan, the march red.
+            let s_ssr = saturate(water_reflect.flags.z * ssr.conf);
+            let s_mirrors = saturate(m1.a + m2.a - m1.a * m2.a) * (1.0 - s_ssr);
+            let s_probe = saturate(probe_w) * (1.0 - s_mirrors - s_ssr);
+            let s_sky = 1.0 - s_probe - s_mirrors - s_ssr;
+            let s_m1 = select(0.0, k1 / msum, msum > 0.0) * s_mirrors;
+            v = vec3<f32>(0.5) * s_sky
+                + vec3<f32>(0.0, 1.0, 0.0) * s_probe
+                + vec3<f32>(0.0, 0.0, 1.0) * s_m1
+                + vec3<f32>(0.0, 1.0, 1.0) * (s_mirrors - s_m1)
+                + vec3<f32>(1.0, 0.0, 0.0) * s_ssr;
+        } else if (view_id == WV_FLOW) {
+            // The current at 2 yd/s full scale: 0.5 + flow/4 in rg, the speed in b.
+            v = vec3<f32>(vec2<f32>(0.5) + 0.25 * flow, saturate(length(flow) * 0.5));
+        } else if (view_id == WV_FOAM) {
+            // Each foam's coverage as mixed above: the shore's line and bubbles in r, the wake's
+            // in b; g is the contact foam's, which this look does not draw.
+            v = vec3<f32>(
+                max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL),
+                0.0,
+                wake_foam * WAKE_FOAM_LEVEL,
+            );
+        } else if (view_id == WV_THICKNESS) {
+            // The water column behind the pixel, yards / 8; 0 where it is not known.
+            v = vec3<f32>(max(thickness, 0.0) / 8.0, 0.0, 0.0);
+        } else if (view_id == WV_FRESNEL) {
+            v = vec3<f32>(fres);
+        }
+        return vec4<f32>(v, 1.0);
+    }
+#endif
     return vec4<f32>(apply_fog(rgb, world_pos, room_fog), alpha);
 }
 

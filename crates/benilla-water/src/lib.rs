@@ -29,8 +29,8 @@ pub use liquid_planar::PlanarMap;
 
 // The engine items the moved passes name by their old paths.
 use benilla_world::liquid::{
-    WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet, WaterStyle,
-    UNMIRRORED_RENDER_LAYER,
+    WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet, WaterPipelineCaps,
+    WaterStyle, UNMIRRORED_RENDER_LAYER,
 };
 use benilla_world::{dev_state, lighting, sky, sun, view, water_fx, world_unit};
 
@@ -68,8 +68,21 @@ impl Plugin for ImprovedWaterPlugin {
             publish_pass_images
                 .in_set(WaterPassSet)
                 .after(benilla_assets::AssetSet::Open),
+        )
+        // PreUpdate, so the materials take a changed variant in the same frame's `Update`.
+        .add_systems(
+            PreUpdate,
+            drive_pipeline_caps.run_if(resource_changed::<dev_state::DebugState>),
         );
     }
+}
+
+/// Ask the stylised liquid pipelines for the variants this plugin's switches need: the debug views
+/// while one is chosen. A no-op unless the answer changes, so the materials are touched only then.
+fn drive_pipeline_caps(dev: Res<dev_state::DebugState>, mut caps: ResMut<WaterPipelineCaps>) {
+    caps.set_if_neq(WaterPipelineCaps {
+        view: dev.water.view != 0,
+    });
 }
 
 /// Hand the engine's liquid materials this plugin's targets; each pass re-points them itself when

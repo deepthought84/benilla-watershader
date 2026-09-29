@@ -211,6 +211,29 @@ pub struct WaterPassImages {
     pub reflect_buf: bevy::render::render_resource::Buffer,
 }
 
+/// The variants a water plugin asks the stylised liquid pipelines to compile; all off without one.
+/// Every stylised material carries [`Self::bits`] in `path.w`, which the material's
+/// [`LiquidKey`](benilla_assets::materials::LiquidKey) reads back, so a variant is a key and never a
+/// branch in the shipped shader.
+#[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct WaterPipelineCaps {
+    /// The debug views (`WATER_VIEW`), while `WaterDebug::view` names one.
+    pub view: bool,
+}
+
+impl WaterPipelineCaps {
+    /// The `path.w` integer: the key's cap bits shifted down by its `CAPS_SHIFT`, built from the
+    /// key's own consts so the two cannot drift.
+    pub fn bits(self) -> u32 {
+        use benilla_assets::materials::LiquidKey as K;
+        let mut k: u16 = 0;
+        if self.view {
+            k |= K::VIEW;
+        }
+        u32::from(k >> K::CAPS_SHIFT)
+    }
+}
+
 /// Where a water plugin publishes [`WaterPassImages`]; the liquid materials are built after it.
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WaterPassSet;
@@ -270,4 +293,32 @@ pub(super) fn placeholder_pass_images(
         wake: flat,
         reflect_buf,
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WaterPipelineCaps;
+    use benilla_assets::materials::LiquidKey;
+    use bevy::math::Vec4;
+
+    /// Every caps combination round-trips through `path.w` into the key's matching bits, on the
+    /// stylised lane only; magma and slime stay fullbright whatever `path.w` holds.
+    #[test]
+    fn the_caps_round_trip_through_path_w() {
+        for view in [false, true] {
+            let caps = WaterPipelineCaps { view };
+            let lane = caps.bits() as f32;
+            let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, lane));
+            assert!(water.composite());
+            assert_eq!(water.has(LiquidKey::VIEW), view, "{caps:?}");
+            let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 0.0, 0.0, lane));
+            assert_eq!(
+                reference,
+                LiquidKey::default(),
+                "{caps:?} on the reference lane"
+            );
+            let magma = LiquidKey::from_lanes(Vec4::X, Vec4::new(0.0, 1.0, 1.0, lane));
+            assert!(magma.has(LiquidKey::FULLBRIGHT) && !magma.has(LiquidKey::VIEW));
+        }
+    }
 }

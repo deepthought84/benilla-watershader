@@ -80,6 +80,10 @@ pub struct WaterDebug {
     /// Add the screen-space reflection march over Improved Water; off by default, `$WOW_SSR=1`
     /// arms it at boot.
     pub ssr: bool,
+    /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
+    /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
+    /// pipelines' `WATER_VIEW` variant.
+    pub view: u8,
 }
 
 impl Default for WaterDebug {
@@ -90,8 +94,49 @@ impl Default for WaterDebug {
             probe_world: armed,
             probe_off: false,
             ssr: std::env::var("WOW_SSR").as_deref() == Ok("1"),
+            view: water_view_from_env(),
         }
     }
+}
+
+/// The Improved Water debug views by id (`WaterDebug::view`, `liquid.wgsl`'s `WV_*` consts); 0 is
+/// off. A view paints one quantity over the water; `flat` is a mode instead, the whole look on the
+/// unrippled normal.
+pub const WATER_VIEWS: [&str; 10] = [
+    "off",
+    "mirror1",
+    "mirror2",
+    "probe",
+    "tiers",
+    "flat",
+    "flow",
+    "foam",
+    "thickness",
+    "fresnel",
+];
+
+/// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.
+pub fn parse_water_view(v: &str) -> Option<u8> {
+    let v = v.trim();
+    if let Ok(id) = v.parse::<u8>() {
+        return (usize::from(id) < WATER_VIEWS.len()).then_some(id);
+    }
+    WATER_VIEWS
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(v))
+        .and_then(|i| u8::try_from(i).ok())
+}
+
+/// `$WOW_WATER_VIEW=<name|id>`, read once with the debug state; an unknown value warns and stays
+/// off.
+fn water_view_from_env() -> u8 {
+    let Ok(v) = std::env::var("WOW_WATER_VIEW") else {
+        return 0;
+    };
+    parse_water_view(&v).unwrap_or_else(|| {
+        warn!("WOW_WATER_VIEW={v}: no such view (one of {WATER_VIEWS:?}, or its id)");
+        0
+    })
 }
 
 impl Default for DebugState {
@@ -191,5 +236,37 @@ impl Default for ModelDebug {
             // `WOW_NOPORTALCULL=1` starts the cull off, for a headless A/B of one viewpoint.
             portal_cull: std::env::var("WOW_NOPORTALCULL").is_err(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_water_view, WATER_VIEWS};
+
+    /// A view is named by id or by name in any case; anything else is no view.
+    #[test]
+    fn a_water_view_parses_by_name_or_id() {
+        assert_eq!(parse_water_view("thickness"), Some(8));
+        assert_eq!(parse_water_view(" TIERS "), Some(4));
+        assert_eq!(parse_water_view("9"), Some(9));
+        assert_eq!(parse_water_view("0"), Some(0));
+        assert_eq!(parse_water_view("10"), None);
+        assert_eq!(parse_water_view("glass"), None);
+    }
+
+    /// The names are the shader's ids: `liquid.wgsl` declares `WV_<NAME>` with each one's index,
+    /// so the panel and `$WOW_WATER_VIEW` paint the view they name.
+    #[test]
+    fn the_water_views_are_the_shaders() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        for (id, name) in WATER_VIEWS.iter().enumerate().skip(1) {
+            let decl = format!("const WV_{}: u32 = {id}u;", name.to_ascii_uppercase());
+            assert!(wgsl.contains(&decl), "liquid.wgsl lost `{decl}`");
+        }
+        assert_eq!(
+            wgsl.matches("const WV_").count(),
+            WATER_VIEWS.len() - 1,
+            "liquid.wgsl declares a view WATER_VIEWS does not name"
+        );
     }
 }

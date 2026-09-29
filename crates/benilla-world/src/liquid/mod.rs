@@ -41,8 +41,9 @@ mod surface;
 pub(crate) use hooks::world_camera_layers;
 pub use hooks::{
     mirror_view_shape, ProbeCull, ProbeFace, ProbeMark, ProbeMarks, ReflectionCamera,
-    WaterPassImages, WaterPassSet, CLOCK_LANES, DOME_LANES, MARCH_LANES, MIRROR2_LANES,
-    PROBE_LANES, PROBE_SLOT_MAX, REFLECT_FLOATS, UNMIRRORED_RENDER_LAYER, WATER_RENDER_LAYER,
+    WaterPassImages, WaterPassSet, WaterPipelineCaps, CLOCK_LANES, DOME_LANES, MARCH_LANES,
+    MIRROR2_LANES, PROBE_LANES, PROBE_SLOT_MAX, REFLECT_FLOATS, UNMIRRORED_RENDER_LAYER,
+    WATER_RENDER_LAYER,
 };
 
 // The submodules are private: this list is everything the rest of the client may name.
@@ -57,8 +58,10 @@ pub use hooks::{
 /// follows the world's day/night and its zones exactly as the faithful path does.
 ///
 /// The switch is a **uniform write**, not a rebuild: [`surface::apply_water_style`] rewrites
-/// `path.y` on the handful of shared liquid materials when this resource changes, so a player
-/// flipping the checkbox pays one uniform upload and no reload.
+/// `path.y` (and `path.w`, [`WaterPipelineCaps::bits`]) on the handful of shared liquid materials
+/// when this resource changes, so a player flipping the checkbox pays one uniform upload and no
+/// reload. The lanes are the materials' pipeline key (`LiquidKey`), so the flip also moves them onto
+/// the other lane's pipelines.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaterStyle {
     /// The 1.12 client's water, which is what the rest of this subsystem implements.
@@ -182,6 +185,7 @@ impl Plugin for LiquidPlugin {
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
             .init_resource::<WaterStyle>()
+            .init_resource::<WaterPipelineCaps>()
             .init_resource::<ProbeMarks>()
             // PreUpdate: a surface streamed by last frame's commands is indexed before anyone asks.
             .add_systems(PreUpdate, maintain_water_index)
@@ -212,11 +216,14 @@ impl Plugin for LiquidPlugin {
                     query::detect_submersion
                         .after(crate::wmo_portal::WmoPvsSet)
                         .in_set(SubmersionVerdict),
-                    // The look toggle: change-gated, so the steady state schedules nothing and a
-                    // flip touches the shared materials once. It runs on the frame the CVar lands
-                    // and on the first frame after startup, which is what carries a persisted
-                    // `waterStyle` from `config.toml` onto materials built before it was read.
-                    surface::apply_water_style.run_if(resource_changed::<WaterStyle>),
+                    // The look toggle and the pipeline variants: change-gated, so the steady state
+                    // schedules nothing and a flip touches the shared materials once. It runs on the
+                    // frame the CVar lands and on the first frame after startup, which is what
+                    // carries a persisted `waterStyle` from `config.toml` onto materials built
+                    // before it was read.
+                    surface::apply_water_style.run_if(
+                        resource_changed::<WaterStyle>.or(resource_changed::<WaterPipelineCaps>),
+                    ),
                 ),
             )
             // The `WOW_NO_LIQUID` override: after both per-frame `Visibility` owners of a surface
