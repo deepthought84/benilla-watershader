@@ -318,9 +318,15 @@ def underdeck_ratio(img, water, deck):
 
 def seam_step(img, box, at, rows=3, axis="y"):
     """|mean luma of the `rows` lines before `at` − the `rows` lines from it| inside the box's
-    span, across a horizontal seam (axis y, `at` a row) or a vertical one (axis x, a column)."""
+    span, across a horizontal seam (axis y, `at` a row) or a vertical one (axis x, a column).
+    Both sets of lines must lie in the image."""
     L = luma(img)
+    crop(L, box)  # raises when the box leaves the image
     x0, y0, x1, y1 = (int(v) for v in box)
+    at, rows = int(at), int(rows)
+    size = L.shape[0] if axis == "y" else L.shape[1]
+    if rows < 1 or at - rows < 0 or at + rows > size:
+        raise ValueError(f"seam {axis} {at} ± {rows} lines is outside the image (0-{size})")
     if axis == "y":
         a = L[at - rows : at, x0:x1].mean()
         b = L[at : at + rows, x0:x1].mean()

@@ -299,6 +299,17 @@ class Ratios(unittest.TestCase):
         self.assertAlmostEqual(r["direct"], md, places=5)
         self.assertAlmostEqual(r["value"], mr / md, places=5)
 
+    def test_a_seam_step_stays_inside_the_image(self):
+        img = flat([100, 100, 100])
+        img[120:] = 110
+        r = wm.tier_seam(img, [0, 0, W, H], 120)
+        self.assertAlmostEqual(r["value"], 10.0, places=4)
+        for at in (1, 238):  # 3 lines either side would wrap or run off the frame
+            with self.assertRaises(ValueError):
+                wm.tier_seam(img, [0, 0, W, H], at)
+        with self.assertRaises(ValueError):
+            wm.ring_seam(img, [0, 0, W, H], 1, axis="x")
+
     def test_horizon_ratio_and_shore_band(self):
         img = flat([100, 100, 100])
         img[:50] = 200
