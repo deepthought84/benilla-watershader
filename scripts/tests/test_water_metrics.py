@@ -58,6 +58,10 @@ def png(a):
     return wm.load_rgb(buf)
 
 
+def save(a, path):
+    Image.fromarray(np.clip(np.rint(a), 0, 255).astype(np.uint8)).save(path)
+
+
 def hsv_patch(h_deg, s, v):
     import colorsys
 
@@ -369,6 +373,55 @@ class Bursts(unittest.TestCase):
         x, y = wm.project((10.0, 1.0, 3.0), (0.0, 0.0, 2.0), (1.0, 0.0, 2.0), (1600, 900))
         self.assertLess(x, 800.0)
         self.assertLess(y, 450.0)
+
+
+class Baselines(unittest.TestCase):
+    """A row against a baseline run: only numbers that measure the same thing are compared."""
+
+    box = "box = [40, 40, 280, 200]\n"
+
+    def metrics(self, d, baseline=False):
+        """main() on a directory holding its own region files; the first run writes base.json."""
+        argv = [str(d), "--regions", str(d), "--baseline" if baseline else "--json"]
+        argv.append(str(d / "base.json"))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = wm.main(argv)
+        return rc, out.getvalue()
+
+    def test_a_bare_deep_hue_has_no_baseline_verdict(self):
+        # A hue angle has no better direction: from 190°, 200° is not worse and 100° not better.
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-deep.toml").write_text('[[row]]\nmetric = "deep_hue"\n' + self.box)
+            save(flat(hsv_patch(190, 0.6, 0.5)), d / "wg-deep.png")
+            self.assertEqual(self.metrics(d)[0], 0)
+            for hue in (200, 100, 20):
+                save(flat(hsv_patch(hue, 0.6, 0.5)), d / "wg-deep.png")
+                rc, out = self.metrics(d, baseline=True)
+                self.assertEqual(rc, 0, out)
+                self.assertRegex(out, r"base 19\d\.?\d* -  basis hue; mask none")
+
+    def test_a_deep_row_on_another_mask_is_not_comparable(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-deep.toml").write_text('[[row]]\nmetric = "deep_luma"\n' + self.box)
+            final = flat([20, 60, 80])
+            final[:, 160:] = [60, 120, 140]
+            save(final, d / "wg-deep.png")
+            self.assertEqual(self.metrics(d)[0], 0)  # the baseline: no views, the whole box
+            t = flat(enc([0.05, 0.05, 0.05]))
+            t[:, 160:] = enc([0.15, 0.15, 0.15])
+            save(t, d / "wg-deep@transmittance.png")
+            rc, out = self.metrics(d, baseline=True)
+            self.assertEqual(rc, 1, out)
+            self.assertIn("n/c (basis mask none -> mask transmittance)", out)
+            # The region row switches the view off: the same basis compares again.
+            (d / "wg-deep.toml").write_text(
+                '[[row]]\nmetric = "deep_luma"\n' + self.box + "transmittance = false\n"
+            )
+            rc, out = self.metrics(d, baseline=True)
+            self.assertEqual(rc, 0, out)
+            self.assertIn(" ok", out)
 
 
 class Scenes(unittest.TestCase):

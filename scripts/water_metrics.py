@@ -402,38 +402,54 @@ def deep_mask(box, shape, transmittance=None, fresnel=None, fog=None):
     return m
 
 
+def mask_basis(**views) -> str:
+    """The views a deep row's mask stands on, e.g. "mask transmittance+fog" or "mask none"."""
+    return "mask " + ("+".join(k for k, v in views.items() if v is not None) or "none")
+
+
 def deep_hue(img, box, albedo=None, transmittance=None, fresnel=None, fog=None, ref_hue=None):
     """Hue of deep water. With the albedo view: the median of |hue(final) − hue(albedo)| over the
-    deep mask, in degrees (pass ≤ 10). Without it: the hue of the box's mean colour, and its
-    distance to `ref_hue` (the Light.dbc deep row's) when given."""
+    deep mask, in degrees (pass ≤ 10). Without it: the hue of the mask's mean colour, and its
+    distance to `ref_hue` (the Light.dbc deep row's) when given; a bare hue is informational.
+    `basis` names what the number is and the views its mask stands on."""
     fin = crop(img, box)
     m = deep_mask(box, fin.shape[:2], transmittance, fresnel, fog)
+    mask = mask_basis(transmittance=transmittance, fresnel=fresnel, fog=fog)
+    if albedo is not None:
+        basis = f"albedo; {mask}"
+    elif ref_hue is not None:
+        basis = f"ref_hue {ref_hue}; {mask}"
+    else:
+        basis = f"hue; {mask}"
     if not m.any():
-        return {"value": None, "pixels": 0}
+        return {"value": None, "pixels": 0, "basis": basis}
     if albedo is not None:
         d = hue_dist(hue_deg(fin[m]), hue_deg(crop(albedo, box)[m]))
-        return {"value": float(np.median(d)), "pixels": int(m.sum())}
+        return {"value": float(np.median(d)), "pixels": int(m.sum()), "basis": basis}
     h = float(hue_deg(fin[m].mean(axis=0)))
     if ref_hue is None:
-        return {"value": h, "gated": False}
-    return {"value": float(hue_dist(h, ref_hue)), "hue": h, "ref_hue": ref_hue}
+        return {"value": h, "gated": False, "basis": basis}
+    return {"value": float(hue_dist(h, ref_hue)), "hue": h, "ref_hue": ref_hue, "basis": basis}
 
 
 def deep_luma(img, box, transmittance=None, fog=None):
-    """Mean luma over the deep mask without its F cut (the veil is what the player sees)."""
+    """Mean luma over the deep mask without its F cut (the veil is what the player sees); `basis`
+    names the views the mask stands on."""
     fin = crop(img, box)
     m = deep_mask(box, fin.shape[:2], transmittance, None, fog)
-    return {"value": float(luma(fin[m]).mean()) if m.any() else None}
+    basis = mask_basis(transmittance=transmittance, fog=fog)
+    return {"value": float(luma(fin[m]).mean()) if m.any() else None, "basis": basis}
 
 
 def deep_chroma(img, box, transmittance=None, fog=None):
-    """(max − min)/max of the deep mask's mean colour, without the F cut."""
+    """(max − min)/max of the deep mask's mean colour, without the F cut; `basis` as deep_luma."""
     fin = crop(img, box)
     m = deep_mask(box, fin.shape[:2], transmittance, None, fog)
+    basis = mask_basis(transmittance=transmittance, fog=fog)
     if not m.any():
-        return {"value": None}
+        return {"value": None, "basis": basis}
     c = fin[m].mean(axis=0)
-    return {"value": chroma(c), "rgb": [round(float(v), 1) for v in c]}
+    return {"value": chroma(c), "rgb": [round(float(v), 1) for v in c], "basis": basis}
 
 
 def water_mask(view, still, thr=3.0, erode=2):
@@ -1055,8 +1071,24 @@ def fmt(v) -> str:
 SHOWN = {"value", "metric", "gate", "pass", "slack", "factor", "gated", "missing", "error"}
 
 
+def versus(r: dict, br: dict) -> tuple[bool | None, str]:
+    """A row against its baseline row: (verdict, tag). No verdict without both values, or for an
+    informational row (`gated` False) on either side. A row whose `basis` differs from the
+    baseline's is not comparable ("n/c"), a failure: the two numbers measure different things."""
+    if r.get("value") is None or br.get("value") is None:
+        return None, "-"
+    if r.get("gated") is False or br.get("gated") is False:
+        return None, "-"
+    if r.get("basis") != br.get("basis"):
+        return False, f"n/c (basis {br.get('basis')} -> {r.get('basis')})"
+    ok = against(r.get("value"), br.get("value"), ROWS[r["metric"]], r.get("slack"),
+                 r.get("factor"))
+    return ok, {True: "ok", False: "WORSE", None: "-"}[ok]
+
+
 def report(results: dict, baseline: dict | None) -> int:
-    """Print one line per row; the count of failed gates and rows worse than the baseline."""
+    """Print one line per row; the count of failed gates, rows worse than the baseline and rows
+    not comparable to it."""
     failures = 0
     for scene, rows in results.items():
         print(f"== {scene}")
@@ -1068,9 +1100,9 @@ def report(results: dict, baseline: dict | None) -> int:
             gate = " ".join(f"{k} {fmt(v)}" for k, v in r["gate"].items())
             base = ""
             if baseline is not None:
-                b = baseline.get(scene, {}).get(label, {}).get("value")
-                ok = against(r.get("value"), b, ROWS[r["metric"]], r.get("slack"), r.get("factor"))
-                base = f"  base {fmt(b)} {({True: 'ok', False: 'WORSE', None: '-'})[ok]}"
+                br = baseline.get(scene, {}).get(label, {})
+                ok, tag = versus(r, br)
+                base = f"  base {fmt(br.get('value'))} {tag}"
                 failures += ok is False
             failures += r["pass"] is False
             why = r.get("error") or (f"needs {', '.join(r['missing'])}" if r.get("missing") else "")
