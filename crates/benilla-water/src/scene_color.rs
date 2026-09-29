@@ -46,6 +46,7 @@ use bevy::render::renderer::RenderContext;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewTarget;
 
+use super::world_view::{serves_world_view, Visit};
 use super::WaterStyle;
 
 /// How much smaller than the main view the snapshot is, per side.
@@ -143,6 +144,10 @@ impl Node for WaterSceneColorNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        // Only the world view: Core3d runs for the mirrors and the probe's cube faces too.
+        if !serves_world_view(world, graph.view_entity(), Visit::Snapshot) {
+            return Ok(());
+        }
         let Some(snap) = world.get_resource::<WaterSceneColor>() else {
             return Ok(());
         };
@@ -158,8 +163,8 @@ impl Node for WaterSceneColorNode {
         let Some(target) = world.get::<ViewTarget>(graph.view_entity()) else {
             return Ok(());
         };
-        // Only when the two agree exactly — a mismatched blit is a validation error, and a frame
-        // where the view has resized but the rebuilt image has not yet arrived is a real one.
+        // A validation guard, not the view test: a mismatched blit is a validation error, and a
+        // frame where the view has resized but the rebuilt image has not yet arrived is a real one.
         let main = target.main_texture();
         if main.width() != gpu.size.width || main.height() != gpu.size.height {
             return Ok(());

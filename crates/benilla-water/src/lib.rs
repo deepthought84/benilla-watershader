@@ -23,6 +23,7 @@ mod reflect;
 mod ripple_sim;
 mod scene_color;
 mod water_map;
+mod world_view;
 
 pub use liquid_planar::PlanarMap;
 
@@ -56,6 +57,7 @@ impl Plugin for ImprovedWaterPlugin {
         clock::register(app);
         reflect::register(app);
         ripple_sim::register(app);
+        world_view::register(app);
         hiz::register(app);
         scene_color::register(app);
         depth::register(app);

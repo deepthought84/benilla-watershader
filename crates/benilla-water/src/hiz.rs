@@ -1,8 +1,8 @@
 //! **The reflection march's hierarchical depth buffer.**
 //!
-//! A pyramid of nearest-per-tile depths, rebuilt from the depth prepass every frame the stylised
-//! water is on. `shaders/hiz_reduce.wgsl` carries the reasoning for the pyramid and for why it
-//! reduces with `max` where Bevy's own depth pyramid reduces with `min`; this module is the
+//! A pyramid of nearest-per-tile depths, rebuilt from the world view's depth every frame the
+//! stylised water is on. `shaders/hiz_reduce.wgsl` carries the reasoning for the pyramid and for
+//! why it reduces with `max` where Bevy's own depth pyramid reduces with `min`; this module is the
 //! plumbing that builds it.
 //!
 //! The shape is `scene_color`'s, because the problem is the same one: an image the liquid material
@@ -30,12 +30,12 @@
 //! occlusion culling binds the view depth exactly as this does.
 //!
 //! The view depth is only bindable once `liquid::depth` has added `TEXTURE_BINDING` to the world
-//! camera's `depth_texture_usages`, which takes a frame to reach the texture; until then the seed
-//! falls back to the prepass depth.
+//! camera's `depth_texture_usages`, which takes a frame to reach the texture; until then the
+//! pyramid is not rebuilt, and it holds the last frame's depths or zeros, which the march reads as
+//! sky.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
-use bevy::core_pipeline::prepass::ViewPrepassTextures;
 use bevy::core_pipeline::FullscreenShader;
 use bevy::prelude::*;
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
@@ -57,6 +57,7 @@ use bevy::render::renderer::RenderContext;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewDepthTexture;
 
+use super::world_view::{serves_world_view, Visit};
 use super::WaterStyle;
 
 /// The pyramid, and the size it was built for.
@@ -72,7 +73,7 @@ pub(crate) struct WaterHiz {
     /// How many levels it carries.
     mips: u32,
     /// Only the stylised looks march, so only they need this.
-    armed: bool,
+    pub(crate) armed: bool,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
@@ -199,11 +200,6 @@ struct HizPipelines {
     reduce: CachedRenderPipelineId,
 }
 
-/// Whether the pyramid seeds from the depth prepass rather than the view's depth; it does not.
-fn seed_from_prepass() -> bool {
-    false
-}
-
 fn init_hiz_pipelines(
     mut commands: Commands,
     fullscreen_shader: Res<FullscreenShader>,
@@ -291,6 +287,11 @@ impl Node for WaterHizNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
+        // **Only the view the water marches in.** Core3d runs for every 3D view: the mirrors and
+        // the probe's cube faces too.
+        if !serves_world_view(world, graph.view_entity(), Visit::Pyramid) {
+            return Ok(());
+        }
         let Some(hiz) = world.get_resource::<WaterHiz>() else {
             return Ok(());
         };
@@ -316,37 +317,20 @@ impl Node for WaterHizNode {
         let (Some(gpu), Some(gpu_far)) = (images.get(&hiz.image), images.get(&hiz.far)) else {
             return Ok(());
         };
-        // **Only the view the water marches in.** Core3d runs for every 3D view — the mirror and
-        // the probe's cube faces too — and a depth prepass is what marks the world camera: only it
-        // carries one, and only while a look that marches is on.
-        let Some(prepass) = world
-            .get::<ViewPrepassTextures>(graph.view_entity())
-            .and_then(|p| p.depth.as_ref())
+        // **The view's own depth, complete after the opaque pass** — see the module doc. Not
+        // bindable yet on the frame the style arms: that frame is skipped.
+        let Some(view_depth) = world
+            .get::<ViewDepthTexture>(graph.view_entity())
+            .filter(|d| d.texture.usage().contains(TextureUsages::TEXTURE_BINDING))
         else {
             return Ok(());
         };
-        // **The view's own depth, complete after the opaque pass** — see the module doc. The
-        // prepass is the fallback for the frames before the attachment is bindable, and the
-        // lever's answer.
-        let view_depth = world
-            .get::<ViewDepthTexture>(graph.view_entity())
-            .filter(|d| d.texture.usage().contains(TextureUsages::TEXTURE_BINDING))
-            .filter(|_| !seed_from_prepass());
-        let (source_texture, source_view) = match view_depth {
-            Some(d) => (
-                &d.texture,
-                d.texture.create_view(&TextureViewDescriptor {
-                    label: Some("hiz_view_depth"),
-                    aspect: TextureAspect::DepthOnly,
-                    ..default()
-                }),
-            ),
-            None => (
-                &prepass.texture.texture,
-                prepass.texture.default_view.clone(),
-            ),
-        };
-        let multisampled = source_texture.sample_count() > 1;
+        let source_view = view_depth.texture.create_view(&TextureViewDescriptor {
+            label: Some("hiz_view_depth"),
+            aspect: TextureAspect::DepthOnly,
+            ..default()
+        });
+        let multisampled = view_depth.texture.sample_count() > 1;
 
         let view_of = |texture: &bevy::render::render_resource::Texture, level: u32| {
             texture.create_view(&TextureViewDescriptor {
