@@ -152,6 +152,74 @@ class DeepWater(unittest.TestCase):
         self.assertFalse(wm.against(grey, base, row))
 
 
+def enc(lin):
+    """Linear 0-1 to gamma codes, the water's enc()."""
+    return 255.0 * np.asarray(lin, dtype=np.float64) ** (1 / 2.2)
+
+
+class LinearLight(unittest.TestCase):
+    """Laws and views in linear light: codes decode through the water's 2.2 gamma."""
+
+    shade, lit = [100, 0, 200, 50], [0, 0, 100, 50]
+    bank_shade, bank_lit = [100, 100, 200, 150], [0, 100, 100, 150]
+
+    def frame(self, water_lit, water_shade):
+        img = flat([90, 90, 90])
+        bank = np.array([150.0, 120.0, 80.0])
+        img[0:50, 0:100] = water_lit
+        img[0:50, 100:200] = water_shade
+        img[100:150, 0:100] = bank
+        img[100:150, 100:200] = np.rint(bank * 0.7)  # the terrain's shadow: 0.7 in gamma
+        return png(img)
+
+    def ratio(self, img, in_scatter=None):
+        return wm.shade_ratio(img, self.shade, self.lit, self.bank_shade, self.bank_lit, in_scatter)
+
+    def test_shade_under_the_terrain_law_scores_0_456(self):
+        water = np.array([60.0, 110.0, 130.0])
+        r = self.ratio(self.frame(water, np.rint(water * 0.7)))
+        self.assertAlmostEqual(r["value"], 0.456, delta=0.01)
+        self.assertAlmostEqual(r["bank"], 0.456, delta=0.01)
+        self.assertTrue(wm.judge(r["value"], wm.ROWS["shade_ratio"].gate))
+
+    def test_lit_water_beside_a_shadowed_bank_fails_and_so_does_a_gamma_0_456(self):
+        water = np.array([60.0, 110.0, 130.0])
+        lit = self.ratio(self.frame(water, water))["value"]
+        self.assertAlmostEqual(lit, 1.0, places=5)
+        self.assertFalse(wm.judge(lit, wm.ROWS["shade_ratio"].gate))
+        dark = self.ratio(self.frame(water, np.rint(water * 0.456)))["value"]
+        self.assertAlmostEqual(dark, 0.456**2.2, delta=0.01)
+        self.assertFalse(wm.judge(dark, wm.ROWS["shade_ratio"].gate))
+
+    def test_the_in_scatter_view_decodes(self):
+        view = flat([0, 0, 0])
+        view[0:50, 0:100] = enc(0.30)
+        view[0:50, 100:200] = enc(0.30 * 0.456)
+        water = np.array([60.0, 110.0, 130.0])
+        r = self.ratio(self.frame(water, water), png(view))
+        self.assertAlmostEqual(r["value"], 0.456, delta=0.01)
+
+    def test_the_deep_mask_decodes_the_transmittance_view(self):
+        # t_bed 0.05 is code 65 (deep, Y < 0.1); 0.15 is code 108 (not deep).
+        box = [0, 0, W, H]
+        final = flat([20, 60, 80])
+        final[:, 160:] = [60, 120, 140]
+        t = flat(enc([0.05, 0.05, 0.05]))
+        t[:, 160:] = enc([0.15, 0.15, 0.15])
+        r = wm.deep_luma(final, box, transmittance=png(t))
+        self.assertAlmostEqual(r["value"], float(wm.luma(np.array([20.0, 60.0, 80.0]))), places=3)
+
+    def test_the_deep_mask_reads_fog_f_from_red(self):
+        # fog_f 0.9 under a dark fog colour is deep; fog_f 0.59 under a bright one is not.
+        box = [0, 0, W, H]
+        final = flat([20, 60, 80])
+        final[:, 160:] = [60, 120, 140]
+        fog = flat([230, 60, 90])
+        fog[:, 160:] = [150, 250, 250]
+        r = wm.deep_luma(final, box, fog=png(fog))
+        self.assertAlmostEqual(r["value"], float(wm.luma(np.array([20.0, 60.0, 80.0]))), places=3)
+
+
 class Structure(unittest.TestCase):
     def test_a_straight_bright_line_trips_straight_line(self):
         img = noisy([60, 90, 100], sd=4.0, w=640, h=400)

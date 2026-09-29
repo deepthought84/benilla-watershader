@@ -2,9 +2,11 @@
 """Water image metrics: the numbers the water gates are judged on, measured on captures.
 
 Every row reads the displayed frame (gamma-encoded 8-bit, as the player sees it) inside pixel boxes
-that a per-scene region file names. Luma is Rec. 709 over the gamma codes, 0-255. Rates are taken
-only on bursts (`scripts/water-shots.sh <dir> <n>`), whose shots stand on a held clock; a single
-still carries no time.
+that a per-scene region file names. Luma is Rec. 709 over the gamma codes, 0-255. Rows held to a
+linear law, and views that hold enc(x), decode the codes first, (code/255)^2.2 (the water's display
+gamma), and take the Rec. 709 luminance of that. Rates are taken only on bursts
+(`scripts/water-shots.sh <dir> <n>`), whose shots stand on a held clock; a single still carries no
+time.
 
     scripts/water_metrics.py <dir> [<scene> ...]           # every scene with a region file
     scripts/water_metrics.py <dir> --json out.json         # also write the numbers
@@ -56,7 +58,9 @@ REGIONS = pathlib.Path(__file__).resolve().parent / "water_regions"
 LUMA_709 = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
 # The world camera's vertical field of view (`view::CAM_FOVY`, π/4).
 CAM_FOVY_DEG = 45.0
-# The shadowed-to-lit body ratio the terrain's own shadow law gives (BODY-3, 0.7 → 0.456).
+# The water's display gamma: its enc/dec are a pure 2.2 power law.
+WATER_GAMMA = 2.2
+# terrainp_s.bls darkens terrain in MCSH shadow by 0.7 in gamma: 0.7^2.2 = 0.456 linear.
 SHADE_LAW = 0.456
 
 
@@ -71,6 +75,16 @@ def load_rgb(path: pathlib.Path | str) -> np.ndarray:
 def luma(rgb: np.ndarray) -> np.ndarray:
     """Rec. 709 luma of gamma codes: the displayed value, 0-255."""
     return rgb[..., :3] @ LUMA_709
+
+
+def dec(rgb: np.ndarray) -> np.ndarray:
+    """Gamma codes, 0-255, to linear 0-1 through the water's display gamma."""
+    return (np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 255.0) / 255.0) ** WATER_GAMMA
+
+
+def lin_y(rgb: np.ndarray) -> np.ndarray:
+    """Rec. 709 luminance of decoded codes, linear 0-1."""
+    return dec(rgb[..., :3]) @ LUMA_709.astype(np.float64)
 
 
 def crop(a: np.ndarray, b) -> np.ndarray:
@@ -374,15 +388,17 @@ def glint_width(img, box, band=20, smooth=31, mirror=None):
 
 
 def deep_mask(box, shape, transmittance=None, fresnel=None, fog=None):
-    """[BL §8.3]'s deep-water mask over a box: Y(t_bed) < 0.1, F < 0.2 and fog_f > 0.8, each only
-    where its WATER_VIEW capture is given (full frames, cropped here); all True otherwise."""
+    """The deep-water mask over a box, from the WATER_VIEW captures given (full frames, cropped
+    here); a view not given masks nothing. The transmittance view holds enc(t_bed): deep where the
+    decoded Y(t_bed) < 0.1. The Fresnel view holds F: F < 0.2 (its r). The fog view holds fog_f in
+    r and the fog colour in g and b: fog_f > 0.8."""
     m = np.ones(shape, dtype=bool)
     if transmittance is not None:
-        m &= luma(crop(transmittance, box)) / 255.0 < 0.1
+        m &= lin_y(crop(transmittance, box)) < 0.1
     if fresnel is not None:
-        m &= luma(crop(fresnel, box)) / 255.0 < 0.2
+        m &= crop(fresnel, box)[..., 0] / 255.0 < 0.2
     if fog is not None:
-        m &= luma(crop(fog, box)) / 255.0 > 0.8
+        m &= crop(fog, box)[..., 0] / 255.0 > 0.8
     return m
 
 
@@ -473,12 +489,12 @@ def band_step(view, box, still=None, window=None, hard=4.0):
 
 
 def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=None):
-    """Shadowed over lit water (the in-scatter view's luma where given, else the final frame's),
-    beside the same ratio on the bank. Pass |water ratio − 0.456| ≤ 0.1 (the terrain's law)."""
-    src = luma(in_scatter) if in_scatter is not None else luma(img)
-    L = luma(img)
-    w = crop(src, water_shade).mean() / max(crop(src, water_lit).mean(), 1e-6)
-    b = crop(L, bank_shade).mean() / max(crop(L, bank_lit).mean(), 1e-6)
+    """Shadowed over lit water in linear luminance (box means; the in-scatter view, which holds
+    enc(in_scatter), where given, else the final frame), beside the same ratio on the bank in the
+    final frame. The terrain's shadow law is 0.456 linear: pass |water ratio − 0.456| ≤ 0.1."""
+    src = in_scatter if in_scatter is not None else img
+    w = lin_y(crop(src, water_shade)).mean() / max(lin_y(crop(src, water_lit)).mean(), 1e-9)
+    b = lin_y(crop(img, bank_shade)).mean() / max(lin_y(crop(img, bank_lit)).mean(), 1e-9)
     return {"value": float(w), "bank": float(b)}
 
 
