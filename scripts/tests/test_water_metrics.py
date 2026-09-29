@@ -512,6 +512,37 @@ still = false
             self.assertTrue(math.isinf(res["unmasked"]["value"]))
             self.assertFalse(res["unmasked"]["pass"])
 
+    def test_contact_rows_read_the_foam_views_contact_coverage(self):
+        # The contact view's r is the distance to the contact (1 at it): full everywhere, while
+        # the foam view's g, c_contact, stands in 30 of 100 columns.
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-quay.toml").write_text(
+                """[box]
+quay = [0, 0, 100, 40]
+open = [0, 60, 100, 100]
+[[row]]
+metric = "contact_cov"
+box = "quay"
+[[row]]
+metric = "foam_fp"
+box = "open"
+"""
+            )
+            save(flat([90, 110, 120], w=100, h=100), d / "wg-quay.png")
+            contact = flat([255, 0, 0], w=100, h=100)
+            save(contact, d / "wg-quay@contact.png")
+            foam = flat([0, 0, 0], w=100, h=100)
+            foam[30:34, 0:30, 1] = 200  # a collar along 30 columns
+            foam[80, 5, 1] = 255  # one stray pixel of contact foam on open water
+            foam[60:100, :, 0] = 255  # line foam, another channel
+            save(foam, d / "wg-quay@foam.png")
+            res = wm.measure(d, d, ["wg-quay"])["wg-quay"]
+            self.assertAlmostEqual(res["contact_cov"]["value"], 30.0)
+            self.assertFalse(res["contact_cov"]["pass"])
+            self.assertAlmostEqual(res["foam_fp"]["value"], 100 / 4000)
+            self.assertTrue(res["foam_fp"]["pass"])
+
     def test_every_row_has_a_definition_and_a_direction_or_none(self):
         for name, row in wm.ROWS.items():
             self.assertTrue(row.fn.__doc__, name)

@@ -666,16 +666,16 @@ def straight_line(img, box, thr=12.0, dark=False):
     return {"value": int(acc[t, rr]), "theta": int(t), "rho": int(2 * (rr - diag))}
 
 
-def contact_cov(view, box, channel=0, thr=0.2):
-    """Share of the box's columns whose contact-foam coverage (a WATER_VIEW channel, 0-1) reaches
-    `thr` somewhere, in %."""
+def contact_cov(view, box, channel=1, thr=0.2):
+    """Share of the box's columns whose contact-foam coverage reaches `thr` somewhere, in %. The
+    foam view holds c_line in r, c_contact in g and c_wake in b (0-1); `channel` picks one."""
     c = crop(view, box)[..., channel] / 255.0
     return {"value": float((c.max(axis=0) >= thr).mean() * 100.0)}
 
 
-def foam_fp(view, box, channel=0, thr=0.2):
-    """Foam where there is no contact: share of the open-water box's pixels whose coverage reaches
-    `thr`, in %."""
+def foam_fp(view, box, channel=1, thr=0.2):
+    """Foam where there is no contact: share of the open-water box's pixels whose contact-foam
+    coverage (the foam view's g, as contact_cov) reaches `thr`, in %."""
     c = crop(view, box)[..., channel] / 255.0
     return {"value": float((c >= thr).mean() * 100.0)}
 
@@ -834,8 +834,8 @@ ROWS: dict[str, Row] = {
     "band_width": Row(band_width, STILL, "lower", {"max": 4.0}),
     "autocorr_peak": Row(autocorr_peak, STILL, "lower", {"max": 0.2}),
     "straight_line": Row(straight_line, STILL, "lower", {"max": 150}),
-    "contact_cov": Row(contact_cov, [("view", "view", "contact", True)], "higher", {"min": 60.0}),
-    "foam_fp": Row(foam_fp, [("view", "view", "contact", True)], "lower", {"max": 0.5}),
+    "contact_cov": Row(contact_cov, [("view", "view", "foam", True)], "higher", {"min": 60.0}),
+    "foam_fp": Row(foam_fp, [("view", "view", "foam", True)], "lower", {"max": 0.5}),
     "ring_seam": Row(ring_seam, STILL, "lower", {"max": 2.0}),
     "horizon_step": Row(horizon_step, STILL, "lower", {"max": 3.0}),
     "luma_sd": Row(luma_sd, STILL, "higher"),
