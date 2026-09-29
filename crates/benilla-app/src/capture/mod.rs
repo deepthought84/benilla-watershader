@@ -17,14 +17,18 @@
 //! draw order among coplanar equal-depth batches follows spawn order, which follows thread-pool
 //! load completion. It is a renderer defect the harness reports; waiting longer cannot gate it
 //! away. `creature-indoor-front` is one: two runs of one build differ at MAE 4.518, confined to
-//! the subject's brightness, so a 4.518 there is the flake, not the change under test.
+//! the subject's brightness, so a 4.518 there is the flake, not the change under test. The golden
+//! water scenes' own two-state patches are written on their rows in `scenarios.rs`.
 //!
 //! ## Bursts
 //! `$WOW_CAPTURE_BURST=<n>` writes `n` shots after the age instead of one, `<stem>-000.png`,
 //! `<stem>-001.png`, … beside `$WOW_CAPTURE_OUT`, spaced `$WOW_CAPTURE_BURST_EVERY` fixed steps
 //! apart ([`BURST_EVERY`]). The clock is held while each shot is saved and released for exactly
-//! that many steps between two, so shot `i` stands at `age + i·every` steps on any machine; the log
-//! gives each shot's clock. A single shot has no time in it; a rate is measured across a burst.
+//! that many steps between two, so shot `i` stands `i·every` steps after shot 0 on any machine:
+//! at [`age_frames`] `+ i·every` steps on a scene, and `i·every` steps past the fixture's own age on
+//! a fixture viewer (`fxview`, `waterfx`). The log gives each shot's clock, and the capture fails
+//! unless every shot's file is written. A single shot has no time in it; a rate is measured across
+//! a burst.
 //!
 //! ## Running one capture by hand
 //! Run through Cargo, never a bare `target/debug/benilla`, which may be stale:
@@ -255,11 +259,22 @@ pub(crate) fn print_scenario_names() {
 /// arriving changes the image or does not affect the shot. `$WOW_CAPTURE_STABLE` overrides it.
 const STABLE_FRAMES: u32 = 30;
 
-fn stable_frames() -> u32 {
+/// The golden water scenes' settle ([`scenarios::water_scene_names`]): they stream in slowly, and
+/// [`STABLE_FRAMES`] pass on the one-colour clear frame before the world arrives.
+const WATER_STABLE_FRAMES: u32 = 300;
+
+/// The stable run `scene` waits for: `$WOW_CAPTURE_STABLE`, else its own settle.
+fn stable_frames(scene: &str) -> u32 {
     std::env::var("WOW_CAPTURE_STABLE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(STABLE_FRAMES)
+        .unwrap_or_else(|| {
+            if scenarios::water_scene_names().any(|n| n == scene) {
+                WATER_STABLE_FRAMES
+            } else {
+                STABLE_FRAMES
+            }
+        })
 }
 
 /// Held frames a scene may take to build before its stable run, so a scene that never settles (a
@@ -268,8 +283,8 @@ const BUILD_CAP_FRAMES: u32 = 1800;
 
 /// The cap on the held build: [`BUILD_CAP_FRAMES`] plus the stable run the shutter waits for, so a
 /// longer `$WOW_CAPTURE_STABLE` does not eat into the frames the scene has to build.
-fn build_cap_frames() -> u32 {
-    BUILD_CAP_FRAMES + stable_frames()
+fn build_cap_frames(scene: &str) -> u32 {
+    BUILD_CAP_FRAMES + stable_frames(scene)
 }
 
 /// Wall-clock ceiling on a capture run, past which it exits with an error. The other bounds count
@@ -463,6 +478,15 @@ impl CaptureCtx {
             self.out.clone()
         } else {
             burst_path(&self.out, self.shot)
+        }
+    }
+
+    /// Every file the capture writes, in shot order: `out`, or each burst shot's [`burst_path`].
+    fn shot_paths(&self) -> Vec<String> {
+        if self.burst == 0 {
+            vec![self.out.clone()]
+        } else {
+            (0..self.burst).map(|i| burst_path(&self.out, i)).collect()
         }
     }
 }
@@ -980,7 +1004,8 @@ fn drive_capture(
                     .spawn((Screenshot::primary_window(), StabilityShot))
                     .observe(watch_frame);
             }
-            let capped = n + 1 >= build_cap_frames();
+            let stable = stable_frames(ctx.name);
+            let capped = n + 1 >= build_cap_frames(ctx.name);
             if capped {
                 warn!(
                     "capture: the image never settled in {} frames ({} stable); the shot is not \
@@ -989,24 +1014,25 @@ fn drive_capture(
                     watch.stable,
                 );
             }
-            // Stability does not prove content: a lane that renders nothing is stable too. Color
-            // channels only, since alpha is opaque even on a black frame.
-            if watch.stable >= stable_frames() || capped {
-                if let Some(px) = watch.prev.as_deref() {
-                    if px
-                        .as_chunks::<4>()
-                        .0
-                        .iter()
-                        .all(|p| p[0] == 0 && p[1] == 0 && p[2] == 0)
-                    {
+            // Stability does not prove content: a lane that renders nothing is stable too, and so
+            // is the clear colour a world scene shows before it streams in. Color channels only,
+            // since alpha is opaque even on a black frame.
+            if watch.stable >= stable || capped {
+                if let Some((first, rest)) = watch
+                    .prev
+                    .as_deref()
+                    .and_then(|px| px.as_chunks::<4>().0.split_first())
+                {
+                    if rest.iter().all(|p| p[..3] == first[..3]) {
                         error!(
-                            "capture: settled image is EMPTY — every color channel is zero; the \
-                             scene rendered nothing"
+                            "capture: settled image is FLAT — every pixel is {:?} in the \
+                             readback's channel order; the scene rendered nothing",
+                            &first[..3],
                         );
                     }
                 }
             }
-            if watch.stable < stable_frames() && !capped {
+            if watch.stable < stable && !capped {
                 Phase::Building(n + 1)
             } else if let Some((rw, rh)) = resize_request().filter(|_| !ctx.resized) {
                 // `$WOW_RESIZE`: resize after the UI was built and measured at the boot size, the
@@ -1045,7 +1071,17 @@ fn drive_capture(
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(path.clone()));
-                info!("capture: effect aged, writing {path}");
+                if ctx.burst > 0 {
+                    info!(
+                        "capture: effect aged, burst of {} shots {} steps apart; shot 0 at {:.6} \
+                         s, writing {path}",
+                        ctx.burst,
+                        ctx.burst_every,
+                        game_time.elapsed_secs_f64(),
+                    );
+                } else {
+                    info!("capture: effect aged, writing {path}");
+                }
                 Phase::Saving {
                     frames: 0,
                     seen: false,
@@ -1238,15 +1274,20 @@ fn drive_capture(
         Phase::Done(n) => {
             if n + 1 >= EXIT_GRACE_FRAMES {
                 // Exit on what is on disk: a save that timed out without a file is a failed
-                // capture, so `scripts/visual.sh`'s `set -e` stops the sweep at it. A burst is
-                // judged on its last shot.
-                let path = ctx.shot_path();
-                if Path::new(&path).is_file() {
-                    info!("capture: saved {path}, exiting");
+                // capture, so `scripts/visual.sh`'s `set -e` stops the sweep at it. A burst needs
+                // every shot, since a gap would shift every rate read across the series.
+                let missing: Vec<String> = ctx
+                    .shot_paths()
+                    .into_iter()
+                    .filter(|p| !Path::new(p).is_file())
+                    .collect();
+                if missing.is_empty() {
+                    info!("capture: saved {}, exiting", ctx.shot_path());
                     exit.write(AppExit::Success);
                 } else {
                     error!(
-                        "capture: FAILED — no file at {path} after the save window; exiting nonzero"
+                        "capture: FAILED — no file at {} after the save window; exiting nonzero",
+                        missing.join(", ")
                     );
                     exit.write(AppExit::error());
                 }
@@ -1472,6 +1513,27 @@ mod tests {
             assert_eq!(shows, 1, "{scenario}");
         }
     }
+    /// A golden water scene settles on its own stable run; every other scene on the default.
+    #[test]
+    fn a_golden_water_scene_carries_its_own_settle() {
+        use super::*;
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _s = EnvGuard::unset("WOW_CAPTURE_STABLE");
+        for name in scenarios::water_scene_names() {
+            assert_eq!(stable_frames(name), WATER_STABLE_FRAMES, "{name}");
+        }
+        assert_eq!(stable_frames("water-noon"), STABLE_FRAMES);
+        let _s = EnvGuard::set("WOW_CAPTURE_STABLE", "45");
+        assert_eq!(
+            stable_frames("water-loch-modan"),
+            45,
+            "the env var still wins"
+        );
+    }
+
     /// Burst shots sit beside the single shot's path, numbered from 000, keeping its extension.
     #[test]
     fn burst_shots_are_numbered_beside_the_output() {

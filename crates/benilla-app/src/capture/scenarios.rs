@@ -973,9 +973,11 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // (`benilla-config/shots.txt`) taken level at a teleport spot, facing its `.gps` heading; a
     // glint or moon scene faces the sun's and moon's 45° bearing instead. The canal, the night
     // beach and the underwater eye are a vista's feet + 2 yd, heading and pitch. They stream in
-    // slowly, so the script waits 300 still frames, not 30.
+    // slowly, so each settles on 300 still frames, not 30 (`capture`'s `WATER_STABLE_FRAMES`).
+    // Boxes below are 1600x900 frame pixels; a diff inside a row's flake box is run variance.
     //
     // A big lake: Loch Modan from the shore by (-5240.0, -3117.0, 299.6), facing 270 across it.
+    // Flake: a lake-bed patch at x815-837 y705-719 lands in one of two states, on both lanes.
     Scenario {
         name: "water-loch-modan",
         map: Some(MAP_AZEROTH),
@@ -995,7 +997,8 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: None,
     },
     // A flowing river: `.tele FalfarrenRiver`, Ashenvale (2666.18, -2545.89, 173.4, orientation
-    // 1.269).
+    // 1.269). Flake: the near-left water at x0-571 y611-899 lands in two or three states, up to
+    // 125k px and MAE 0.35.
     Scenario {
         name: "water-falfarren-river",
         map: Some(MAP_KALIMDOR),
@@ -1005,7 +1008,8 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: None,
     },
     // The sea at a coast: `.tele TheSavageCoast`, Stranglethorn (-12619.3, -40.97, 28.07,
-    // orientation 1.305).
+    // orientation 1.305). Flake: the sea-bed plants at x360-639 y680-839 appear in some runs and
+    // not others, on both lanes.
     Scenario {
         name: "water-savage-coast",
         map: Some(MAP_AZEROTH),
@@ -1036,7 +1040,8 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     },
     // The sea at night: the Savage Coast beach at (-12727.1, -2.1, 0.4), 115 yd from the teleport
     // spot, whose 45° bearing runs out over open sea, at 22:44, facing the white moon at +14.9° on
-    // that bearing (`daynight::moon_direction`; the capture log prints it).
+    // that bearing (`daynight::moon_direction`; the capture log prints it). Flake: sea-bed plants
+    // at x505-769 y520-634, above the moon's path (y650 on), appear in some runs only.
     Scenario {
         name: "water-savage-night",
         map: Some(MAP_AZEROTH),
