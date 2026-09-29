@@ -52,6 +52,7 @@ impl Plugin for ImprovedWaterPlugin {
         bevy::asset::embedded_asset!(app, "shaders/probe_face.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/probe_filter.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/hiz_reduce.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/hiz_seed.wgsl");
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
@@ -94,6 +95,7 @@ fn publish_pass_images(
         probe: probe.cube.clone(),
         hiz: hiz.image.clone(),
         hiz_far: hiz.far.clone(),
+        scene_depth: hiz.lin.clone(),
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
     });

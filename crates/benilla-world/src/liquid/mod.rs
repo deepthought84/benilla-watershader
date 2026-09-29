@@ -127,10 +127,10 @@ pub use query::{
 };
 pub(crate) use spatial::maintain_water_index;
 pub use spatial::WaterIndex;
-pub use surface::WaterMapRef;
 pub(crate) use surface::{
-    spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, LiquidSurface, WetLattice,
+    spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, WetLattice,
 };
+pub use surface::{LiquidSurface, WaterMapRef};
 
 /// Present when a plugin draws Improved Water (`benilla-water`); without it that option draws the
 /// reference, since the stylised lane alone has no reflection tiers to read.

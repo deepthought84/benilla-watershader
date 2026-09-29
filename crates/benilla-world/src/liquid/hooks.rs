@@ -202,6 +202,9 @@ pub struct WaterPassImages {
     pub hiz: Handle<Image>,
     /// The farthest-depth pyramid.
     pub hiz_far: Handle<Image>,
+    /// The opaque world's linear depth behind each pixel: view Z in yards, `R32Float` at the view's
+    /// size, 0 where nothing was drawn. The placeholder is one texel.
+    pub scene_depth: Handle<Image>,
     /// The wave simulation's field.
     pub wake: Handle<Image>,
     /// The reflection block, [`REFLECT_FLOATS`] floats, written once a frame in the render world.
@@ -262,7 +265,8 @@ pub(super) fn placeholder_pass_images(
         scene_color: flat.clone(),
         probe: cube,
         hiz: depth.clone(),
-        hiz_far: depth,
+        hiz_far: depth.clone(),
+        scene_depth: depth,
         wake: flat,
         reflect_buf,
     });

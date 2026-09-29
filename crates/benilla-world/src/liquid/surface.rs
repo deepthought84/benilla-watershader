@@ -126,9 +126,10 @@ impl LiquidAssets {
 #[derive(Component)]
 pub struct WaterMapRef(pub std::sync::Arc<dyn WaterClasses>);
 
-/// Marks a spawned liquid surface: one per MCNK liquid layer or WMO group pool.
+/// Marks a spawned liquid surface: one per MCNK liquid layer or WMO group pool. Public as a seam:
+/// it marks a drawn liquid surface, and the water plugin projects these for its screen rect.
 #[derive(Component)]
-pub(crate) struct LiquidSurface;
+pub struct LiquidSurface;
 
 /// `WOW_NO_LIQUID`: hide every liquid surface and only the surface, since the swim grid, foam and
 /// sound ride sibling components. An override run after both per-frame `Visibility` owners (the

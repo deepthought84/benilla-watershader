@@ -11,14 +11,23 @@
 //! depth test and how deep the occluder sits in front, in yards. Frames with no live quad are
 //! skipped and not counted.
 //!
+//! Beside each pixel's depth it logs `lin=`, the Improved Water's linear depth at the same pixel
+//! (`WaterPassImages::scene_depth`, view Z in yards, 0 where nothing drew), read after the
+//! transparent pass, and its relative difference from the view Z derived here. It is written only
+//! inside the water's screen rectangle and reads 0 outside it; without the water plugin the image
+//! is a one-texel placeholder and no `lin=` is logged.
+//!
 //! MSAA must be off (`WOW_MSAA=off`): a multisampled depth texture cannot be copied and has no
 //! single depth per pixel, so the probe refuses.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::ecs::query::QueryItem;
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
@@ -27,10 +36,12 @@ use bevy::render::render_resource::{
     TexelCopyBufferLayout, TexelCopyTextureInfo, TextureAspect, TextureUsages,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::texture::GpuImage;
 use bevy::render::view::{ExtractedView, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
 use super::probes::ProbeClock;
+use benilla_world::liquid::WaterPassImages;
 use benilla_world::particles::ParticleEmitter;
 use benilla_world::view::WorldCamera;
 
@@ -65,10 +76,11 @@ impl Plugin for DepthProbePlugin {
             at,
             count,
             armed: false,
+            linear: None,
         })
         .insert_resource(QuadWatch(quad_bones))
         .init_resource::<QuadProbes>()
-        .add_systems(Update, arm)
+        .add_systems(Update, (arm, follow_linear_depth))
         .add_systems(
             PostUpdate,
             collect_quads.after(benilla_world::billboard::BillboardPlace),
@@ -84,6 +96,7 @@ impl Plugin for DepthProbePlugin {
         };
         render_app
             .init_resource::<DepthFramesRead>()
+            .init_resource::<LinearCopied>()
             .add_systems(
                 Render,
                 (
@@ -112,6 +125,20 @@ impl Plugin for DepthProbePlugin {
                         Node3d::MainTransmissivePass,
                     )
                 },
+            )
+            // The water's linear depth is written between the transmissive and transparent passes
+            // (`benilla_water`'s pyramid seed), so it is read after the transparent pass.
+            .add_render_graph_node::<ViewNodeRunner<LinearReadbackNode>>(
+                Core3d,
+                LinearReadbackLabel,
+            )
+            .add_render_graph_edges(
+                Core3d,
+                (
+                    Node3d::MainTransparentPass,
+                    LinearReadbackLabel,
+                    Node3d::EndMainPass,
+                ),
             );
     }
 }
@@ -123,6 +150,8 @@ struct DepthWatch {
     at: f32,
     count: u32,
     armed: bool,
+    /// The water's linear depth image, `WaterPassImages::scene_depth`, read at the same pixels.
+    linear: Option<AssetId<Image>>,
 }
 
 impl ExtractResource for DepthWatch {
@@ -291,11 +320,33 @@ fn arm(
     watch.armed = true;
 }
 
+/// Follow the published linear-depth image, which the water plugin rebuilds at every resize.
+fn follow_linear_depth(mut watch: ResMut<DepthWatch>, pass: Option<Res<WaterPassImages>>) {
+    let linear = pass.map(|p| p.scene_depth.id());
+    if watch.linear != linear {
+        watch.linear = linear;
+    }
+}
+
+/// The linear-depth staging buffer: one texel per probe pixel, each at its own 256-byte row.
+#[derive(Resource)]
+struct LinearStaging {
+    buffer: Buffer,
+}
+
+/// A buffer copy's row alignment; each probe pixel's texel is its own one-row copy.
+const LINEAR_ROW: u64 = 256;
+
+/// Set by [`LinearReadbackNode`] when it encoded this frame's copy, taken by [`read_depth`].
+#[derive(Resource, Default)]
+struct LinearCopied(AtomicBool);
+
 /// Allocate the staging buffer to match the view's depth texture, before the graph runs.
 fn prepare_staging(
     watch: Option<Res<DepthWatch>>,
     view: Query<&ViewDepthTexture, With<DepthProbeView>>,
     staging: Option<Res<DepthStaging>>,
+    linear: Option<Res<LinearStaging>>,
     device: Res<RenderDevice>,
     mut commands: Commands,
 ) {
@@ -304,6 +355,16 @@ fn prepare_staging(
         return;
     }
     let Ok(depth) = view.single() else { return };
+    if linear.is_none() {
+        commands.insert_resource(LinearStaging {
+            buffer: device.create_buffer(&BufferDescriptor {
+                label: Some("wow_depth_linear_readback"),
+                size: LINEAR_ROW * watch.pixels.len().max(1) as u64,
+                usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+        });
+    }
     let size = depth.texture.size();
     // `Depth32Float` is 4 bytes a texel; a buffer copy's row stride is 256-byte aligned.
     let bytes_per_row = RenderDevice::align_copy_bytes_per_row(size.width as usize * 4) as u32;
@@ -391,6 +452,86 @@ impl ViewNode for DepthReadbackNode {
     }
 }
 
+#[derive(RenderLabel, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct LinearReadbackLabel;
+
+/// Copies the water's linear depth at each probe pixel, one texel per pixel (a colour format
+/// allows partial copies), once the frame's seed has written it.
+#[derive(Default)]
+struct LinearReadbackNode;
+
+impl ViewNode for LinearReadbackNode {
+    type ViewQuery = &'static DepthProbeView;
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        _view: QueryItem<Self::ViewQuery>,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        let (Some(watch), Some(staging)) = (
+            world.get_resource::<DepthWatch>(),
+            world.get_resource::<LinearStaging>(),
+        ) else {
+            return Ok(());
+        };
+        if !watch.armed
+            || watch.pixels.is_empty()
+            || world.resource::<DepthFramesRead>().0 >= watch.count
+        {
+            return Ok(());
+        }
+        let Some(image) = watch
+            .linear
+            .and_then(|id| world.resource::<RenderAssets<GpuImage>>().get(id))
+        else {
+            return Ok(());
+        };
+        // The one-texel placeholder (no water plugin, or not yet sized), or an image that cannot
+        // be copied: nothing to read.
+        let size = image.texture.size();
+        if size.width <= 1
+            || size.height <= 1
+            || !image.texture.usage().contains(TextureUsages::COPY_SRC)
+        {
+            return Ok(());
+        }
+        let encoder = render_context.command_encoder();
+        for (i, &(x, y)) in watch.pixels.iter().enumerate() {
+            if x >= size.width || y >= size.height {
+                continue;
+            }
+            encoder.copy_texture_to_buffer(
+                TexelCopyTextureInfo {
+                    texture: &image.texture,
+                    mip_level: 0,
+                    origin: Origin3d { x, y, z: 0 },
+                    aspect: TextureAspect::All,
+                },
+                TexelCopyBufferInfo {
+                    buffer: &staging.buffer,
+                    layout: TexelCopyBufferLayout {
+                        offset: i as u64 * LINEAR_ROW,
+                        bytes_per_row: None,
+                        rows_per_image: None,
+                    },
+                },
+                Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        world
+            .resource::<LinearCopied>()
+            .0
+            .store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 /// How many frames [`read_depth`] has reported; a resource because the graph node reads it.
 #[derive(Resource, Default)]
 struct DepthFramesRead(u32);
@@ -402,9 +543,13 @@ fn read_depth(
     view: Query<&ExtractedView, With<DepthProbeView>>,
     device: Res<RenderDevice>,
     staging: Option<Res<DepthStaging>>,
+    linear: Option<Res<LinearStaging>>,
+    linear_copied: Res<LinearCopied>,
     depth: Query<&ViewDepthTexture, With<DepthProbeView>>,
     mut read: ResMut<DepthFramesRead>,
 ) {
+    // Taken first, so a frame that returns early leaves no stale flag for the next.
+    let linear = linear.filter(|_| linear_copied.0.swap(false, Ordering::Relaxed));
     let (Some(watch), Some(staging)) = (watch, staging) else {
         return;
     };
@@ -426,6 +571,10 @@ fn read_depth(
     let size = depth.texture.size();
     let slice = staging.buffer.slice(..);
     slice.map_async(MapMode::Read, |_| {});
+    let linear_slice = linear.as_ref().map(|l| l.buffer.slice(..));
+    if let Some(l) = &linear_slice {
+        l.map_async(MapMode::Read, |_| {});
+    }
     // Block, so a frame's numbers never arrive under a later frame's index.
     if let Err(e) = device.poll(bevy::render::render_resource::PollType::wait_indefinitely()) {
         error!("depth: poll failed: {e}");
@@ -448,7 +597,15 @@ fn read_depth(
     let view_from_clip = view.clip_from_view.inverse();
     {
         let data = slice.get_mapped_range();
-        for &(x, y) in &watch.pixels {
+        let linear_data = linear_slice.as_ref().map(|l| l.get_mapped_range());
+        // The linear depth at probe pixel `i`, when this frame copied it.
+        let linear_at = |i: usize| {
+            let at = i * LINEAR_ROW as usize;
+            linear_data
+                .as_ref()
+                .map(|l| f32::from_le_bytes([l[at], l[at + 1], l[at + 2], l[at + 3]]))
+        };
+        for (i, &(x, y)) in watch.pixels.iter().enumerate() {
             if x >= size.width || y >= size.height {
                 warn!(
                     "depth#{frame} ({x}, {y}): outside the {}x{} view",
@@ -458,16 +615,25 @@ fn read_depth(
             }
             let at = (y * staging.bytes_per_row + x * 4) as usize;
             let d = f32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]]);
-            match view_point(&view_from_clip, ndc_of(x, y, size.width, size.height), d) {
+            let point = view_point(&view_from_clip, ndc_of(x, y, size.width, size.height), d);
+            // The water's linear depth beside it, and how far it is from this view Z.
+            let lin = match (linear_at(i), point) {
+                (Some(l), Some(p)) => {
+                    format!("  lin={l:.6} yd ({:+.2e} of view z)", (l + p.z) / -p.z)
+                }
+                (Some(l), None) => format!("  lin={l}"),
+                (None, _) => String::new(),
+            };
+            match point {
                 // Along the ray (what `WOW_PICK` reports) and to the camera plane (what depth
                 // encodes); they differ by 15% at the frame edge.
                 Some(p) => info!(
-                    "depth#{frame} ({x}, {y}): {d:.9}  =  {:.4} yd along the ray  ({:.4} yd view z)",
+                    "depth#{frame} ({x}, {y}): {d:.9}  =  {:.4} yd along the ray  ({:.4} yd view z){lin}",
                     p.length(),
                     -p.z
                 ),
                 // Reverse-Z clears to 0 = infinitely far: nothing drew here at all.
-                None => info!("depth#{frame} ({x}, {y}): {d:.9}  =  nothing drew (cleared)"),
+                None => info!("depth#{frame} ({x}, {y}): {d:.9}  =  nothing drew (cleared){lin}"),
             }
         }
         for q in &quads {
@@ -475,6 +641,9 @@ fn read_depth(
         }
     }
     staging.buffer.unmap();
+    if let Some(l) = &linear {
+        l.buffer.unmap();
+    }
 }
 
 /// Samples per side across a quad's own area: 16x16, stable to under a percent.
