@@ -418,10 +418,15 @@ impl LiquidKey {
         self.0 & bit != 0
     }
 
-    /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key.
+    /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key: on stylised water,
+    /// the stylised region and the complete depth, and each variant the key carries.
     pub fn frag_defs(self) -> Vec<&'static str> {
         let mut defs = Vec::new();
-        if self.composite() && self.has(Self::VIEW) {
+        if !self.composite() {
+            return defs;
+        }
+        defs.extend(["WATER_STYLISED", "WATER_SCENE_DEPTH"]);
+        if self.has(Self::VIEW) {
             defs.push("WATER_VIEW");
         }
         defs
@@ -475,6 +480,11 @@ pub struct LiquidExt {
     /// The farthest-depth twin of [`Self::hiz`], which lets the march pass behind a tile.
     #[texture(117, sample_type = "float", filterable = false, visibility(fragment))]
     pub hiz_far: Handle<Image>,
+    /// The opaque world's linear depth behind each pixel (`benilla_water`'s `hiz`), view Z in yards,
+    /// 0 where nothing was drawn: what the stylised lane measures its water column against. Read by
+    /// `textureLoad`, and only under `WATER_SCENE_DEPTH`.
+    #[texture(116, sample_type = "float", filterable = false, visibility(fragment))]
+    pub scene_depth: Handle<Image>,
     /// The reflection's per-frame parameters (`benilla_world::liquid::reflect`), a buffer so the
     /// per-frame write does not rebuild every liquid material's bind group.
     #[storage(107, read_only, buffer, visibility(fragment))]
@@ -1607,11 +1617,87 @@ mod tests {
         }
         let plain = key(0.0, 1.0, 0.0);
         assert!(plain.composite() && !plain.has(LiquidKey::VIEW));
-        assert!(!plain.frag_defs().contains(&"WATER_VIEW"));
+        assert_eq!(plain.frag_defs(), ["WATER_STYLISED", "WATER_SCENE_DEPTH"]);
+        assert!(
+            key(0.0, 0.0, 0.0).frag_defs().is_empty(),
+            "the reference lane takes no def"
+        );
         let view = key(0.0, 1.0, 1.0);
         assert!(view.composite() && view.has(LiquidKey::VIEW));
         assert!(view.frag_defs().contains(&"WATER_VIEW"));
         // A negative lane reads as no bits.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
+    }
+
+    /// `liquid.wgsl` with `#ifdef`/`#ifndef`/`#else`/`#endif` resolved against `defs`: the text a
+    /// pipeline with those defs compiles.
+    fn liquid_under(defs: &[&str]) -> String {
+        let src = include_str!("shaders/liquid.wgsl");
+        let mut live = vec![true];
+        let mut out = String::new();
+        for line in src.lines() {
+            let t = line.trim_start();
+            if let Some(def) = t.strip_prefix("#ifdef ") {
+                let on = *live.last().unwrap() && defs.contains(&def.trim());
+                live.push(on);
+            } else if let Some(def) = t.strip_prefix("#ifndef ") {
+                let on = *live.last().unwrap() && !defs.contains(&def.trim());
+                live.push(on);
+            } else if t.starts_with("#else") {
+                let on = live.pop().unwrap();
+                let outer = *live.last().unwrap();
+                live.push(outer && !on);
+            } else if t.starts_with("#endif") {
+                live.pop();
+            } else if *live.last().unwrap() {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        assert_eq!(live.len(), 1, "liquid.wgsl's #ifdef/#endif do not balance");
+        out
+    }
+
+    /// The reference and magma pipelines compile none of the stylised region: a symbol there that
+    /// one of them named would fail its shader and drop every draw it makes. The stylised pipelines
+    /// compile all of it, and no liquid pipeline reads the depth prepass.
+    #[test]
+    fn only_the_stylised_pipelines_compile_the_stylised_region() {
+        use super::LiquidKey;
+        use bevy::math::Vec4;
+        let region = [
+            "fn stylised_water(",
+            "stylised_water(",
+            "SceneBehind",
+            "scene_behind(",
+            "scene_depth_tex",
+            "ssr_trace(",
+            "sample_probe(",
+            "water_view_id(",
+        ];
+        let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::ZERO);
+        let magma = LiquidKey::from_lanes(Vec4::X, Vec4::new(0.0, 1.0, 1.0, 1.0));
+        for key in [reference, magma] {
+            let text = liquid_under(&key.frag_defs());
+            for symbol in region {
+                assert!(!text.contains(symbol), "{key:?} compiles `{symbol}`");
+            }
+            assert!(
+                text.contains("fn stylised_lava("),
+                "{key:?} lost the magma grade"
+            );
+        }
+        for caps in [0.0, 1.0] {
+            let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, caps));
+            let text = liquid_under(&water.frag_defs());
+            for symbol in region.iter().filter(|s| caps > 0.5 || !s.contains("view")) {
+                assert!(text.contains(symbol), "{water:?} lacks `{symbol}`");
+            }
+        }
+        assert!(
+            !include_str!("shaders/liquid.wgsl").contains("DEPTH_PREPASS"),
+            "a liquid pipeline reads the depth prepass again: it misses the static world and \
+             every entity-path model, which the linear depth holds"
+        );
     }
 }

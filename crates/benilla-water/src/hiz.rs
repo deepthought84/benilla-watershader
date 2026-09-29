@@ -23,17 +23,14 @@
 //! and the water has not yet been drawn. It is also the window [`super::scene_color`] copies the
 //! colour in, so the depth the march walks and the colour it reads describe the same frame.
 //!
-//! It used to be seeded from the depth PREPASS, and the prepass is not the opaque world: models on
-//! the entity path opt out of it (`WowModelExt::enable_prepass` — characters, creatures, fading and
-//! refused doodads), the WDL horizon opts out, and the static world is in it only through a pass of
-//! its own that draws nothing until all of its pipelines have compiled. Anything missing from the
-//! depth is invisible to the march while still drawn in the colour it reads, and a ray walks
-//! straight through it, stops in the "sky" behind it and reads its colour there — every water row
-//! in that column the same few pixels. That is the stretched palm Stefan reported from
-//! Stranglethorn, reproduced exactly by dropping the static world from the prepass
-//! (`$WOW_GX_PREPASS=0`). Every engine that ships this builds the pyramid from the scene depth for
-//! the same reason (AMD FidelityFX SSSR's input is the opaque depth buffer), and Bevy's own
-//! occlusion culling binds the view depth exactly as this does.
+//! The depth prepass is not the opaque world: models on the entity path opt out of it
+//! (`WowModelExt::enable_prepass` — characters, creatures, fading and refused doodads), the WDL
+//! horizon opts out, and the static world is in it only through a pass of its own that draws
+//! nothing until all of its pipelines have compiled. A depth missing something the colour holds
+//! lets a ray walk straight through it and read its colour off the "sky" behind it, and gives the
+//! water's column the bed behind a hull instead of the hull. AMD FidelityFX SSSR builds from the
+//! opaque depth for the same reason, and Bevy's own occlusion culling binds the view depth exactly
+//! as this does.
 //!
 //! The view depth is only bindable once `liquid::depth` has added `TEXTURE_BINDING` to the world
 //! camera's `depth_texture_usages`, which takes a frame to reach the texture; until then the
@@ -218,9 +215,9 @@ fn drive_hiz(
     }
 }
 
-/// Re-point every liquid material at the pyramid after a rebuild, and the published pass images at
-/// the pyramid and the linear depth — change-gated on the handles, so it is a no-op on every frame
-/// that is not a resize.
+/// Re-point every liquid material and the published pass images at the pyramid and the linear
+/// depth after a rebuild — change-gated on the handles, so it is a no-op on every frame that is not
+/// a resize.
 fn restamp_hiz(
     hiz: Res<WaterHiz>,
     mut materials: ResMut<Assets<benilla_assets::materials::LiquidMaterial>>,
@@ -235,6 +232,7 @@ fn restamp_hiz(
     for (_, material) in materials.iter_mut() {
         material.extension.hiz = hiz.image.clone();
         material.extension.hiz_far = hiz.far.clone();
+        material.extension.scene_depth = hiz.lin.clone();
     }
     if let Some(mut pass) = pass {
         pass.hiz = hiz.image.clone();

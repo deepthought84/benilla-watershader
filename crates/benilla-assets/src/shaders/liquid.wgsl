@@ -32,11 +32,6 @@
     },
     mesh_view_bindings::{view, globals},
 }
-#ifdef DEPTH_PREPASS
-// The opaque scene's depth, written before anything transparent draws — what is BEHIND the water.
-// Present only while the stylised look is on; see `benilla_world::liquid::depth`.
-#import bevy_pbr::prepass_utils::prepass_depth
-#endif
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var frames: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var frames_samp: sampler;
@@ -72,6 +67,11 @@ const PROBE_TAPS_MAX: i32 = 3;
 // The same pyramid's FARTHEST-depth twin — what lets a ray pass behind a tile. Read only on the steps
 // where the ray is behind a tile's nearest surface; see `liquid::hiz` for why it is a separate image.
 @group(#{MATERIAL_BIND_GROUP}) @binding(117) var hiz_far_tex: texture_2d<f32>;
+#ifdef WATER_SCENE_DEPTH
+// The opaque world's linear depth behind each pixel (`liquid::hiz`): view Z in yards, written after
+// the opaque pass inside the water's screen rectangle, 0 where nothing was drawn.
+@group(#{MATERIAL_BIND_GROUP}) @binding(116) var scene_depth_tex: texture_2d<f32>;
+#endif
 
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(105) var reflection_tex: texture_2d<f32>;
@@ -849,8 +849,8 @@ const LAVA_BREAK_YD: f32 = 5.5;
 /// point — the two tiers should not be distinguishable by their grain. This is the cheap half of
 /// "trace into a downscaled buffer and blur it": the *colour* is filtered here, for four fetches on
 /// a path that was already about to make one. The march's hit-finding is untouched and stays exact,
-/// because it walks the depth prepass at full resolution and never reads the snapshot to find a
-/// crossing — only to colour one.
+/// because it walks the depth pyramid and never reads the snapshot to find a crossing — only to
+/// colour one.
 const SSR_READ_BLUR: f32 = 2.0;
 
 /// How far the ripple slides a reflection's LOOKUP POINT across the surface, in yards —
@@ -999,6 +999,104 @@ fn foam_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
     out.fw = fw_a * 0.55 + fw_b * 0.45;
     return out;
 }
+
+// ---- lava ------------------------------------------------------------------------------------
+//
+// **Outside the stylised region below, and that placement is load-bearing.** Magma and slime draw
+// on BOTH lanes through one pipeline (`LiquidKey::FULLBRIGHT`), which carries none of the stylised
+// defs, so a lava helper inside the region is missing exactly where magma needs the shader to
+// compile — and a liquid shader that fails to compile does not fall back, it drops the draw: every
+// magma surface in the zone stops being drawn, and the only sign is one `failed to process shader`
+// line in the log.
+/// One slow scalar octave of the ripple map, read in world yards.
+///
+/// `textureSampleLevel` rather than `textureSample`: this is called under the kind branch, and an
+/// implicit-LOD fetch there needs a uniformity proof naga will not give it. Level 0 is the honest
+/// level anyway — the features are tens of yards across, so there is nothing for a mip to prefilter.
+fn lava_field(world_xz: vec2<f32>, wavelength_yd: f32, drift: vec2<f32>, t: f32) -> f32 {
+    let uv = world_xz / wavelength_yd + drift * t;
+    return textureSampleLevel(ripples, ripples_samp, uv, 0.0).b;
+}
+
+/// Grade the kind's animated sheet into crust and molten seam — see [`LAVA_CRUST`].
+///
+/// Takes the sheet's colour as it comes and only scales it, so a zone that authored dull red magma
+/// keeps dull red magma and one that authored orange keeps orange. The drifts are deliberately an
+/// order below the water's: lava moves, but it moves like something with a skin on it.
+fn stylised_lava(sheet: vec3<f32>, world_xz: vec2<f32>, t: f32) -> vec3<f32> {
+    let plates = lava_field(world_xz, LAVA_PLATE_YD, vec2<f32>(0.0041, 0.0024), t);
+    let breaks = lava_field(world_xz, LAVA_BREAK_YD, vec2<f32>(-0.0063, 0.0038), t);
+    // Thin crust = hot seam. The two octaves are weighted so the plates decide and the breaks only
+    // roughen their edges; an even mix reads as noise rather than as plates.
+    let crust = saturate(plates * 0.74 + breaks * 0.26);
+    let seam = 1.0 - smoothstep(0.34, 0.62, crust);
+    // The sheet is already painted with hot and cool regions; take them rather than fight them, so
+    // the seams land where the artist put the bright parts and the plates where they did not.
+    let lum = dot(sheet, vec3<f32>(0.299, 0.587, 0.114));
+    let molten = saturate(max(seam, smoothstep(0.35, 0.85, lum)));
+    return sheet * mix(LAVA_CRUST, LAVA_GLOW, molten);
+}
+
+#ifdef WATER_STYLISED
+// ── The stylised region ────────────────────────────────────────────────────────────────────────
+//
+// Everything from here to `stylised_water`'s end compiles only into the stylised water pipelines
+// (`LiquidKey::composite`, the `WATER_STYLISED` def): the reference and magma pipelines never see it,
+// so nothing in it can drop their draws by naming a symbol their defs leave out.
+
+#ifdef WATER_SCENE_DEPTH
+// ---- what is behind the water -------------------------------------------------------------------
+
+/// The opaque world's view Z behind pixel `px` in yards, from the linear depth; 0 where it is not
+/// known (nothing drawn, or outside the image).
+fn scene_view_z(px: vec2<i32>) -> f32 {
+    let dims = vec2<i32>(textureDimensions(scene_depth_tex));
+    if (any(px < vec2<i32>(0)) || any(px >= dims)) {
+        return 0.0;
+    }
+    return textureLoad(scene_depth_tex, px, 0).r;
+}
+
+/// The opaque surface behind a water fragment.
+struct SceneBehind {
+    // False on sky, where nothing was drawn, and on a frame whose depth is not this view's size.
+    known: bool,
+    // The opaque surface behind this water pixel, world yards.
+    bed: vec3<f32>,
+    // The view-Z gap from the water to the bed, yards.
+    gap_z: f32,
+    // The water's height above the bed, yards.
+    vertical: f32,
+    // The view ray's length through the water, surface to bed, yards.
+    path: f32,
+};
+
+/// What is behind the water at `world_pos`, drawn at `frag_xy`: the bed on the pixel's own ray,
+/// found from the linear depth.
+fn scene_behind(world_pos: vec3<f32>, frag_xy: vec2<f32>) -> SceneBehind {
+    var s = SceneBehind(false, world_pos, 0.0, 0.0, 0.0);
+    let dims = vec2<i32>(textureDimensions(scene_depth_tex));
+    if (any(dims != vec2<i32>(view.viewport.zw))) {
+        return s;
+    }
+    let z_s = scene_view_z(vec2<i32>(frag_xy));
+    // Nothing drawn behind the pixel is unknown, not infinitely deep: an endless column would run
+    // the absorption to the deep row and paint a flat slab.
+    if (z_s <= 0.0) {
+        return s;
+    }
+    let eye = view.world_position.xyz;
+    let z_w = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
+    // Both points lie on this pixel's ray from the eye, and view Z scales linearly along it.
+    let k = z_s / max(z_w, 1e-4);
+    s.known = true;
+    s.bed = eye + (world_pos - eye) * k;
+    s.gap_z = max(z_s - z_w, 0.0);
+    s.vertical = world_pos.y - s.bed.y;
+    s.path = length(world_pos - eye) * max(k - 1.0, 0.0);
+    return s;
+}
+#endif
 
 /// The positive `t` where the ray `o + t*d` (with `o` measured from the capture point) is `dist`
 /// away from that point — one step of the depth correction, in closed form.
@@ -1163,46 +1261,7 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     return sum * 0.2;
 }
 
-// ---- lava ------------------------------------------------------------------------------------
-//
-// **Outside the `DEPTH_PREPASS` guard below, and that placement is load-bearing.** The march and
-// everything it needs only exist when the depth prepass does, and on the faithful lane it does not
-// (`liquid::depth` arms the prepass for the stylised look only). Magma is drawn on BOTH lanes, so a
-// lava helper defined inside that guard is missing exactly where the reference needs the shader to
-// compile — and a liquid shader that fails to compile does not fall back, it drops the draw: every
-// magma surface in the zone stops being drawn at all. That is what happened. It was invisible from
-// the stylised lane, which has the prepass and compiled fine, and the only sign was one
-// `failed to process shader` line in the log under a pile of unrelated asset warnings.
-/// One slow scalar octave of the ripple map, read in world yards.
-///
-/// `textureSampleLevel` rather than `textureSample`: this is called under the kind branch, and an
-/// implicit-LOD fetch there needs a uniformity proof naga will not give it. Level 0 is the honest
-/// level anyway — the features are tens of yards across, so there is nothing for a mip to prefilter.
-fn lava_field(world_xz: vec2<f32>, wavelength_yd: f32, drift: vec2<f32>, t: f32) -> f32 {
-    let uv = world_xz / wavelength_yd + drift * t;
-    return textureSampleLevel(ripples, ripples_samp, uv, 0.0).b;
-}
-
-/// Grade the kind's animated sheet into crust and molten seam — see [`LAVA_CRUST`].
-///
-/// Takes the sheet's colour as it comes and only scales it, so a zone that authored dull red magma
-/// keeps dull red magma and one that authored orange keeps orange. The drifts are deliberately an
-/// order below the water's: lava moves, but it moves like something with a skin on it.
-fn stylised_lava(sheet: vec3<f32>, world_xz: vec2<f32>, t: f32) -> vec3<f32> {
-    let plates = lava_field(world_xz, LAVA_PLATE_YD, vec2<f32>(0.0041, 0.0024), t);
-    let breaks = lava_field(world_xz, LAVA_BREAK_YD, vec2<f32>(-0.0063, 0.0038), t);
-    // Thin crust = hot seam. The two octaves are weighted so the plates decide and the breaks only
-    // roughen their edges; an even mix reads as noise rather than as plates.
-    let crust = saturate(plates * 0.74 + breaks * 0.26);
-    let seam = 1.0 - smoothstep(0.34, 0.62, crust);
-    // The sheet is already painted with hot and cool regions; take them rather than fight them, so
-    // the seams land where the artist put the bright parts and the plates where they did not.
-    let lum = dot(sheet, vec3<f32>(0.299, 0.587, 0.114));
-    let molten = saturate(max(seam, smoothstep(0.35, 0.85, lum)));
-    return sheet * mix(LAVA_CRUST, LAVA_GLOW, molten);
-}
-
-#ifdef DEPTH_PREPASS
+#ifdef WATER_SCENE_DEPTH
 
 
 
@@ -1345,9 +1404,9 @@ fn hiz_screen(p: vec3<f32>) -> vec3<f32> {
 /// the planar capture and the sky mix behind it take over. Under [`WaterStyle::StylisedSsr`] there is no capture behind it and
 /// the sky mix alone catches what it misses, which is the trade that lane is offered for.
 ///
-/// The water itself is not in the prepass (Bevy excludes alpha-blended materials, and
-/// `liquid::depth`'s doc keeps it that way deliberately), so there is no self-intersection to bias
-/// against — the first step off the surface is already reading opaque geometry only.
+/// The water itself is not in the pyramid (`liquid::hiz` seeds it after the opaque pass, before
+/// anything transparent draws), so there is no self-intersection to bias against — the first step
+/// off the surface is already reading opaque geometry only.
 fn ssr_trace(origin: vec3<f32>, dir: vec3<f32>) -> SsrHit {
     var out: SsrHit;
     out.rgb = vec3<f32>(0.0);
@@ -1655,14 +1714,9 @@ fn water_view_id() -> u32 {
 fn stylised_water(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
-    /// Which prepass sample the thickness lane reads. Always 0 now — see the fragment entry point
-    /// for why this shader no longer takes `@builtin(sample_index)` — but kept as a parameter
-    /// rather than inlined so the one place that decides it stays the one place that decides it.
-    sample_index: u32,
-    // Yards of water between this fragment and whatever opaque surface is behind it, or a negative
-    // number where the scene depth is unavailable (the reference lane, no prepass) — in which case
-    // every term below falls back to the authored depth byte, exactly as it did before.
-    thickness: f32,
+    // What is behind this fragment ([`scene_behind`]); where it is not known, every term below
+    // falls back to the authored depth byte.
+    sb: SceneBehind,
     depth: f32,
     shore: f32,
     shore_offset: vec2<f32>,
@@ -1679,6 +1733,9 @@ fn stylised_water(
     room_fog: u32,
 ) -> vec4<f32> {
     let xz = world_pos.xz;
+    // Yards of water between this fragment and the opaque surface behind it along the view axis,
+    // negative where that is not known.
+    let thickness = select(-1.0, sb.gap_z, sb.known);
     // In uniform control flow, before anything branches — see [`surface_tilt`].
     let tilt = surface_tilt(world_pos);
     // Beside the tilt, and for the same reason: both read screen-space derivatives, which are only
@@ -1836,8 +1893,8 @@ fn stylised_water(
     // swatch rows cannot express at any depth but the one it was tuned at — which is why the deep
     // end had to be capped by hand to stop several zones going to tar.
     //
-    // Where it is not known — the reference lane, which has no prepass, or the first frame after a
-    // style flip — this is the authored depth byte on a curve, exactly as before.
+    // Where it is not known — nothing drawn behind the water, or the first frame after a style
+    // flip — this is the authored depth byte on a curve.
     let wake_push = wake_height * WAKE_BODY_DEPTH;
     var body_t = saturate(pow(depth, 0.35) + wake_push) * BODY_DEPTH_MAX;
     var body_rgb = mix(shallow.rgb, deep.rgb, body_t);
@@ -2062,7 +2119,7 @@ fn stylised_water(
     var ssr: SsrHit;
     ssr.rgb = vec3<f32>(0.0);
     ssr.conf = 0.0;
-#ifdef DEPTH_PREPASS
+#ifdef WATER_SCENE_DEPTH
     if (water_reflect.flags.z > 0.0 && view.world_position.y > world_pos.y) {
         ssr = ssr_trace(
             world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y,
@@ -2332,7 +2389,7 @@ fn stylised_water(
     // ...and the BODY thins to nothing where something passes through the surface: a sheet of water
     // meeting a rock along a hard line is the giveaway that it is a sheet, while real water fades
     // over the last hand's breadth because by then there is barely any water left to be opaque
-    // with. Needs to know what is behind the surface, so it is another thing the prepass buys.
+    // with. Needs to know what is behind the surface: [`scene_behind`]'s column.
     //
     // **The foam is taken after the fade, not before it.** Foam sits ON the surface — it is spray,
     // not water column — so softening it against the very intersection it gathers at erases the
@@ -2379,8 +2436,10 @@ fn stylised_water(
                 wake_foam * WAKE_FOAM_LEVEL,
             );
         } else if (view_id == WV_THICKNESS) {
-            // The water column behind the pixel, yards / 8; 0 where it is not known.
-            v = vec3<f32>(max(thickness, 0.0) / 8.0, 0.0, 0.0);
+            // What is behind the pixel, yards / 8: r the view-Z gap, g the vertical column, b the
+            // path through the water; 0 where it is not known.
+            let column = max(vec3<f32>(sb.gap_z, sb.vertical, sb.path), vec3<f32>(0.0)) / 8.0;
+            v = select(vec3<f32>(0.0), column, sb.known);
         } else if (view_id == WV_FRESNEL) {
             v = vec3<f32>(fres);
         }
@@ -2389,6 +2448,7 @@ fn stylised_water(
 #endif
     return vec4<f32>(apply_fog(rgb, world_pos, room_fog), alpha);
 }
+#endif // WATER_STYLISED
 
 // The vertex input — bevy 0.18's `forward_io::Vertex` fields at bevy's own shader locations, plus
 // the shore offset at 10 under `LIQUID_SHORE_OFFSET` (`LiquidExt::specialize` sets the def and
@@ -2521,9 +2581,6 @@ fn swatch_at(shallow: vec4<f32>, deep: vec4<f32>, v: f32, ocean: bool) -> vec4<f
 
 @fragment
 fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
-    // Prepass sample 0, and no `@builtin(sample_index)`: that builtin turns on sample-rate shading,
-    // four times the water shader's work under MSAA 4 for no visible difference.
-    let sample_index = 0u;
     // The far-clip wall, as terrain and models: discard beyond `fog_params.w` (0 disables it).
     if (wow_light.fog_params.w > 0.0) {
         let clip_z = -(view.view_from_world * vec4<f32>(in.world_position.xyz, 1.0)).z;
@@ -2586,6 +2643,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // takes the deep river band flat, having no bathymetry to lerp over; and a WMO interior pool
     // keeps its authored `MOMT.diffColor` body, unlit, because that arm has no normal to light with
     // and its rooms are not lit by the scene's sun.
+#ifdef WATER_STYLISED
     if (w.path.y > 0.5) {
         // **The ocean's depth coordinate is a different ramp from the river's**, and this path has
         // to reconcile them. Both come off the same per-vertex MCLQ depth byte (~8.5 byte/yd), but
@@ -2619,39 +2677,13 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
                 vec3<f32>(1.0),
             );
         }
-        // **How much water stands between this fragment and whatever is behind it**, in yards.
-        //
-        // The opaque scene's depth comes from the prepass, which exists only while this look is on
-        // (`benilla_world::liquid::depth`); both depths are converted out of reverse-Z into view
-        // space, where the difference is a distance rather than a ratio. Negative means "not
-        // known", and every consumer falls back to the authored depth byte.
-        var thickness = -1.0;
-#ifdef DEPTH_PREPASS
-        let scene_depth = prepass_depth(in.clip_position, sample_index);
-        // **A pixel with nothing in the prepass is UNKNOWN, not infinitely deep.** Reverse-Z clears
-        // to zero at the far plane, so that is what "nothing was drawn here" reads as — and taking
-        // it at face value makes the water column enormous, which drives the absorption below
-        // straight to the deep row and paints a flat slab.
-        //
-        // It happens over more of the world than it sounds. Terrain is in the prepass, but the
-        // static-gx pass draws on its own pipeline and is in none, and models opt out
-        // (`WowModelExt::enable_prepass`) — so every WMO floor under water is a hole, which is
-        // exactly what Booty Bay's harbour is. Falling back to the authored byte there gives the
-        // look this had before the prepass existed, which is the right answer for a pixel whose
-        // depth we genuinely do not know.
-        if (scene_depth > 0.0) {
-            let scene_z = depth_ndc_to_view_z(scene_depth);
-            let water_z = depth_ndc_to_view_z(in.clip_position.z);
-            // View Z runs negative into the screen, so the surface is the larger of the two and the
-            // column is their difference.
-            thickness = max(water_z - scene_z, 0.0);
-        }
-#endif
+        // What stands behind this water pixel, from the complete linear depth (`liquid::hiz`): the
+        // static world, entity-path models and units included.
+        let sb = scene_behind(in.world_position.xyz, in.clip_position.xy);
         return stylised_water(
             in.world_position.xyz,
             in.clip_position.xy,
-            sample_index,
-            thickness,
+            sb,
             style_depth,
             in.shore,
             in.shore_offset,
@@ -2664,6 +2696,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             in.room_fog,
         );
     }
+#endif
 
     // ---- The WMO water arms: opacity is the per-vertex authored byte through the zone's linear
     // alpha ramp, carried in `in.depth`.

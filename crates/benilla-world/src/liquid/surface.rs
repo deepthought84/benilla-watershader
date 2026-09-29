@@ -1013,6 +1013,7 @@ pub(super) fn setup_liquid(
                     probe: pass.probe.clone(),
                     hiz: pass.hiz.clone(),
                     hiz_far: pass.hiz_far.clone(),
+                    scene_depth: pass.scene_depth.clone(),
                     wake: wake.clone(),
                     reflect_buf: pass.reflect_buf.clone(),
                     // x = fullbright (the sheet as body, still fogged); y = the ocean swatch;

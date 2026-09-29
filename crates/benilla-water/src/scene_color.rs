@@ -3,8 +3,8 @@
 //!
 //! ## Why a copy, and why our own
 //!
-//! Screen-space reflection needs two things: where the reflected ray lands (depth, which
-//! [`super::depth`]'s prepass now supplies) and what colour is there. The second cannot be read
+//! Screen-space reflection needs two things: where the reflected ray lands (depth: the pyramid
+//! [`super::hiz`] builds) and what colour is there. The second cannot be read
 //! from the frame being drawn — the water draws in the transparent phase, where the main colour
 //! target is bound as an attachment and sampling it is undefined. So a snapshot has to be taken
 //! while it is still readable.

@@ -203,7 +203,8 @@ pub struct WaterPassImages {
     /// The farthest-depth pyramid.
     pub hiz_far: Handle<Image>,
     /// The opaque world's linear depth behind each pixel: view Z in yards, `R32Float` at the view's
-    /// size, 0 where nothing was drawn. The placeholder is one texel.
+    /// size, 0 where nothing was drawn; what the stylised lane measures its water column against.
+    /// The placeholder is one texel, which the shader reads as unknown.
     pub scene_depth: Handle<Image>,
     /// The wave simulation's field.
     pub wake: Handle<Image>,
