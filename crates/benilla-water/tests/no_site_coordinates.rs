@@ -1,12 +1,25 @@
 //! Improved Water runs on whatever map is loaded, so its runtime code names no place: every
-//! position it uses is derived from the loaded map. This fails on a site's coordinates written
-//! into `src/` as a literal position. Test modules may name places and are not scanned.
+//! position it uses is derived from the loaded map. This fails on a site's coordinates written as
+//! a literal position into the crate's `src/` or into `liquid.wgsl`, the water's shader in
+//! `benilla-assets`: three numbers, or a horizontal pair. Test modules may name places and are not
+//! scanned. A lone number, such as a site's height, cannot be told from a constant and passes.
 
 use std::path::{Path, PathBuf};
 
-/// The least magnitude, in yards, that makes a three-number literal a place in the world rather
-/// than a colour, a direction or an offset: a map spans thousands of yards around its origin.
+/// The least magnitude, in yards, that makes a literal a coordinate in the world rather than a
+/// colour, a direction or an offset: a map spans thousands of yards around its origin.
 const PLACE_YD: f64 = 100.0;
+
+/// The vector constructors a position is written with, in Rust and WGSL.
+const VECTORS: &[&str] = &[
+    "vec2",
+    "vec3",
+    "vec2f",
+    "vec3f",
+    "Vec2::new",
+    "Vec3::new",
+    "Vec3A::new",
+];
 
 /// A numeric literal's value: an optional sign, digits, and a Rust or WGSL float suffix.
 fn number(s: &str) -> Option<f64> {
@@ -24,9 +37,58 @@ fn number(s: &str) -> Option<f64> {
     Some(if s.starts_with('-') { -v } else { v })
 }
 
-/// Every innermost `(…)` or `[…]` in `code` holding exactly three numeric literals, at least one of
-/// them a float, with a component of at least [`PLACE_YD`]: `Vec3::new(-420.0, 48.64, 9385.0)`,
-/// `[-9385.0, 420.0, 48.64]`, `vec3<f32>(…)`. Returned as `(line, text)`.
+/// Whether the `(` or `[` at `at` in `code` opens a list of coordinates: an array, a tuple or a
+/// vector's constructor, not another function's arguments, which a range such as
+/// `smoothstep(100.0, 400.0, d)` fills.
+fn opens_coordinates(code: &str, at: usize) -> bool {
+    if code[at..].starts_with('[') {
+        return true;
+    }
+    let before = code[..at].trim_end();
+    let name_len: usize = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphanumeric() || "_:<>!".contains(*c))
+        .map(char::len_utf8)
+        .sum();
+    let name = &before[before.len() - name_len..];
+    let name = ["<f32>", "<f64>"]
+        .iter()
+        .find_map(|t| name.strip_suffix(t))
+        .unwrap_or(name);
+    name.is_empty() || VECTORS.iter().any(|v| name.ends_with(v))
+}
+
+/// Whether the two or three comma-separated `parts` of a list are a position: a float among them,
+/// not a 0-255 colour, and either three numbers with a place-sized one off an axis, or, in a list
+/// of coordinates, a horizontal pair or a triple with one computed part, each with two
+/// place-sized numbers.
+fn is_position(parts: &[&str], coordinates: bool) -> bool {
+    if !parts.iter().any(|p| p.contains('.')) {
+        return false;
+    }
+    let values: Vec<f64> = parts.iter().filter_map(|p| number(p)).collect();
+    let far = values.iter().filter(|v| v.abs() >= PLACE_YD).count();
+    if values.len() < parts.len() {
+        // `Vec3::new(-420.0, 48.64 + LIFT, 9385.0)`.
+        return coordinates && parts.len() == 3 && far >= 2;
+    }
+    if values
+        .iter()
+        .all(|v| v.fract() == 0.0 && (0.0..=255.0).contains(v))
+    {
+        return false;
+    }
+    match parts.len() {
+        // Off an axis: `vec3(0.0, 10000.0, 0.0)` is a direction's sentinel.
+        3 => far >= 1 && values.iter().filter(|v| **v != 0.0).count() >= 2,
+        2 => coordinates && far == 2,
+        _ => false,
+    }
+}
+
+/// Every innermost `(…)` or `[…]` in `code` that [`is_position`]: `Vec3::new(-420.0, 48.64,
+/// 9385.0)`, `[-9385.0, 420.0, 48.64]`, `vec2<f32>(-420.0, 9385.0)`. Returned as `(line, text)`.
 fn literal_positions(code: &str) -> Vec<(usize, String)> {
     let mut found = Vec::new();
     for (open, close) in [('(', ')'), ('[', ']')] {
@@ -44,12 +106,7 @@ fn literal_positions(code: &str) -> Vec<(usize, String)> {
                 .map(str::trim)
                 .filter(|p| !p.is_empty())
                 .collect();
-            let values: Vec<f64> = parts.iter().filter_map(|p| number(p)).collect();
-            if parts.len() == 3
-                && values.len() == 3
-                && parts.iter().any(|p| p.contains('.'))
-                && values.iter().any(|v| v.abs() >= PLACE_YD)
-            {
+            if (2..=3).contains(&parts.len()) && is_position(&parts, opens_coordinates(code, at)) {
                 let line = code[..at].matches('\n').count() + 1;
                 found.push((line, format!("{open}{inner}{close}")));
             }
@@ -84,7 +141,8 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The detector finds the literal the probe's old fixed capture point was written as, in each
-/// spelling a position takes here, and passes the crate's other kinds of three-number literal.
+/// spelling a position takes here, and passes the other kinds of two- and three-number literal
+/// the water's code holds.
 #[test]
 fn a_literal_world_position_is_found() {
     for site in [
@@ -92,15 +150,22 @@ fn a_literal_world_position_is_found() {
         "let at = [-9385.0, 420.0, 48.64];",
         "let at = vec3<f32>(-9385.0, 420.0, 48.64);",
         "let at = Vec3::new(\n    -420.0,\n    48.64,\n    9_385.0,\n);",
+        "let at = vec2<f32>(-420.0, 9385.0);",
+        "let at = (-9385.0, 420.0);",
+        "let at = Vec3::new(-420.0, 48.64 + LIFT, 9385.0);",
     ] {
         assert_eq!(literal_positions(site).len(), 1, "not found: {site}");
     }
     for not_a_site in [
         "Vec3::new(0.0, 1.0, 0.0)",
         "Color::srgb(0.25, 0.95, 0.35)",
+        "vec3<f32>(255.0, 128.0, 0.0)",
+        "vec3<f32>(0.0, 10000.0, 0.0)",
+        "vec2<f32>(0.0, 10000.0)",
         "@workgroup_size(256, 1, 1)",
         "UVec2::new(640, 360)",
         "smoothstep(100.0, 400.0, d)",
+        "clamp(d, 100.0, 400.0)",
         "Vec3::new(0.0, 4000.0 * k, 0.0)",
     ] {
         assert!(
@@ -112,20 +177,23 @@ fn a_literal_world_position_is_found() {
 }
 
 /// **No place in the world is written into the runtime code.** Positions come from the loaded
-/// map (its classification's spots, its liquid, its terrain); a site's coordinates in `src/`
-/// make the look depend on one place.
+/// map (its classification's spots, its liquid, its terrain); a site's coordinates in `src/` or
+/// in the shader make the look depend on one place.
 #[test]
 fn the_runtime_code_names_no_place() {
-    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("the crate sits in the workspace's crates/");
     let mut files = Vec::new();
-    sources(&src, &mut files);
-    assert!(!files.is_empty(), "no sources under {}", src.display());
+    sources(&crates.join("benilla-water/src"), &mut files);
+    assert!(!files.is_empty(), "no sources under benilla-water/src");
+    files.push(crates.join("benilla-assets/src/shaders/liquid.wgsl"));
     let mut found = Vec::new();
     for path in files {
         let text = std::fs::read_to_string(&path).expect("a readable source");
         for (line, literal) in literal_positions(&runtime_code(&text)) {
-            let path = path.strip_prefix(&src).unwrap_or(&path).display();
-            found.push(format!("src/{path}:{line}: {literal}"));
+            let path = path.strip_prefix(crates).unwrap_or(&path).display();
+            found.push(format!("crates/{path}:{line}: {literal}"));
         }
     }
     assert!(

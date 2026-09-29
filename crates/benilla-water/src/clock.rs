@@ -5,9 +5,9 @@
 //! Bevy's `globals.time` wraps at 3600 s (`bevy_render` `globals.rs`), so a phase read off it jumps
 //! once an hour unless its period divides the hour. The clock sums the virtual clock's deltas, so a
 //! capture holds it while the scene builds and steps it exactly while the shot ages. The reference
-//! lane keeps `globals.time`: its 24 fps flip (30 frames in 1.25 s, `0x68aac0`) and its 10 s magma
-//! scroll both divide the hour. The stylised magma grade keeps it too, with the rest of magma and
-//! slime.
+//! lane keeps `globals.time`: its 24 fps flip (`0x68aac0`; 30 frames in 1.25 s, the rapids' 16 in
+//! 0.667 s) and its 10 s magma scroll all divide the hour. The stylised magma grade keeps it too,
+//! with the rest of magma and slime.
 
 use bevy::prelude::*;
 
@@ -111,8 +111,8 @@ mod tests {
     }
 
     /// Across Bevy's 3600 s wrap every published phase moves by exactly its rate times the time
-    /// step, where the wrapped clock the shader read before jumps; and again a week in, where the
-    /// f64 reduction still holds.
+    /// step, where a phase read off the wrapped `globals.time` jumps; and again a week in, where
+    /// the f64 reduction still holds.
     #[test]
     fn every_phase_steps_evenly_across_the_hour() {
         let rates = rates();
@@ -130,7 +130,7 @@ mod tests {
             }
             assert_eq!(a[18..], [0.0; 2], "the spare lanes stay zero");
         }
-        // The old clock, `globals.time` wrapped at 3600 s, jumps on every lane whose period does
+        // A phase read off `globals.time`, wrapped at 3600 s, jumps on every lane whose period does
         // not divide the hour: all but the 0.010 drifts and the 1.6 s flow restart.
         let mut popped = 0;
         for (lane, rate) in rates.iter().enumerate() {
@@ -200,5 +200,76 @@ mod tests {
             wgsl.contains(&format!("const FLOW_PERIOD_S: f32 = {FLOW_PERIOD_S};")),
             "liquid.wgsl's FLOW_PERIOD_S is not {FLOW_PERIOD_S}"
         );
+    }
+
+    /// `liquid.wgsl`'s function `name`, from its `fn` to its closing brace, with every `//`
+    /// comment blanked.
+    fn wgsl_fn(name: &str) -> String {
+        let wgsl: String = include_str!("../../benilla-assets/src/shaders/liquid.wgsl")
+            .lines()
+            .map(|l| l.find("//").map_or(l, |c| &l[..c]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let at = wgsl
+            .find(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("liquid.wgsl has no `fn {name}`"));
+        let open = at + wgsl[at..].find('{').expect("a body");
+        let mut depth = 0;
+        for (i, c) in wgsl[open..].char_indices() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                return wgsl[at..=open + i].to_string();
+            }
+        }
+        panic!("`fn {name}` is not closed");
+    }
+
+    /// Every `water_reflect.drift[k]` index `body` reads, in order.
+    fn drift_reads(body: &str) -> Vec<usize> {
+        body.split("water_reflect.drift[")
+            .skip(1)
+            .map(|rest| {
+                rest[..rest.find(']').expect("a closed index")]
+                    .parse()
+                    .expect("a literal index")
+            })
+            .collect()
+    }
+
+    /// **The stylised surface animates on this clock alone.** Its ripple, flow and shore foam read
+    /// the published lanes and never `globals.time`, which wraps at the hour, and each map offset
+    /// is its own drift's lane: the five octaves longest first in `stylised_water`, then
+    /// `foam_noise`'s three; the flow restart is `cycle.x` and the swell `cycle.y`.
+    #[test]
+    fn the_stylised_surface_reads_its_phases_off_this_clock() {
+        for name in [
+            "stylised_water",
+            "ripple_layer",
+            "ripple_flowing",
+            "foam_noise",
+        ] {
+            let body = wgsl_fn(name);
+            for wrapped in ["anim_time()", "globals.time"] {
+                assert!(
+                    !body.contains(wrapped),
+                    "`{name}` reads `{wrapped}`, which wraps at 3600 s"
+                );
+            }
+        }
+        let ripples = RIPPLE_DRIFT.len();
+        assert_eq!(
+            drift_reads(&wgsl_fn("stylised_water")),
+            (0..ripples).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            drift_reads(&wgsl_fn("foam_noise")),
+            (ripples..ripples + FOAM_DRIFT.len()).collect::<Vec<_>>()
+        );
+        assert!(wgsl_fn("ripple_flowing").contains("water_reflect.cycle.x"));
+        assert!(wgsl_fn("stylised_water").contains("water_reflect.cycle.y"));
     }
 }
