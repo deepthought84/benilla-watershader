@@ -871,6 +871,9 @@ impl ViewNode for StaticGxPrepassNode {
                 None => return Ok(()),
             }
         }
+        // `render/static_gx_prepass/elapsed_gpu`: the perf journal's `gpu_other`, beside Bevy's
+        // `early_prepass`.
+        let diagnostics = render_context.diagnostic_recorder();
         // Load, never clear: Bevy's prepass has already written the entity path's depth into this
         // texture and this adds to it.
         let mut pass = render_context.begin_tracked_render_pass(RenderPassDescriptor {
@@ -880,6 +883,7 @@ impl ViewNode for StaticGxPrepassNode {
             timestamp_writes: None,
             occlusion_query_set: None,
         });
+        let span = diagnostics.pass_span(&mut pass, "static_gx_prepass");
         record_static_gx(
             &mut pass,
             &resolved,
@@ -889,6 +893,7 @@ impl ViewNode for StaticGxPrepassNode {
             view_offset,
             &ready,
         );
+        span.end(&mut pass);
         Ok(())
     }
 }

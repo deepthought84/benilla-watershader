@@ -9,7 +9,8 @@
 //! `TEXTURE_BINDING` to the world camera's `depth_texture_usages`, which the pyramid's seed needs.
 //!
 //! Nothing samples the prepass. It fills the opaque world's depth ahead of the main pass while the
-//! stylised look is on, and the reference lane pays nothing for it.
+//! stylised look is on, and the reference lane pays nothing for it. `$WOW_WATER_PREPASS=0` leaves
+//! it off (the early-Z A/B lever, [`prepass_lever_on`]); the view depth stays bindable.
 //!
 //! ## What is in it, and what is not
 //!
@@ -38,6 +39,15 @@ use bevy::render::render_resource::TextureUsages;
 use super::WaterStyle;
 use crate::view::WorldCamera;
 
+/// `$WOW_WATER_PREPASS=0`: never attach the prepass, the early-Z A/B lever. Read once, at startup.
+/// Nothing reads the prepass, so the lever changes cost, and pixels in one place: past the far-clip
+/// wall, where `terrain.wgsl` discards and Bevy's prepass for the terrain does not, so with the
+/// prepass the terrain's depth there hides the WDL horizon and the far doodads behind it.
+fn prepass_lever_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_WATER_PREPASS").as_deref() != Ok("0"))
+}
+
 /// Attach the depth prepass while the stylised look is on, and take it away again when it is not.
 ///
 /// Change-gated on both sides: a steady state does nothing at all, and the insert/remove only fire
@@ -48,6 +58,7 @@ fn maintain_depth_prepass(
     mut cameras: Query<(Entity, Has<DepthPrepass>, &mut Camera3d), With<WorldCamera>>,
 ) {
     let want = style.is_stylised();
+    let prepass = want && prepass_lever_on();
     for (entity, has, mut camera_3d) in &mut cameras {
         // **The view's depth has to be bindable for the pyramid and the linear depth** —
         // `liquid::hiz` seeds both from it after the opaque pass, because the prepass is missing
@@ -60,11 +71,11 @@ fn maintain_depth_prepass(
         if want && !usages.contains(TextureUsages::TEXTURE_BINDING) {
             camera_3d.depth_texture_usages = (usages | TextureUsages::TEXTURE_BINDING).into();
         }
-        if want == has {
+        if prepass == has {
             continue;
         }
         let mut cam = commands.entity(entity);
-        if want {
+        if prepass {
             cam.insert(DepthPrepass);
         } else {
             cam.remove::<DepthPrepass>();
