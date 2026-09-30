@@ -1,22 +1,29 @@
-# wg-booty-harbour: Booty Bay's harbour from a dock; to the right, water under a stilted platform
-# (its posts' waterline at y 505-515), the platform's shade above it.
+# wg-booty-harbour: Booty Bay's harbour from a dock, the open water right of an anvil on the planks,
+# stilted houses behind it (their posts' waterline at y 505-530), the dock's plank edge crossing
+# the bottom from y 636 at x 1175 to y 730 at x 1575. Every deck in frame lies below the eye, so no
+# underside shows: the under-deck gate is water-booty-underdeck's.
 scene = "water-booty-harbour"
 [box]
-water = [1100, 515, 1350, 545]       # the water under the platform
-deck = [1200, 470, 1290, 500]        # the shade under the platform, above the water
+water = [1200, 550, 1600, 625]       # open water right of the anvil (x <= 1179), above the planks
+harbour = [1340, 585, 1520, 670]     # the harbour body (P1-27's x1340-1520 y585-680, above the planks)
 pilings = [1050, 495, 1550, 530]     # the posts' waterline
-harbour = [1050, 560, 1600, 700]
-[[row]]
-metric = "underdeck_ratio"
-water = "water"
-deck = "deck"
 [[row]]
 metric = "contact_cov"
 label = "pilings_contact"
 box = "pilings"
 [[row]]
-metric = "luma_sd"
+metric = "deep_hue"
+label = "harbour_hue"
 box = "harbour"
 [[row]]
-metric = "lum_vs_ref"
+metric = "deep_luma"
 box = "harbour"
+[[row]]
+metric = "deep_chroma"
+box = "harbour"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
