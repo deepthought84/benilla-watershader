@@ -950,7 +950,15 @@ const FRAME_SETS: &[(LiquidKind, &str, &str, u32)] = &[
 
 /// The ripple map's seed. Arbitrary, and fixed: the map is generated at every startup, so a seed
 /// that moved would make two runs of the same scene two different pictures.
-const RIPPLE_SEED: u32 = 0xB0A7_5EA5;
+pub(super) const RIPPLE_SEED: u32 = 0xB0A7_5EA5;
+
+/// The stylised look's one ripple map, shared by every liquid material: the handle a change to
+/// the image after setup goes through (its sampler; [`ripple::ripple_map`] keeps the CPU copy that
+/// needs). Its [`ripple::RippleStats`] are a resource beside it.
+#[derive(Resource, Clone)]
+pub struct RippleMap {
+    pub image: Handle<Image>,
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn setup_liquid(
@@ -972,8 +980,14 @@ pub(super) fn setup_liquid(
     // The stylised look's ripple map: ONE generated 256² texture, shared by every liquid material
     // and sampled only when `waterStyle` selects that look. Built here rather than lazily on the
     // first flip because the binding is unconditional — a material cannot hold an empty texture
-    // slot — and because generating it costs a few milliseconds once, beside 150 BLP decodes.
-    let ripples = images.add(ripple::ripple_map(RIPPLE_SEED));
+    // slot — and because generating it costs a few milliseconds once, beside 150 BLP decodes. Its
+    // slope statistics feed the look rows' roughness table.
+    let (ripple_map, ripple_stats) = ripple::ripple_map(RIPPLE_SEED);
+    let ripples = images.add(ripple_map);
+    commands.insert_resource(ripple_stats);
+    commands.insert_resource(RippleMap {
+        image: ripples.clone(),
+    });
     // The wave simulation's live field — one shared image too, and bound on every liquid material
     // for the same reason the map above is: the binding cannot be conditional, so the toggle stays
     // a uniform write rather than a material rebuild.

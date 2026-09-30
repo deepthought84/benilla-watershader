@@ -196,12 +196,13 @@ pub use query::{
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
     Underwater, WaterChunkInfo, WmoPool,
 };
+pub use ripple::RippleStats;
 pub(crate) use spatial::maintain_water_index;
 pub use spatial::WaterIndex;
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, WetLattice,
 };
-pub use surface::{warm_liquid_mesh, LiquidSurface, WaterMapRef};
+pub use surface::{warm_liquid_mesh, LiquidSurface, RippleMap, WaterMapRef};
 
 /// Present when a plugin draws Improved Water (`benilla-water`); without it that option draws the
 /// reference, since the stylised lane alone has no reflection tiers to read.

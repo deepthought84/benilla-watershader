@@ -1126,11 +1126,10 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    (time, clock, look, quality): (
+    (time, clock, look): (
         Res<Time>,
         Res<super::clock::WaterClock>,
-        Res<super::look::WaterLook>,
-        Res<super::WaterQuality>,
+        super::look::LookSources,
     ),
     world_cam: Query<(&GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut mirror: MirrorCamera,
@@ -1138,10 +1137,7 @@ pub(super) fn drive_reflection(
 ) {
     // The look rows and the sun lanes first and unconditionally: they are not the mirror's, and
     // every path out of this system below is a frame on which the water still has to draw.
-    let inputs = super::look::LookInputs {
-        tier: quality.tier(),
-    };
-    data.0[LOOK_LANES].copy_from_slice(&super::look::look_lanes(&look, &inputs));
+    data.0[LOOK_LANES].copy_from_slice(&look.lanes());
     let to_sun = light.celestial_dir.normalize_or_zero();
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();

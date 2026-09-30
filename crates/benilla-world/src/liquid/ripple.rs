@@ -26,6 +26,10 @@
 //! that, out toward the horizon, each cover many tiles of it, and the beat between the two grids
 //! is a moiré that crawls over distant water. (The reference's own sheet ships nine authored mips
 //! whose alpha deliberately dies with distance, for the same reason — see `liquid.wgsl`.)
+//!
+//! What a mip averages away is not lost to the look: [`RippleStats`] measures, from the uploaded
+//! bytes, how much slope variance each level has lost against level 0, so the shader can turn the
+//! slope it can no longer resolve into roughness.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
@@ -36,6 +40,9 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 /// Edge length of the generated map. Small on purpose: the shader samples it at three different
 /// world scales, so its own texel grid never becomes the visible detail.
 const SIZE: usize = 256;
+
+/// The chain's levels, [`SIZE`] down to 1: the look block's nine `ripple_stats` rows.
+const LEVELS: usize = SIZE.trailing_zeros() as usize + 1;
 
 /// The octave ladder: `(lattice period, amplitude)`. Every period divides [`SIZE`], so each layer
 /// tiles on its own and the sum tiles with them.
@@ -132,12 +139,112 @@ fn halve(level: &[u8], n: usize) -> Vec<u8> {
     next
 }
 
+/// What each level of the ripple chain has lost against level 0, in the shader's decoded slope
+/// (`tex·2 − 1`): the table the stylised lane turns into roughness. A box mip is a block mean (to
+/// the nearest code), so by the law of total variance the variance a level-`L` sample has lost is
+/// `cov₀ − cov_L`.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq)]
+pub struct RippleStats {
+    /// Per level 0..=8: `[lost_xx, lost_zz, lost_xz, resolved]`, the covariance the level has lost
+    /// and the per-axis variance `(cov_xx + cov_zz) / 2` it keeps.
+    pub levels: [[f32; 4]; LEVELS],
+    /// `[mean_x, mean_z, var0, wavelength]`: level 0's mean slope (the `as u8` truncation's
+    /// bias), its per-axis variance, and its features' wavelength in texels.
+    pub mean: [f32; 4],
+}
+
+/// The slope statistics of `chain`, the bytes [`ripple_map`] uploads: per level, the covariance
+/// of the decoded R/G slope about the level's own mean, and what the level has lost against level
+/// 0; then level 0's mean, variance and Rice wavelength ([`rice_wavelength`]), averaged over the
+/// two slope axes.
+fn ripple_stats(chain: &[u8]) -> RippleStats {
+    let decoded: [f64; 256] = std::array::from_fn(|b| b as f64 / 255.0 * 2.0 - 1.0);
+    let decode = |b: u8| decoded[usize::from(b)];
+    let mut cov = [[0.0f64; 3]; LEVELS];
+    let mut mean = [0.0f64; 2];
+    let mut wavelength = 0.0;
+    let mut at = 0;
+    for (level, c) in cov.iter_mut().enumerate() {
+        let n = SIZE >> level;
+        let texels = chain[at..at + n * n * 4].as_chunks::<4>().0;
+        at += n * n * 4;
+        let count = (n * n) as f64;
+        let (mut sx, mut sz) = (0.0, 0.0);
+        for t in texels {
+            sx += decode(t[0]);
+            sz += decode(t[1]);
+        }
+        let (mx, mz) = (sx / count, sz / count);
+        let (mut cxx, mut czz, mut cxz) = (0.0, 0.0, 0.0);
+        for t in texels {
+            let (x, z) = (decode(t[0]) - mx, decode(t[1]) - mz);
+            cxx += x * x;
+            czz += z * z;
+            cxz += x * z;
+        }
+        *c = [cxx / count, czz / count, cxz / count];
+        if level == 0 {
+            mean = [mx, mz];
+            wavelength = (0..2)
+                .map(|axis| {
+                    let field: Vec<f64> = texels.iter().map(|t| decode(t[axis])).collect();
+                    rice_wavelength(&field)
+                })
+                .sum::<f64>()
+                / 2.0;
+        }
+    }
+    let c0 = cov[0];
+    RippleStats {
+        levels: cov.map(|c| {
+            [
+                (c0[0] - c[0]).max(0.0) as f32,
+                (c0[1] - c[1]).max(0.0) as f32,
+                (c0[2] - c[2]) as f32,
+                (0.5 * (c[0] + c[1])) as f32,
+            ]
+        }),
+        mean: [
+            mean[0] as f32,
+            mean[1] as f32,
+            (0.5 * (c0[0] + c0[1])) as f32,
+            wavelength as f32,
+        ],
+    }
+}
+
+/// Rice's mean wavelength of a wrapped [`SIZE`]² field, `2π·sqrt(var f / (var ∂x f + var ∂z f))`,
+/// each derivative the wrapped central difference per texel: the map's feature size, without an
+/// FFT.
+fn rice_wavelength(f: &[f64]) -> f64 {
+    let at = |x: usize, z: usize| f[(z % SIZE) * SIZE + x % SIZE];
+    // The sum and the sum of squares of the field, ∂x and ∂z.
+    let mut sums = [[0.0f64; 2]; 3];
+    for z in 0..SIZE {
+        for x in 0..SIZE {
+            let values = [
+                at(x, z),
+                (at(x + 1, z) - at(x + SIZE - 1, z)) / 2.0,
+                (at(x, z + 1) - at(x, z + SIZE - 1)) / 2.0,
+            ];
+            for (sum, v) in sums.iter_mut().zip(values) {
+                sum[0] += v;
+                sum[1] += v * v;
+            }
+        }
+    }
+    let n = (SIZE * SIZE) as f64;
+    let [field, dx, dz] = sums.map(|[s, s2]| s2 / n - (s / n) * (s / n));
+    std::f64::consts::TAU * (field / (dx + dz)).sqrt()
+}
+
 /// Build the ripple map: R/G = wrapped central-difference slope, B = the height it came from,
-/// with a complete box-filtered mip chain and a repeating trilinear sampler.
+/// with a complete box-filtered mip chain and a repeating trilinear sampler, and the chain's
+/// [`RippleStats`].
 ///
 /// `Rgba8Unorm`, never `Srgb`: this holds geometry, not colour, and gamma-decoding a slope bends
 /// it.
-pub(super) fn ripple_map(seed: u32) -> Image {
+pub(super) fn ripple_map(seed: u32) -> (Image, RippleStats) {
     let height = height_field(seed);
     let at = |x: usize, z: usize| height[(z % SIZE) * SIZE + (x % SIZE)];
 
@@ -166,6 +273,13 @@ pub(super) fn ripple_map(seed: u32) -> Image {
         levels += 1;
     }
 
+    let started = std::time::Instant::now();
+    let stats = ripple_stats(&chain);
+    debug!(
+        "liquid: the ripple chain's slope statistics in {:.3} ms",
+        started.elapsed().as_secs_f64() * 1e3
+    );
+
     let mut image = Image::new_uninit(
         Extent3d {
             width: SIZE as u32,
@@ -174,9 +288,10 @@ pub(super) fn ripple_map(seed: u32) -> Image {
         },
         TextureDimension::D2,
         TextureFormat::Rgba8Unorm,
-        // Nothing reads it back: it is generated once at liquid setup and handed to the material
-        // as a handle, exactly like the decoded frame arrays beside it.
-        RenderAssetUsages::RENDER_WORLD,
+        // Kept in the main world too (349 KB): a sampler change after upload re-extracts the
+        // image from this copy, where a render-world-only image fails to re-extract and the GPU
+        // keeps the old sampler.
+        RenderAssetUsages::default(),
     );
     image.data = Some(chain);
     image.texture_descriptor.mip_level_count = levels;
@@ -192,7 +307,7 @@ pub(super) fn ripple_map(seed: u32) -> Image {
         // waterside view changed by more than one level for a quarter of the frame rate.
         ..default()
     });
-    image
+    (image, stats)
 }
 
 #[cfg(test)]
@@ -220,9 +335,10 @@ mod tests {
     /// chain is a validation error at bind time, and a long one is silently sampled garbage.
     #[test]
     fn mip_chain_is_complete() {
-        let image = ripple_map(7);
+        let (image, _) = ripple_map(7);
         let levels = image.texture_descriptor.mip_level_count;
         assert_eq!(levels, 9, "256 down to 1 is nine levels");
+        assert_eq!(levels as usize, LEVELS);
         let expected: usize = (0..levels)
             .map(|l| {
                 let n = SIZE >> l;
@@ -230,5 +346,69 @@ mod tests {
             })
             .sum();
         assert_eq!(image.data.as_ref().map(Vec::len), Some(expected));
+    }
+
+    /// The statistics of the map the client draws.
+    fn shipped() -> RippleStats {
+        ripple_map(super::super::surface::RIPPLE_SEED).1
+    }
+
+    /// Level 0 loses nothing, each coarser level loses at least what the finer one did, and the
+    /// one-texel level has lost the whole of level 0's variance. The middle one holds for block
+    /// means; the chain's rounding to a code could break it where a level keeps almost nothing,
+    /// and on the shipped map does not.
+    #[test]
+    fn stats_are_the_law_of_total_variance() {
+        let stats = shipped();
+        assert_eq!(stats.levels[0][..3], [0.0; 3]);
+        for pair in stats.levels.windows(2) {
+            for axis in 0..2 {
+                assert!(pair[1][axis] >= pair[0][axis], "{pair:?}");
+            }
+        }
+        let last = stats.levels[LEVELS - 1];
+        assert!(
+            (0.5 * (last[0] + last[1]) - stats.mean[2]).abs() < 1e-6,
+            "{last:?}"
+        );
+        assert!(last[3].abs() < 1e-9, "a one-texel level resolves nothing");
+    }
+
+    /// The `as u8` truncation leaves every decoded slope half a code low: a mean of −0.5/255·2.
+    #[test]
+    fn stats_measure_the_truncation_bias() {
+        let [mx, mz, ..] = shipped().mean;
+        for m in [mx, mz] {
+            assert!((m - (-0.5 / 255.0 * 2.0)).abs() < 2e-4, "{m}");
+        }
+    }
+
+    /// The map is isotropic: the cross term is under a tenth of what each level loses, and the
+    /// two axes' variances agree within a tenth.
+    #[test]
+    fn stats_are_isotropic() {
+        let stats = shipped();
+        for (level, [xx, _, xz, _]) in stats.levels.iter().enumerate().skip(1) {
+            assert!(
+                xz.abs() <= 0.1 * xx,
+                "level {level}: xz {xz} against xx {xx}"
+            );
+        }
+        // The one-texel level has lost level 0's whole covariance, per axis.
+        let [xx, zz, ..] = stats.levels[LEVELS - 1];
+        assert!((xx - zz).abs() <= 0.1 * xx, "level 0: xx {xx}, zz {zz}");
+    }
+
+    /// The numbers the shader's roughness rests on, for the seed the client ships: a change of
+    /// seed, octaves or quantisation fails here first.
+    #[test]
+    fn the_map_the_shader_sees_is_pinned() {
+        let stats = shipped();
+        let [.., var0, wavelength] = stats.mean;
+        assert!((var0 / 6.536e-4 - 1.0).abs() < 0.01, "var0 {var0}");
+        assert!((wavelength - 17.9).abs() < 0.5, "wavelength {wavelength}");
+        let [xx, zz, ..] = stats.levels[3];
+        let lost = (xx + zz) / (2.0 * var0);
+        assert!((lost - 0.367).abs() < 0.01, "level 3 lost {lost}");
     }
 }

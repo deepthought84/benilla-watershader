@@ -228,10 +228,11 @@ struct WaterLook {
     grade: vec4<f32>,
     // x the painted detail's contrast, yzw spare.
     detail: vec4<f32>,
-    // Per ripple mip 0..8: the slope covariance the mip loses (xx, zz, xz) and the share it
-    // resolves.
+    // Per ripple mip 0..8: the slope covariance the mip loses against mip 0 (xx, zz, xz) and the
+    // per-axis slope variance it keeps.
     ripple_stats: array<vec4<f32>, 9>,
-    // The ripple's mean slope x and z, its slope variance, its feature wavelength in texels.
+    // The ripple's mean slope x and z (the 8-bit truncation's bias), its per-axis slope variance,
+    // its feature wavelength in texels.
     ripple_mean: vec4<f32>,
     body: WaterBody,
     // The wet line, the wet darkening, the contact foam and the meniscus gains.

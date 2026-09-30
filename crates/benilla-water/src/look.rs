@@ -7,11 +7,22 @@
 //! so the render world writes that row itself (`reflect::upload_reflect`). A row whose knob does not
 //! exist yet stays 0.
 
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use benilla_world::liquid::{
-    LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY, LOOK_SHORE, LOOK_SHORE_KIND,
+    RippleStats, WaterQuality, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY,
+    LOOK_RIPPLE_MEAN, LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
 };
+
+/// The calm surface's GGX roughness α0: √0.003, Cox and Munk's (1954) clean-surface slope
+/// variance.
+const ALPHA_CALM: f32 = 0.0548;
+
+/// Where a ripple octave's features fade from resolved slope into roughness, in pixels of
+/// footprint along the major axis: below 2 (Nyquist) none resolve, from 4 (a 2x guard for the box
+/// mip's leakage) all do.
+const FEATURE_FADE_PX: (f32, f32) = (2.0, 4.0);
 
 /// The owner's and the developer's knobs for the look rows, at their defaults.
 #[derive(Resource, Clone, Debug, PartialEq)]
@@ -71,10 +82,33 @@ pub(crate) const LOOK_FLOATS: usize = LOOK_LANES.end - LOOK_LANES.start;
 pub(crate) struct LookInputs {
     /// The quality tier (`WaterQuality::tier`), 0 Low, 1 Medium, 2 High.
     pub(crate) tier: u8,
+    /// The ripple map's slope statistics; zero without a map, which reads as nothing lost and no
+    /// bias, the calm roughness everywhere.
+    pub(crate) ripple: RippleStats,
+}
+
+/// What `drive_reflection` writes the look block from: the knobs, the quality tier and the ripple
+/// map's statistics, when the map exists.
+#[derive(SystemParam)]
+pub(crate) struct LookSources<'w> {
+    look: Res<'w, WaterLook>,
+    quality: Res<'w, WaterQuality>,
+    ripple: Option<Res<'w, RippleStats>>,
+}
+
+impl LookSources<'_> {
+    /// This frame's look block ([`look_lanes`]).
+    pub(crate) fn lanes(&self) -> [f32; LOOK_FLOATS] {
+        let inputs = LookInputs {
+            tier: self.quality.tier(),
+            ripple: self.ripple.as_deref().copied().unwrap_or_default(),
+        };
+        look_lanes(&self.look, &inputs)
+    }
 }
 
 /// The look block as `WaterLook` lays it out. `water_rect` is left 0 for the render world, and
-/// the rows no knob fills yet (`surf`, the ripple's statistics, the body) stay 0.
+/// the rows no knob fills yet (the body) stay 0.
 pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FLOATS] {
     let mut lanes = [0.0; LOOK_FLOATS];
     let mut row = |at: usize, v: [f32; 4]| {
@@ -108,7 +142,16 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
             0.0,
         ],
     );
+    // `y` is the ripple sampler's anisotropy clamp: 1, none.
+    row(
+        LOOK_SURF,
+        [ALPHA_CALM, 1.0, FEATURE_FADE_PX.0, FEATURE_FADE_PX.1],
+    );
     row(LOOK_DETAIL, [look.painted_detail, 0.0, 0.0, 0.0]);
+    for (i, level) in inputs.ripple.levels.iter().enumerate() {
+        row(LOOK_RIPPLE_STATS + 4 * i, *level);
+    }
+    row(LOOK_RIPPLE_MEAN, inputs.ripple.mean);
     row(
         LOOK_SHORE,
         [look.k_line, look.f_wet, look.k_contact, look.k_meniscus],
@@ -126,11 +169,21 @@ mod tests {
     /// The defaults land in their rows; the render world's row and the unfilled rows stay 0.
     #[test]
     fn the_look_rows_carry_their_defaults() {
-        let lanes = look_lanes(&WaterLook::default(), &LookInputs { tier: 1 });
+        let inputs = LookInputs {
+            tier: 1,
+            ..LookInputs::default()
+        };
+        let lanes = look_lanes(&WaterLook::default(), &inputs);
         let row =
             |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
         assert_eq!(row(LOOK_QUALITY), [1.0, 1.0, 0.0, 0.0]);
-        let high = look_lanes(&WaterLook::default(), &LookInputs { tier: 2 });
+        let high = look_lanes(
+            &WaterLook::default(),
+            &LookInputs {
+                tier: 2,
+                ..LookInputs::default()
+            },
+        );
         assert_eq!(
             high[LOOK_QUALITY - LOOK_LANES.start],
             2.0,
@@ -142,10 +195,12 @@ mod tests {
         assert_eq!(row(LOOK_GRADE), [0.0, 0.3, 0.2, 0.0]);
         assert_eq!(row(LOOK_SHORE), [0.35, 0.61, 1.0, 1.0]);
         assert_eq!(row(LOOK_SHORE_KIND), [1.0, 1.0, 1.0, 0.0]);
+        assert_eq!(row(LOOK_SURF), [0.0548, 1.0, 2.0, 4.0]);
         assert_eq!(row(LOOK_WATER_RECT), [0.0; 4], "the render world's row");
         let written = [
             LOOK_QUALITY,
             LOOK_COMPOSITE,
+            LOOK_SURF,
             LOOK_GRADE,
             LOOK_DETAIL,
             LOOK_SHORE,
@@ -157,5 +212,26 @@ mod tests {
                 assert_eq!(*v, 0.0, "lane {at} has no writer and must stay 0");
             }
         }
+    }
+
+    /// The ripple map's statistics land in the nine level rows and the mean row, in order; without
+    /// a map they are 0, which the shader reads as nothing lost.
+    #[test]
+    fn the_ripple_rows_carry_the_maps_statistics() {
+        let mut ripple = RippleStats::default();
+        for (i, level) in ripple.levels.iter_mut().enumerate() {
+            *level = [i as f32, 10.0 + i as f32, 20.0 + i as f32, 30.0 + i as f32];
+        }
+        ripple.mean = [-0.004, -0.003, 6.5e-4, 17.9];
+        let lanes = look_lanes(&WaterLook::default(), &LookInputs { tier: 1, ripple });
+        let row =
+            |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
+        for (i, level) in ripple.levels.iter().enumerate() {
+            assert_eq!(row(LOOK_RIPPLE_STATS + 4 * i), *level, "level {i}");
+        }
+        assert_eq!(row(LOOK_RIPPLE_MEAN), ripple.mean);
+        let bare = look_lanes(&WaterLook::default(), &LookInputs::default());
+        let rows = LOOK_RIPPLE_STATS - LOOK_LANES.start..LOOK_RIPPLE_MEAN + 4 - LOOK_LANES.start;
+        assert!(bare[rows].iter().all(|&v| v == 0.0));
     }
 }
