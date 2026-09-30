@@ -242,7 +242,8 @@ pub struct WaterPassImages {
 pub struct WaterPipelineCaps {
     /// The debug views (`WATER_VIEW`), while `WaterDebug::view` names one.
     pub view: bool,
-    /// The quality tier, 0 Low, 1 Medium, 2 High; a larger value is High.
+    /// The quality tier ([`super::WaterQuality::tier`]), 0 Low, 1 Medium, 2 High; a larger value
+    /// is High.
     pub tier: u8,
     /// The screen-space march as a debug variant.
     pub ssr: bool,

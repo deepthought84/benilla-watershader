@@ -326,6 +326,7 @@ pub(crate) struct VideoKnobs<'w> {
     spell_effect_level: ResMut<'w, SpellEffectLevel>,
     ffx: ResMut<'w, benilla_world::ffx_glow::FfxSwitches>,
     widescreen: ResMut<'w, Widescreen>,
+    water_quality: ResMut<'w, benilla_world::liquid::WaterQuality>,
     water_style: ResMut<'w, benilla_world::liquid::WaterStyle>,
 }
 
@@ -349,6 +350,7 @@ impl VideoKnobs<'_> {
             spell_effect_level,
             ffx,
             widescreen,
+            water_quality,
             water_style,
         } = self;
         use benilla_world::view::{FARCLIP_RANGE, MSAA_RANGE};
@@ -380,6 +382,7 @@ impl VideoKnobs<'_> {
             // keeps the knob in it.
             "farclip" => view.farclip = v.clamp(*FARCLIP_RANGE.start(), *FARCLIP_RANGE.end()),
             "waterstyle" => **water_style = benilla_world::liquid::WaterStyle::from_cvar(v),
+            "waterquality" => **water_quality = benilla_world::liquid::WaterQuality::from_cvar(v),
             // Clamped, where the reference refuses an out-of-range write and keeps the value
             // (`0x688d90` echoes "NearClip must be in range 0.01 - 0.33" and returns 0).
             "nearclip" => view.set_nearclip(v),

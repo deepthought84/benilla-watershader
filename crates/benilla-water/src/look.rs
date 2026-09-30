@@ -66,17 +66,29 @@ impl Default for WaterLook {
 /// The look block's floats, [`LOOK_LANES`] long.
 pub(crate) const LOOK_FLOATS: usize = LOOK_LANES.end - LOOK_LANES.start;
 
+/// What the look rows copy from the engine rather than from a knob.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct LookInputs {
+    /// The quality tier (`WaterQuality::tier`), 0 Low, 1 Medium, 2 High.
+    pub(crate) tier: u8,
+}
+
 /// The look block as `WaterLook` lays it out. `water_rect` is left 0 for the render world, and
-/// the rows no knob fills yet (the tier in `quality.x`, `surf`, the ripple's statistics, the body)
-/// stay 0.
-pub(crate) fn look_lanes(look: &WaterLook) -> [f32; LOOK_FLOATS] {
+/// the rows no knob fills yet (`surf`, the ripple's statistics, the body) stay 0.
+pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FLOATS] {
     let mut lanes = [0.0; LOOK_FLOATS];
     let mut row = |at: usize, v: [f32; 4]| {
         lanes[at - LOOK_LANES.start..][..4].copy_from_slice(&v);
     };
+    // The tier is a copy for the debug views: the shader branches on its def.
     row(
         LOOK_QUALITY,
-        [0.0, f32::from(look.floor_occlusion), 0.0, 0.0],
+        [
+            f32::from(inputs.tier),
+            f32::from(look.floor_occlusion),
+            0.0,
+            0.0,
+        ],
     );
     row(
         LOOK_COMPOSITE,
@@ -114,10 +126,16 @@ mod tests {
     /// The defaults land in their rows; the render world's row and the unfilled rows stay 0.
     #[test]
     fn the_look_rows_carry_their_defaults() {
-        let lanes = look_lanes(&WaterLook::default());
+        let lanes = look_lanes(&WaterLook::default(), &LookInputs { tier: 1 });
         let row =
             |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
-        assert_eq!(row(LOOK_QUALITY), [0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(row(LOOK_QUALITY), [1.0, 1.0, 0.0, 0.0]);
+        let high = look_lanes(&WaterLook::default(), &LookInputs { tier: 2 });
+        assert_eq!(
+            high[LOOK_QUALITY - LOOK_LANES.start],
+            2.0,
+            "the tier's copy"
+        );
         let [graze, glint, glow, _] = row(LOOK_COMPOSITE);
         assert_eq!((graze, glow), (0.45, 0.0));
         assert!((glint - 0.0358).abs() < 1e-4, "{glint}");

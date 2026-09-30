@@ -125,6 +125,72 @@ impl WaterStyle {
     }
 }
 
+/// **How much Improved Water spends** — the `waterQuality` CVar's knob, benilla's own like
+/// [`WaterStyle`]: the reference has one water and no quality dial for it. It reaches the stylised
+/// pipelines as their key's tier (`LiquidKey::tier`, one `WATER_TIER_*` def each), so a switch moves
+/// the materials onto another warmed pipeline; the reference lane, magma and slime never read it.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WaterQuality {
+    Low,
+    /// The default.
+    Medium,
+    High,
+}
+
+/// `$WOW_WATER_QUALITY=<0|1|2>` (or `low`, `medium`, `high`) boots at that tier — the lever the
+/// golden water scenes pin Medium with; anything else is Medium. Session-only, like
+/// `$WOW_WATER_STYLE`.
+impl Default for WaterQuality {
+    fn default() -> Self {
+        std::env::var("WOW_WATER_QUALITY")
+            .ok()
+            .and_then(|v| Self::parse(&v))
+            .unwrap_or(Self::Medium)
+    }
+}
+
+impl WaterQuality {
+    /// The CVar's parse: the integer part, below 1 Low and from 2 High.
+    pub fn from_cvar(v: f32) -> Self {
+        if v < 1.0 {
+            Self::Low
+        } else if v < 2.0 {
+            Self::Medium
+        } else {
+            Self::High
+        }
+    }
+
+    /// A tier by its number or its name, any case; `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => s.parse::<f32>().ok().map(Self::from_cvar),
+        }
+    }
+
+    /// What `GetCVar("waterQuality")` answers for this state.
+    pub fn cvar(self) -> &'static str {
+        match self {
+            Self::Low => "0",
+            Self::Medium => "1",
+            Self::High => "2",
+        }
+    }
+
+    /// The pipeline key's tier ([`WaterPipelineCaps::tier`]): 0 Low, 1 Medium, 2 High.
+    pub fn tier(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+}
+
 pub use query::{
     camera_claim, describe_at, liquid_at, player_claim, surfaces_at, unit_claim, water_surface_at,
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
@@ -187,6 +253,7 @@ impl Plugin for LiquidPlugin {
             .init_resource::<SubmergedEye>()
             .init_resource::<WaterIndex>()
             .init_resource::<WaterStyle>()
+            .init_resource::<WaterQuality>()
             .init_resource::<WaterPipelineCaps>()
             .init_resource::<ProbeMarks>()
             // PreUpdate: a surface streamed by last frame's commands is indexed before anyone asks.
@@ -320,4 +387,32 @@ fn check_liquid_limits(app: &App) {
         frag.storage_buffers,
         limits.max_storage_buffers_per_shader_stage,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WaterQuality::{self, High, Low, Medium};
+
+    /// The CVar's value, its name and its env spelling reach the same tier, and `cvar` reads back
+    /// what `from_cvar` took; out-of-range values clamp.
+    #[test]
+    fn the_quality_parses_as_its_cvar_and_its_lever() {
+        for (q, tier) in [(Low, 0), (Medium, 1), (High, 2)] {
+            assert_eq!(q.tier(), tier);
+            assert_eq!(WaterQuality::from_cvar(q.cvar().parse().unwrap()), q);
+            assert_eq!(WaterQuality::parse(q.cvar()), Some(q));
+        }
+        for (v, q) in [(-1.0, Low), (0.9, Low), (1.5, Medium), (7.0, High)] {
+            assert_eq!(WaterQuality::from_cvar(v), q, "{v}");
+        }
+        for (s, q) in [
+            ("low", Low),
+            (" MEDIUM ", Medium),
+            ("High", High),
+            ("2.0", High),
+        ] {
+            assert_eq!(WaterQuality::parse(s), Some(q), "{s:?}");
+        }
+        assert_eq!(WaterQuality::parse("ultra"), None);
+    }
 }

@@ -128,6 +128,7 @@ const PUBLISHED: &[(&str, &str)] = &[
     ("liquid::ProbeMarks", "record"),
     ("liquid::UNMIRRORED_RENDER_LAYER", "record"),
     ("liquid::WATER_RENDER_LAYER", "record"),
+    ("liquid::WaterQuality", "record"),
     ("liquid::WaterStyle", "record"),
     ("mac_quit::MacQuitPlugin", "record"),
     ("mat_anim_table::MatAnimMirrors", "record"),

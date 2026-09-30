@@ -392,8 +392,8 @@ impl LiquidKey {
     pub const FULLBRIGHT: u16 = 1 << 1;
     /// `WATER_VIEW`, the debug views: `path.w` bit 0.
     pub const VIEW: u16 = 1 << 2;
-    /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High. No def reads
-    /// them yet, so every tier compiles the same text.
+    /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High, each pushing
+    /// its own `WATER_TIER_*` def ([`Self::TIER_DEFS`]).
     pub const TIER_SHIFT: u16 = 3;
     /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3.
     pub const SSR: u16 = 1 << 5;
@@ -408,6 +408,9 @@ impl LiquidKey {
     pub const PAINTED: u16 = 1 << 9;
     /// `path.w` holds the key's cap bits shifted down by this.
     pub const CAPS_SHIFT: u16 = 2;
+    /// The def each tier compiles under, by [`Self::tier`].
+    pub const TIER_DEFS: [&'static str; 3] =
+        ["WATER_TIER_LOW", "WATER_TIER_MEDIUM", "WATER_TIER_HIGH"];
     /// The key bits `path.w` may set: bits 2..=9.
     pub const CAPS_MASK: u16 = 0x3FC;
 
@@ -472,13 +475,17 @@ impl LiquidKey {
     }
 
     /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key: on stylised water,
-    /// the stylised region and the complete depth, and each variant the key carries.
+    /// the stylised region, the complete depth and the tier, and each variant the key carries.
     pub fn frag_defs(self) -> Vec<&'static str> {
         let mut defs = Vec::new();
         if !self.composite() {
             return defs;
         }
-        defs.extend(["WATER_STYLISED", "WATER_SCENE_DEPTH"]);
+        defs.extend([
+            "WATER_STYLISED",
+            "WATER_SCENE_DEPTH",
+            Self::TIER_DEFS[usize::from(self.tier())],
+        ]);
         if self.has(Self::VIEW) {
             defs.push("WATER_VIEW");
         }
@@ -1780,7 +1787,10 @@ mod tests {
         }
         let plain = key(0.0, 1.0, 0.0);
         assert!(plain.composite() && !plain.has(LiquidKey::VIEW));
-        assert_eq!(plain.frag_defs(), ["WATER_STYLISED", "WATER_SCENE_DEPTH"]);
+        assert_eq!(
+            plain.frag_defs(),
+            ["WATER_STYLISED", "WATER_SCENE_DEPTH", "WATER_TIER_LOW"]
+        );
         assert!(
             key(0.0, 0.0, 0.0).frag_defs().is_empty(),
             "the reference lane takes no def"
@@ -1793,14 +1803,35 @@ mod tests {
         assert!(ssr.composite() && ssr.has(LiquidKey::SSR) && !ssr.has(LiquidKey::VIEW));
         assert_eq!(
             ssr.frag_defs(),
-            ["WATER_STYLISED", "WATER_SCENE_DEPTH", "WATER_SSR"]
+            [
+                "WATER_STYLISED",
+                "WATER_SCENE_DEPTH",
+                "WATER_TIER_LOW",
+                "WATER_SSR"
+            ]
         );
         assert!(!plain.frag_defs().contains(&"WATER_SSR"));
         // A negative lane reads as no bits.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
-        // The tier's two bits; a stale 3 reads as High.
+        // The tier's two bits, each tier its one def; a stale 3 reads as High.
         for (bits, tier) in [(0.0, 0), (2.0, 1), (4.0, 2), (6.0, 2)] {
-            assert_eq!(key(0.0, 1.0, bits).tier(), tier, "path.w {bits}");
+            let k = key(0.0, 1.0, bits);
+            assert_eq!(k.tier(), tier, "path.w {bits}");
+            let defs = k.frag_defs();
+            let tiers: Vec<&&str> = defs
+                .iter()
+                .filter(|d| d.starts_with("WATER_TIER_"))
+                .collect();
+            assert_eq!(
+                tiers,
+                [&LiquidKey::TIER_DEFS[usize::from(tier)]],
+                "path.w {bits}"
+            );
+            assert!(
+                key(1.0, 1.0, bits).frag_defs().is_empty()
+                    && key(0.0, 0.0, bits).frag_defs().is_empty(),
+                "magma, slime and the reference lane take no tier"
+            );
         }
     }
 

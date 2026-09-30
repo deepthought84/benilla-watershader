@@ -1126,10 +1126,11 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    (time, clock, look): (
+    (time, clock, look, quality): (
         Res<Time>,
         Res<super::clock::WaterClock>,
         Res<super::look::WaterLook>,
+        Res<super::WaterQuality>,
     ),
     world_cam: Query<(&GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut mirror: MirrorCamera,
@@ -1137,7 +1138,10 @@ pub(super) fn drive_reflection(
 ) {
     // The look rows and the sun lanes first and unconditionally: they are not the mirror's, and
     // every path out of this system below is a frame on which the water still has to draw.
-    data.0[LOOK_LANES].copy_from_slice(&super::look::look_lanes(&look));
+    let inputs = super::look::LookInputs {
+        tier: quality.tier(),
+    };
+    data.0[LOOK_LANES].copy_from_slice(&super::look::look_lanes(&look, &inputs));
     let to_sun = light.celestial_dir.normalize_or_zero();
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();
@@ -1502,7 +1506,10 @@ mod tests {
         let upload = &src[src.find("fn upload_reflect(").unwrap()..];
         let upload = &upload[..upload.find("\n}\n").unwrap()];
         assert!(upload.contains("(LOOK_WATER_RECT * 4) as u64"));
-        let lanes = super::super::look::look_lanes(&super::super::look::WaterLook::default());
+        let lanes = super::super::look::look_lanes(
+            &super::super::look::WaterLook::default(),
+            &super::super::look::LookInputs::default(),
+        );
         let rect = LOOK_WATER_RECT - LOOK_LANES.start;
         assert_eq!(lanes[rect..rect + 4], [0.0; 4]);
     }

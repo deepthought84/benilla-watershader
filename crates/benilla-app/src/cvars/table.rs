@@ -876,6 +876,14 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "0",
         "benilla's own — the reference has one water and no dial for it",
     ),
+    // benilla's own: how much Improved Water spends, `0` Low, `1` Medium, `2` High. The knob is
+    // [`benilla_world::liquid::WaterQuality`]; the reference lane never reads it.
+    // `$WOW_WATER_QUALITY` overrides it for the session.
+    ours(
+        "waterQuality",
+        "1",
+        "benilla's own — the reference has one water and no quality dial for it",
+    ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is
     // [`crate::perf::FpsJournalSetting`].

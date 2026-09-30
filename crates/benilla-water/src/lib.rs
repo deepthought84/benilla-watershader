@@ -31,7 +31,7 @@ pub use liquid_planar::PlanarMap;
 // The engine items the moved passes name by their old paths.
 use benilla_world::liquid::{
     WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet, WaterPipelineCaps,
-    WaterStyle, UNMIRRORED_RENDER_LAYER,
+    WaterQuality, WaterStyle, UNMIRRORED_RENDER_LAYER,
 };
 use benilla_world::{dev_state, lighting, sky, sun, view, water_fx, world_unit};
 
@@ -74,22 +74,26 @@ impl Plugin for ImprovedWaterPlugin {
         // PreUpdate, so the materials take a changed variant in the same frame's `Update`.
         .add_systems(
             PreUpdate,
-            drive_pipeline_caps.run_if(resource_changed::<dev_state::DebugState>),
+            drive_pipeline_caps.run_if(
+                resource_changed::<dev_state::DebugState>.or(resource_changed::<WaterQuality>),
+            ),
         );
     }
 }
 
 /// Ask the stylised liquid pipelines for the variants this plugin's switches need, and the depth
-/// pyramid for the readers they turn on: the debug views while one is chosen, the screen-space march
-/// while its switch is on. A no-op unless the answer changes, so the materials are touched only
-/// then.
+/// pyramid for the readers they turn on: the quality tier, the debug views while one is chosen, the
+/// screen-space march while its switch is on. A no-op unless the answer changes, so the materials
+/// are touched only then.
 fn drive_pipeline_caps(
     dev: Res<dev_state::DebugState>,
+    quality: Res<WaterQuality>,
     mut caps: ResMut<WaterPipelineCaps>,
     mut consumers: ResMut<hiz::WaterHizConsumers>,
 ) {
     let next = WaterPipelineCaps {
         view: dev.water.view != 0,
+        tier: quality.tier(),
         ssr: dev.water.ssr,
         ..*caps
     };
@@ -129,4 +133,39 @@ fn publish_pass_images(
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+    use bevy::prelude::*;
+
+    use benilla_assets::materials::LiquidKey;
+
+    /// Each quality tier reaches the stylised pipeline key through the caps' `path.w`, and a switch
+    /// leaves the other variants where they were.
+    #[test]
+    fn the_quality_is_the_stylised_keys_tier() {
+        use super::WaterQuality::{High, Low, Medium};
+        let mut world = World::new();
+        world.init_resource::<super::dev_state::DebugState>();
+        world.init_resource::<super::WaterPipelineCaps>();
+        world.init_resource::<super::hiz::WaterHizConsumers>();
+        world
+            .resource_mut::<super::dev_state::DebugState>()
+            .water
+            .ssr = true;
+        for quality in [High, Low, Medium] {
+            world.insert_resource(quality);
+            world.run_system_once(super::drive_pipeline_caps).unwrap();
+            let caps = *world.resource::<super::WaterPipelineCaps>();
+            let key =
+                LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, caps.bits() as f32));
+            assert_eq!(key.tier(), quality.tier(), "{quality:?}");
+            assert!(
+                key.has(LiquidKey::SSR),
+                "{quality:?}: the march's variant stays"
+            );
+        }
+    }
 }

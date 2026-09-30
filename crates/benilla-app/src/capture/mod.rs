@@ -535,6 +535,8 @@ struct CaptureCtx {
     frozen_clock: bool,
     /// `$WOW_RESIZE` is applied (once, at first settle).
     resized: bool,
+    /// [`quality_switches`]: the tiers still to switch to, one per settle, in order.
+    quality_switches: Vec<benilla_world::liquid::WaterQuality>,
     probe_samples: Vec<f32>,
     /// The `$WOW_GPU_MS=1` meter's GPU milliseconds over the window; empty when it is off.
     gpu_samples: Vec<f32>,
@@ -576,6 +578,20 @@ fn resize_request() -> Option<(u32, u32)> {
     let v = std::env::var("WOW_RESIZE").ok()?;
     let (w, h) = v.split_once('x')?;
     Some((w.parse().ok()?, h.parse().ok()?))
+}
+
+/// `$WOW_WATER_QUALITY_SWITCH=<tier>[,<tier>…]`: each time the image settles, set `waterQuality`
+/// to the next tier (a number or a name, [`benilla_world::liquid::WaterQuality::parse`]) as
+/// `/console waterQuality` would, then settle again; the shot is taken at the last. The boot tier
+/// is `$WOW_WATER_QUALITY`'s.
+fn quality_switches() -> Vec<benilla_world::liquid::WaterQuality> {
+    std::env::var("WOW_WATER_QUALITY_SWITCH")
+        .map(|v| {
+            v.split(',')
+                .filter_map(benilla_world::liquid::WaterQuality::parse)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The present mode a perf probe uncaps to, shared with the live probe.
@@ -874,6 +890,7 @@ impl Plugin for CapturePlugin {
                 probe_frames,
                 frozen_clock: true,
                 resized: false,
+                quality_switches: quality_switches(),
                 probe_samples: Vec::new(),
                 gpu_samples: Vec::new(),
                 probe_cpu_start: None,
@@ -918,17 +935,35 @@ fn accept_agreements(ctx: Res<CaptureCtx>, stock: crate::ui_script::glue::StockG
 /// Log the sky once the image settles: the scene's minute, the view's heading, and the visible
 /// sun's and moon's elevations and bearings off that heading, so a shot that needs a body above the
 /// horizon and ahead of the view is checked from its log. Headings are WoW's, counter-clockwise
-/// from north (+X), so a positive bearing off the view is to its left.
+/// from north (+X), so a positive bearing off the view is to its left. The water's look and its
+/// quality tier follow on their own line, so a shot's log says which tier drew it.
 fn log_sky(
     ctx: Res<CaptureCtx>,
     lighting: Option<Res<benilla_world::lighting::WowLighting>>,
     cam: Query<&Transform, With<WorldCamera>>,
+    water: (
+        Option<Res<benilla_world::liquid::WaterStyle>>,
+        Option<Res<benilla_world::liquid::WaterQuality>>,
+    ),
     mut logged: Local<bool>,
 ) {
     if *logged || matches!(ctx.phase, Phase::Building(_)) {
         return;
     }
     *logged = true;
+    if let (Some(style), Some(quality)) = water {
+        info!(
+            "capture: {} water: {}, waterQuality {} ({:?})",
+            ctx.name,
+            if style.is_stylised() {
+                "Improved"
+            } else {
+                "Reference"
+            },
+            quality.cvar(),
+            *quality,
+        );
+    }
     let (Some(scenario), Some(light), Some(cam)) = (ctx.scenario, lighting, cam.iter().next())
     else {
         return;
@@ -1049,7 +1084,11 @@ fn drive_capture(
     mut exit: MessageWriter<AppExit>,
     // `ResMut` to re-anchor the clock at the probe's release (`Phase::Aging`).
     mut time: ResMut<Time<bevy::time::Real>>,
-    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    // `Cvars` for `$WOW_WATER_QUALITY_SWITCH`.
+    (mut windows, mut cvars): (
+        Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+        Option<ResMut<crate::cvars::Cvars>>,
+    ),
     census: ProbeCensus,
     fx_req: Option<Res<FxViewRequest>>,
     wfx_req: Option<Res<waterfx::WaterFxView>>,
@@ -1158,6 +1197,22 @@ fn drive_capture(
                 }
                 watch.stable = 0;
                 info!("capture: resized to {rw}x{rh}, re-settling");
+                Phase::Building(0)
+            } else if !ctx.quality_switches.is_empty() {
+                // `$WOW_WATER_QUALITY_SWITCH`: through the CVar, so the switch takes the player's
+                // path from the observer to the materials' pipeline key.
+                let tier = ctx.quality_switches.remove(0);
+                match cvars.as_deref_mut() {
+                    Some(cvars) => {
+                        cvars.set("waterQuality", tier.cvar());
+                    }
+                    None => warn!("capture: no CVar registry, so waterQuality cannot switch"),
+                }
+                watch.stable = 0;
+                info!(
+                    "capture: waterQuality {} ({tier:?}), re-settling",
+                    tier.cvar()
+                );
                 Phase::Building(0)
             } else if fixture_age.is_some() {
                 if let Some(state) = fx_state.as_deref_mut() {

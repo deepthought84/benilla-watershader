@@ -22,11 +22,12 @@
 # <scene>.perf.fps.csv, the same for <scene>-ref.perf, and no image; scripts/water_perf.py reads
 # them.
 #
-# The render state is pinned: 1600x900, render scale 2, far clip 777, MSAA off. Each scene carries
-# its own settle (300 still frames) and age (1000 steps) (`capture`'s WATER_STABLE_FRAMES,
-# WATER_AGE_FRAMES). Every shot also writes the perf journal of its run, <shot>.fps.csv (the GPU
-# columns per pass group, `gpu_water` the water's own passes), and its log carries the per-pass
-# GPU_PASSES lines.
+# The render state is pinned: 1600x900, render scale 2, far clip 777, MSAA off, water quality
+# Medium ($WATER_QUALITY=0|1|2 picks another `waterQuality` tier; each log's `water:` line says
+# which tier drew the shot). Each scene carries its own settle (300 still frames) and age (1000
+# steps) (`capture`'s WATER_STABLE_FRAMES, WATER_AGE_FRAMES). Every shot also writes the perf
+# journal of its run, <shot>.fps.csv (the GPU columns per pass group, `gpu_water` the water's own
+# passes), and its log carries the per-pass GPU_PASSES lines.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 
@@ -34,6 +35,7 @@ dir="${1:-$root/target/visual/water}"
 burst="${2:-0}"
 every="${3:-2}"
 perf="${WATER_PERF:-0}"
+quality="${WATER_QUALITY:-1}"
 if [ "$perf" -gt 0 ] && { [ "$burst" -gt 0 ] || [ -n "${WATER_VIEW:-}" ]; }; then
   echo "water-shots.sh: \$WATER_PERF measures the stills' render state, not a burst or a view" >&2
   exit 2
@@ -69,7 +71,8 @@ shot() {
   rm -f "$dir/$2.fps.csv"
   env "${@:4}" WOW_CAPTURE="$1" WOW_CAPTURE_OUT="$dir/$2.png" \
     WOW_CAPTURE_BURST="$burst" WOW_CAPTURE_BURST_EVERY="$every" \
-    WOW_WATER_STYLE="$3" WOW_RENDER_SCALE=2 WOW_FARCLIP=777 WOW_WIN=1600x900 WOW_MSAA=off \
+    WOW_WATER_STYLE="$3" WOW_WATER_QUALITY="$quality" \
+    WOW_RENDER_SCALE=2 WOW_FARCLIP=777 WOW_WIN=1600x900 WOW_MSAA=off \
     WOW_FPS_JOURNAL="$dir/$2.fps.csv" WOW_GPU_PASSES=1 \
     "$bin" > "$dir/$2.log" 2>&1 || { echo "capture $2 FAILED, log: $dir/$2.log" >&2; exit 1; }
 }
