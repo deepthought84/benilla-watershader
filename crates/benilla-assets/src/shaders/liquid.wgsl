@@ -186,6 +186,60 @@ fn dome_color(c: DomeColors, dir: vec3<f32>) -> vec3<f32> {
 // ---- dome law: end ---------------------------------------------------------------------------------
 
 
+// The body's rows of the look block (`WaterLook::body`).
+struct WaterBody {
+    // rgb the absorption per yard, w the turbidity: river and lake, then the ocean.
+    sig_river: vec4<f32>,
+    sig_ocean: vec4<f32>,
+    // rgb the sky's and the sun's irradiance, linear, chroma-bounded; e_sky.w the shadow floor's
+    // share, e_sun.w the irradiance scale (a debug copy).
+    e_sky: vec4<f32>,
+    e_sun: vec4<f32>,
+    // The ramp rate, the band push, the band edge, the lift.
+    look: vec4<f32>,
+    // The refraction's strength, its largest offset as a share of the view height, the probe
+    // re-fog (1 on), spare.
+    refr: vec4<f32>,
+    // The terrain shadow's window: its centre's x and z and its half extent in yards, valid (1).
+    shadow: vec4<f32>,
+    // x the sun's share (debug), y the deep stop's ceiling, z the night weight (debug), w spare.
+    spare: vec4<f32>,
+    // rgb the sky's and the sun's irradiance at the light's full chroma, for foam; w spare.
+    e_sky_raw: vec4<f32>,
+    e_sun_raw: vec4<f32>,
+};
+
+// The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect`: one
+// writer per row, 0 where nothing writes it yet.
+struct WaterLook {
+    // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
+    // occlusion (1 on), zw spare.
+    quality: vec4<f32>,
+    // x the reflection's grazing ceiling (1 = none), y the glint weight in linear light, z a glow
+    // excess forced onto every water pixel, w spare.
+    composite: vec4<f32>,
+    // The water's screen rectangle: min x, min y, max x, max y in physical pixels of the world
+    // target, written by the render world.
+    water_rect: vec4<f32>,
+    // x the calm surface's roughness α0, y the ripple's anisotropy clamp, z and w where the
+    // ripple's feature fade starts and ends, in pixels.
+    surf: vec4<f32>,
+    // x the reflection grading's strength, y its far share, z its near share, w spare.
+    grade: vec4<f32>,
+    // x the painted detail's contrast, yzw spare.
+    detail: vec4<f32>,
+    // Per ripple mip 0..8: the slope covariance the mip loses (xx, zz, xz) and the share it
+    // resolves.
+    ripple_stats: array<vec4<f32>, 9>,
+    // The ripple's mean slope x and z, its slope variance, its feature wavelength in texels.
+    ripple_mean: vec4<f32>,
+    body: WaterBody,
+    // The wet line, the wet darkening, the contact foam and the meniscus gains.
+    shore: vec4<f32>,
+    // The wet line on still water, rapids and ocean; w the shore lap's phase.
+    shore_kind: vec4<f32>,
+};
+
 struct WaterReflect {
     // x = the mirror plane's world Y; y = strength (0 = no reflection this frame — the look is off,
     // no water is near, or the eye is under the surface); z = UV distortion; w = the plane
@@ -257,6 +311,8 @@ struct WaterReflect {
     drift: array<vec2<f32>, 8>,
     // x = the flow restart phase, y = the shore swell's, as fractions of their periods; zw spare.
     cycle: vec4<f32>,
+    // The stylised look's rows (`benilla_water`'s `look`).
+    look: WaterLook,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> water_reflect: WaterReflect;

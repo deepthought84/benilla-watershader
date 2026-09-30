@@ -53,8 +53,8 @@ use super::WaterStyle;
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_world::liquid::{
-    mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, MARCH_LANES, MIRROR2_LANES,
-    PROBE_LANES, REFLECT_FLOATS,
+    mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, LOOK_LANES, LOOK_WATER_RECT,
+    MARCH_LANES, MIRROR2_LANES, PROBE_LANES, REFLECT_FLOATS,
 };
 
 /// How far from the eye a water surface may be and still be the **fallback** plane — the "water
@@ -233,7 +233,8 @@ pub(crate) struct WaterReflect {
 /// The reflection row block: 48 floats of shared lanes, then four `vec4`s per probe slot
 /// (capture point + validity, blend share in `w`, a spare row, the fixed spot) for
 /// [`probe::PROBE_SLOT_MAX`] slots, then the sky dome's seven rows ([`DOME_LANES`]), the march's
-/// and the second mirror's rows, and the surface's clock ([`CLOCK_LANES`]). The slot block
+/// and the second mirror's rows, the surface's clock ([`CLOCK_LANES`]) and the look's rows
+/// ([`LOOK_LANES`], `super::look`). The slot block
 /// is sized to the CEILING rather than to `probe_slots()`, because the shader's array length is
 /// fixed at compile time and the unused tail simply carries a zero validity flag.
 pub(crate) struct WaterReflectData(pub(crate) [f32; REFLECT_FLOATS]);
@@ -1125,13 +1126,18 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    (time, clock): (Res<Time>, Res<super::clock::WaterClock>),
+    (time, clock, look): (
+        Res<Time>,
+        Res<super::clock::WaterClock>,
+        Res<super::look::WaterLook>,
+    ),
     world_cam: Query<(&GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut mirror: MirrorCamera,
     probe: Option<Res<super::probe::WaterProbe>>,
 ) {
-    // The sun lanes first and unconditionally: they are not the mirror's, and every path out of
-    // this system below is a frame on which the water still has to draw its glitter.
+    // The look rows and the sun lanes first and unconditionally: they are not the mirror's, and
+    // every path out of this system below is a frame on which the water still has to draw.
+    data.0[LOOK_LANES].copy_from_slice(&super::look::look_lanes(&look));
     let to_sun = light.celestial_dir.normalize_or_zero();
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();
@@ -1360,16 +1366,34 @@ fn restamp_reflection_target(
     }
 }
 
-/// Render world: one 16-byte write a frame, before anything draws.
+/// Render world: the whole block once a frame, before anything draws, then the water rectangle's
+/// row over it.
 fn upload_reflect(
     queue: Res<RenderQueue>,
     buffer: Option<Res<WaterReflectBuffer>>,
     data: Option<Res<WaterReflectData>>,
+    rect: Option<Res<super::world_view::WaterScreenRect>>,
 ) {
     let (Some(buffer), Some(data)) = (buffer, data) else {
         return;
     };
     queue.write_buffer(&buffer.0, 0, bytemuck::cast_slice(&data.0));
+    // The rect row's one writer: the rectangle is computed after visibility, which runs after
+    // `drive_reflection`, so it is current only here. The same queue's later write lands over the
+    // zeros the block carries in that row.
+    let r = rect.map_or([0.0; 4], |r| {
+        [
+            r.min.x as f32,
+            r.min.y as f32,
+            r.max.x as f32,
+            r.max.y as f32,
+        ]
+    });
+    queue.write_buffer(
+        &buffer.0,
+        (LOOK_WATER_RECT * 4) as u64,
+        bytemuck::cast_slice(&r),
+    );
 }
 
 #[cfg(test)]
@@ -1409,18 +1433,90 @@ mod tests {
         // The clock: eight `vec2` offsets (stride 8 in a storage buffer), then one `vec4` of cycles.
         assert_eq!(CLOCK_LANES.start, MIRROR2_LANES.end);
         assert_eq!(CLOCK_LANES.len(), 8 * 2 + 4);
-        assert_eq!(REFLECT_FLOATS, CLOCK_LANES.end);
         let drift = body.find("drift: array<vec2<f32>, 8>").unwrap();
         let cycle = body.find("cycle: vec4<f32>").unwrap();
         assert!(
             mirror2 < drift && drift < cycle,
             "the clock's offsets, then its cycles, come after the second mirror's row"
         );
+        // The look block: 28 rows after the clock, 16-byte aligned, and the struct's last member.
+        assert_eq!(LOOK_LANES.start, CLOCK_LANES.end);
+        assert_eq!(LOOK_LANES.len(), 112);
+        assert_eq!(LOOK_LANES.start % 4, 0, "a vec4 row starts on 16 bytes");
+        assert_eq!(REFLECT_FLOATS, LOOK_LANES.end);
+        let look = body.find("look: WaterLook").unwrap();
+        assert!(cycle < look, "the look rows come after the clock");
+        let tail: Vec<&str> = body[look..]
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect();
         assert_eq!(
-            body[cycle..].trim_end(),
-            "cycle: vec4<f32>,",
-            "the clock's cycles are the struct's last member"
+            tail,
+            ["look: WaterLook,"],
+            "the look rows are the struct's last member"
         );
+        // Each row's lane, in the order and size of `WaterLook` and `WaterBody`.
+        use benilla_world::liquid::{
+            LOOK_BODY, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_QUALITY, LOOK_RIPPLE_MEAN,
+            LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
+        };
+        let rows = [
+            ("quality: vec4<f32>", LOOK_QUALITY, 1),
+            ("composite: vec4<f32>", LOOK_COMPOSITE, 1),
+            ("water_rect: vec4<f32>", LOOK_WATER_RECT, 1),
+            ("surf: vec4<f32>", LOOK_SURF, 1),
+            ("grade: vec4<f32>", LOOK_GRADE, 1),
+            ("detail: vec4<f32>", LOOK_DETAIL, 1),
+            ("ripple_stats: array<vec4<f32>, 9>", LOOK_RIPPLE_STATS, 9),
+            ("ripple_mean: vec4<f32>", LOOK_RIPPLE_MEAN, 1),
+            ("body: WaterBody", LOOK_BODY, 10),
+            ("shore: vec4<f32>", LOOK_SHORE, 1),
+            ("shore_kind: vec4<f32>", LOOK_SHORE_KIND, 1),
+        ];
+        assert_eq!(members(wgsl, "WaterLook"), rows.map(|(m, ..)| m));
+        let mut at = LOOK_LANES.start;
+        for (member, lane, len) in rows {
+            assert_eq!(lane, at, "{member}");
+            at += 4 * len;
+        }
+        assert_eq!(at, LOOK_LANES.end);
+        assert_eq!(
+            members(wgsl, "WaterBody"),
+            [
+                "sig_river: vec4<f32>",
+                "sig_ocean: vec4<f32>",
+                "e_sky: vec4<f32>",
+                "e_sun: vec4<f32>",
+                "look: vec4<f32>",
+                "refr: vec4<f32>",
+                "shadow: vec4<f32>",
+                "spare: vec4<f32>",
+                "e_sky_raw: vec4<f32>",
+                "e_sun_raw: vec4<f32>",
+            ]
+        );
+        // The rect row has one writer: `upload_reflect` in the render world, over the zeros
+        // `look_lanes` leaves there.
+        let src = include_str!("reflect.rs");
+        let upload = &src[src.find("fn upload_reflect(").unwrap()..];
+        let upload = &upload[..upload.find("\n}\n").unwrap()];
+        assert!(upload.contains("(LOOK_WATER_RECT * 4) as u64"));
+        let lanes = super::super::look::look_lanes(&super::super::look::WaterLook::default());
+        let rect = LOOK_WATER_RECT - LOOK_LANES.start;
+        assert_eq!(lanes[rect..rect + 4], [0.0; 4]);
+    }
+
+    /// The members of the WGSL struct `name`, in order, comments and trailing commas dropped.
+    fn members<'a>(wgsl: &'a str, name: &str) -> Vec<&'a str> {
+        let at = wgsl.find(&format!("struct {name} {{")).unwrap();
+        let body = &wgsl[at..];
+        body[body.find('{').unwrap() + 1..body.find("};").unwrap()]
+            .lines()
+            .map(|l| l.split_once("//").map_or(l, |(code, _)| code).trim())
+            .filter(|l| !l.is_empty())
+            .map(|l| l.trim_end_matches(','))
+            .collect()
     }
 
     /// A 3x3-vertex grid at height `z` with exactly ONE wet cell — the far corner one — so three

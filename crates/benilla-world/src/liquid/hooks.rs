@@ -182,8 +182,33 @@ pub const MIRROR2_LANES: std::ops::Range<usize> = MARCH_LANES.end..MARCH_LANES.e
 /// (the five ripple octaves, then the shore bubbles' three reads) and a row of cycles (flow
 /// restart, shore swell) — the shader's `WaterReflect::drift` and `cycle`.
 pub const CLOCK_LANES: std::ops::Range<usize> = MIRROR2_LANES.end..MIRROR2_LANES.end + 20;
+/// The stylised look's rows, the shader's `WaterReflect::look` (a `WaterLook`): 28 `vec4`s, one
+/// writer per row (`benilla_water`'s `look`, and the render world for [`LOOK_WATER_RECT`]).
+pub const LOOK_LANES: std::ops::Range<usize> = CLOCK_LANES.end..CLOCK_LANES.end + 112;
+/// `quality`: the tier (a copy), the sky floor's occlusion.
+pub const LOOK_QUALITY: usize = LOOK_LANES.start;
+/// `composite`: the grazing ceiling, the linear glint weight, a forced glow excess.
+pub const LOOK_COMPOSITE: usize = LOOK_LANES.start + 4;
+/// `water_rect`: the water's screen rectangle, written in the render world.
+pub const LOOK_WATER_RECT: usize = LOOK_LANES.start + 8;
+/// `surf`: the calm roughness, the ripple's anisotropy clamp, its feature fade.
+pub const LOOK_SURF: usize = LOOK_LANES.start + 12;
+/// `grade`: the reflection grading's strength and shares.
+pub const LOOK_GRADE: usize = LOOK_LANES.start + 16;
+/// `detail`: the painted detail's contrast.
+pub const LOOK_DETAIL: usize = LOOK_LANES.start + 20;
+/// `ripple_stats`: nine rows, the slope each ripple mip loses and resolves.
+pub const LOOK_RIPPLE_STATS: usize = LOOK_LANES.start + 24;
+/// `ripple_mean`: the ripple's mean slope, variance and feature wavelength.
+pub const LOOK_RIPPLE_MEAN: usize = LOOK_LANES.start + 60;
+/// `body`: the ten rows of a `WaterBody`.
+pub const LOOK_BODY: usize = LOOK_LANES.start + 64;
+/// `shore`: the wet line, wet darkening, contact foam and meniscus gains.
+pub const LOOK_SHORE: usize = LOOK_LANES.start + 104;
+/// `shore_kind`: the wet line per kind of water, and the shore lap's phase.
+pub const LOOK_SHORE_KIND: usize = LOOK_LANES.start + 108;
 /// The reflection block's length in floats — `liquid.wgsl`'s `WaterReflect`.
-pub const REFLECT_FLOATS: usize = CLOCK_LANES.end;
+pub const REFLECT_FLOATS: usize = LOOK_LANES.end;
 
 /// The pass targets and the reflection block every liquid material binds. The reference water
 /// never samples them; the Improved Water plugin publishes its own in [`WaterPassSet`], and

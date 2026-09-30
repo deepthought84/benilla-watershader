@@ -3,8 +3,8 @@
 //! mirrors serve and where the fixed cube probes stand (`liquid_planar`, cached by `water_map`),
 //! the two planar mirrors (`reflect`), the probes (`probe`), the depth pyramid and scene colour
 //! the screen-space march reads (`depth`, `hiz`, `scene_color`), the wave simulation
-//! (`ripple_sim`) and the surface's clock (`clock`). The surface shading is `liquid.wgsl`'s stylised
-//! lane, in the engine.
+//! (`ripple_sim`), the surface's clock (`clock`) and the look's knobs (`look`). The surface shading
+//! is `liquid.wgsl`'s stylised lane, in the engine.
 //!
 //! Every pass is inert on the reference lane (`WaterStyle::Reference`); the plugin only makes
 //! the Improved Water option draw what it names.
@@ -18,6 +18,7 @@ mod depth;
 mod flow;
 mod hiz;
 mod liquid_planar;
+mod look;
 mod probe;
 mod reflect;
 mod ripple_sim;
@@ -56,6 +57,7 @@ impl Plugin for ImprovedWaterPlugin {
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
+        app.init_resource::<look::WaterLook>();
         reflect::register(app);
         ripple_sim::register(app);
         world_view::register(app);
