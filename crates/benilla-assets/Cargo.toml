@@ -27,5 +27,7 @@ serde = { version = "1", features = ["derive"] }
 # The WGSL tripwire (`tests/liquid_wgsl_compiles.rs`) composes and validates the liquid shader as
 # Bevy does. The versions and features are the ones Bevy's own build already uses, so nothing new
 # is compiled into the dependency graph.
+# The composite's CPU mirror (`src/liquid_composite.rs`) models a half-float blender.
+half = "2.7"
 naga = { version = "27", features = ["wgsl-in"] }
 naga_oil = { version = "0.20", default-features = false, features = ["test_shader"] }

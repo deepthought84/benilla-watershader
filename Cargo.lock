@@ -556,6 +556,7 @@ dependencies = [
  "anyhow",
  "benilla-formats",
  "bevy",
+ "half",
  "image",
  "naga",
  "naga_oil",
