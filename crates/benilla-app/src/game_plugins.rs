@@ -919,7 +919,8 @@ pub(crate) mod schedule_tests {
 
     /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
     /// particle `EffectQuads` are most of it. The water cameras and the ripple window against the rig
-    /// and pose writers are `Transform` on disjoint lanes.
+    /// and pose writers are `Transform` on disjoint lanes. `WOW_AMBIGUITY_DUMP=1` prints every
+    /// pair after `Update`'s.
     const POST_UPDATE_CEILING: usize = 385;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
@@ -973,14 +974,15 @@ pub(crate) mod schedule_tests {
     /// - the minimap's draw (`minimap::emit_minimap`), which reads `QuestGiver`'s dialog statuses,
     ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
     ///   write that window's cell and panel latches and never a status;
-    /// - the water's style switch, depth-prepass toggle, layer stamp and probe gizmos against
-    ///   `apply_net_updates` and `finish_colliders` over the world, as `drift::setup_drift`: they
-    ///   touch only water and cameras; the gizmos read `DebugState` a frame late at worst.
+    /// - the water's style switch, depth-prepass toggle, layer stamp, world-view marker and probe
+    ///   gizmos against `apply_net_updates` and `finish_colliders` over the world, as
+    ///   `drift::setup_drift`: they touch only water and cameras; the gizmos read `DebugState` a
+    ///   frame late at worst.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_471;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_473;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
@@ -998,6 +1000,36 @@ pub(crate) mod schedule_tests {
             "only {n} ambiguous pairs in {what} and the ceiling still says {ceiling}. Lower the \
              ceiling to {n} so it keeps ratcheting."
         );
+    }
+
+    /// Print each pair by name, sorted and in canonical order within the pair, so two dumps diff
+    /// by text.
+    fn dump<'a>(
+        c: &Census,
+        pairs: impl Iterator<Item = (SystemKey, SystemKey, &'a [ComponentId])>,
+    ) {
+        let mut rows: Vec<String> = pairs
+            .map(|(a, b, what)| {
+                let (x, y) = if c.name(a) <= c.name(b) {
+                    (a, b)
+                } else {
+                    (b, a)
+                };
+                format!(
+                    "  {}  <->  {}\n      on {}",
+                    c.name(x),
+                    c.name(y),
+                    what.iter()
+                        .map(|id| c.component(*id))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+            .collect();
+        rows.sort();
+        for r in rows {
+            eprintln!("{r}");
+        }
     }
 
     /// The ratchet. Ids, not names, so it runs in the player build too; prints the class
@@ -1033,30 +1065,19 @@ pub(crate) mod schedule_tests {
             actionable.len(),
         );
         if std::env::var_os("WOW_AMBIGUITY_DUMP").is_some() {
-            let mut rows: Vec<String> = actionable
-                .iter()
-                .map(|(a, b, what)| {
-                    // Canonical order within the pair, so two dumps diff by text.
-                    let (x, y) = if update.name(*a) <= update.name(*b) {
-                        (*a, *b)
-                    } else {
-                        (*b, *a)
-                    };
-                    format!(
-                        "  {}  <->  {}\n      on {}",
-                        update.name(x),
-                        update.name(y),
-                        what.iter()
-                            .map(|id| update.component(*id))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    )
-                })
-                .collect();
-            rows.sort();
-            for r in rows {
-                eprintln!("{r}");
-            }
+            dump(
+                &update,
+                actionable
+                    .iter()
+                    .map(|(a, b, what)| (*a, *b, what.as_slice())),
+            );
+            eprintln!("PostUpdate:");
+            dump(
+                &post,
+                post.conflicts
+                    .iter()
+                    .map(|(a, b, what)| (*a, *b, what.as_slice())),
+            );
         }
         ratchet(
             "Update (actionable)",

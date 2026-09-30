@@ -183,7 +183,8 @@ fn world_corners(aabb: &Aabb, transform: &GlobalTransform) -> [Vec3; 8] {
     })
 }
 
-/// The world camera's water rectangle, after visibility is known. Liquid rides
+/// The world camera's water rectangle, after every `ViewVisibility` writer (the light checks run
+/// before the newly-hidden marking, the last of them). Liquid rides
 /// `WATER_RENDER_LAYER`, which only the world camera renders, so a surface's `ViewVisibility` is
 /// that camera's verdict. A visible surface without a box (no frustum culling) takes the whole
 /// target.
@@ -249,7 +250,7 @@ pub(super) fn register(app: &mut App) {
         .add_systems(Update, mark_world_view)
         .add_systems(
             PostUpdate,
-            water_screen_rect.after(VisibilitySystems::CheckVisibility),
+            water_screen_rect.after(VisibilitySystems::MarkNewlyHiddenEntitiesInvisible),
         );
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
