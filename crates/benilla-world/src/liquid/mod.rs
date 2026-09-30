@@ -262,8 +262,8 @@ impl Plugin for LiquidPlugin {
 ///
 /// A liquid pipeline binds the two view groups, the mesh group (`model_only`: no skin, morph or
 /// lightmap) and the material group, which `StandardMaterial` and `LiquidExt` share because
-/// `LiquidExt` is not bindless. Each view key the world camera takes is counted: MSAA and the
-/// depth prepass, each on or off. Headless, it does nothing.
+/// `LiquidExt` is not bindless. Each view key the world camera takes is counted: MSAA on or off
+/// (it carries no depth prepass). Headless, it does nothing.
 fn check_liquid_limits(app: &App) {
     use benilla_assets::materials::StageCount;
     use bevy::pbr::{MeshPipeline, MeshPipelineViewLayoutKey as ViewKey};
@@ -298,12 +298,7 @@ fn check_liquid_limits(app: &App) {
         )
     };
     for stage in [ShaderStages::VERTEX, ShaderStages::FRAGMENT] {
-        for key in [
-            ViewKey::empty(),
-            ViewKey::DEPTH_PREPASS,
-            ViewKey::MULTISAMPLED,
-            ViewKey::MULTISAMPLED | ViewKey::DEPTH_PREPASS,
-        ] {
+        for key in [ViewKey::empty(), ViewKey::MULTISAMPLED] {
             let over = count(stage, key).overruns(stage, &limits, downlevel);
             if !over.is_empty() {
                 error!(
@@ -314,7 +309,7 @@ fn check_liquid_limits(app: &App) {
             }
         }
     }
-    let frag = count(ShaderStages::FRAGMENT, ViewKey::DEPTH_PREPASS);
+    let frag = count(ShaderStages::FRAGMENT, ViewKey::empty());
     info!(
         "liquid: the fragment stage binds {} sampled textures of {}, {} samplers of {}, {} \
          storage buffers of {}",

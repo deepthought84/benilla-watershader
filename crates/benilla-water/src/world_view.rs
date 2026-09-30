@@ -4,8 +4,8 @@
 //! Core3d runs for every 3D view: the world camera, the two mirrors, the probe's cube faces and
 //! the portrait booths. The depth pyramid and the colour snapshot describe the world camera's
 //! frame alone, so that camera carries [`WaterWorldView`], extracted, and each node asks for it on
-//! the view it runs for. A depth prepass or a texture of the right size is something the world
-//! view happens to have, not what makes it the world view.
+//! the view it runs for. A texture of the right size is something the world view happens to have,
+//! not what makes it the world view.
 //!
 //! [`WaterViewCheck`] counts each node's visits to the marked view; a frame in which the passes are
 //! armed and a marked view rendered must count exactly one of each.

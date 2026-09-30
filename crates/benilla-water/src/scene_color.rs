@@ -29,7 +29,7 @@
 //! contain the water, or the water would reflect itself.
 //!
 //! What it therefore cannot show is any *other* transparent surface: a second sheet of water, a
-//! particle, a ribbon. That is the same exclusion the depth prepass makes and for the same reason,
+//! particle, a ribbon. That is the same exclusion the opaque depth makes and for the same reason,
 //! and it is the right one — a reflection of a puff of smoke that is itself being blended over the
 //! water is not a thing to chase.
 

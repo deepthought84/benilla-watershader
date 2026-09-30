@@ -74,14 +74,11 @@ pub(super) fn stamp_world_camera_layers(
 /// The mirror's **view-key shape** — the components that decide which pipelines its draws need,
 /// kept in one place because a second camera has to reproduce them exactly.
 ///
-/// A pipeline is specialized against the VIEW as well as the material, so this bundle is the whole
-/// reason the mirror does not share the world camera's pipelines: no multisampling and no glow pass
-/// (this image is sampled through a rippling normal at half resolution, where neither is
-/// recoverable), and — the axis that actually bites — **no `DepthPrepass`**. The water's depth
-/// pass puts one on the `WorldCamera` alone, so every material this camera draws needs a second
-/// pipeline compiled without `DEPTH_PREPASS`. Measured at the Elwynn golden: the mirrored pass adds
-/// ten pipelines over `$WOW_NO_REFLECT=1`, and all ten differ from their main-view twin by that one
-/// def and nothing else.
+/// A pipeline is specialized against the VIEW as well as the material, so this bundle decides
+/// whether the mirror shares the world camera's pipelines: no multisampling and no glow pass (this
+/// image is sampled through a rippling normal at half resolution, where neither is recoverable).
+/// Neither camera carries a depth prepass, so with MSAA off the mirror's key is the world's and its
+/// draws reuse the world camera's pipelines.
 ///
 /// Extracted so `pipe_warm`'s warm mirror can be built from the SAME bundle. Warming a view key by
 /// hand-copying four components is how a warm pass silently stops covering the thing it was written

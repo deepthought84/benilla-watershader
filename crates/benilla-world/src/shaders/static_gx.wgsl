@@ -287,9 +287,9 @@ fn vertex(v: GxVertex) -> GxVsOut {
 // the main pass discards is not a smaller version of this lane, it is a wrong one, and this
 // project has already paid for that lesson once: `wdl.wgsl` cuts everything nearer than the
 // far-clip wall, Bevy's stock prepass did not, and the coarse horizon's depth punched holes
-// through every river valley in the world (`liquid::depth`). The farclip wall here is the same
-// shape of cut, and the cutout is what keeps leaf cards and grass blades from writing depth as
-// if they were solid.
+// through every river valley in the world (`WdlExt::enable_prepass`). The farclip wall here is
+// the same shape of cut, and the cutout is what keeps leaf cards and grass blades from writing
+// depth as if they were solid.
 //
 // No colour target — only `DepthPrepass` is ever attached on this camera — so this returns
 // nothing and exists purely for its `discard`s.

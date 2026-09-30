@@ -16,23 +16,21 @@
 //! filled by a render-graph node. The differences are that this one carries a mip chain and is
 //! written by passes rather than copied into.
 //!
-//! ## From the VIEW's depth, after the opaque pass — not from the prepass
+//! ## From the VIEW's depth, after the opaque pass
 //!
 //! It is built **after the opaque and transmissive passes and before the transparent pass**, from
 //! the view's own depth attachment: the only window where the depth of the opaque world is complete
 //! and the water has not yet been drawn. It is also the window [`super::scene_color`] copies the
 //! colour in, so the depth the march walks and the colour it reads describe the same frame.
 //!
-//! The depth prepass is not the opaque world: models on the entity path opt out of it
-//! (`WowModelExt::enable_prepass` — characters, creatures, fading and refused doodads), the WDL
-//! horizon opts out, and the static world is in it only through a pass of its own that draws
-//! nothing until all of its pipelines have compiled. A depth missing something the colour holds
-//! lets a ray walk straight through it and read its colour off the "sky" behind it, and gives the
+//! That depth holds everything the opaque pass drew: the static world, the entity path's models
+//! and units, the terrain up to its far-clip wall. A depth missing something the colour holds lets
+//! a ray walk straight through it and read its colour off the "sky" behind it, and gives the
 //! water's column the bed behind a hull instead of the hull. AMD FidelityFX SSSR builds from the
 //! opaque depth for the same reason, and Bevy's own occlusion culling binds the view depth exactly
 //! as this does.
 //!
-//! The view depth is only bindable once `liquid::depth` has added `TEXTURE_BINDING` to the world
+//! The view depth is only bindable once [`super::depth`] has added `TEXTURE_BINDING` to the world
 //! camera's `depth_texture_usages`, which takes a frame to reach the texture; until then the
 //! pyramid is not rebuilt, and it holds the last frame's depths or zeros, which the march reads as
 //! sky.

@@ -796,9 +796,9 @@ fn record_static_gx<'w>(
 
 /// `$WOW_GX_PREPASS=0` — skip the static world's depth prepass.
 ///
-/// The A/B lever for a pass that costs a second traversal of every visible static region and buys
-/// the screen-space march every tree and building in the world. Read once, at startup; the pass is
-/// already inert whenever no depth prepass is attached, which is the whole reference lane.
+/// The A/B lever for a pass that costs a second traversal of every visible static region. Read
+/// once, at startup; the pass is already inert whenever no depth prepass is attached, and no camera
+/// attaches one (`benilla_water::depth`).
 fn gx_prepass_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("WOW_GX_PREPASS").as_deref() != Ok("0"))
@@ -829,8 +829,8 @@ impl ViewNode for StaticGxPrepassNode {
         &'static ViewDepthTexture,
         &'static ViewUniformOffset,
         &'static StaticGxView,
-        // Only when a depth prepass is actually attached — `liquid::depth` attaches and detaches it
-        // with the stylised look, and drawing depth nobody asked for is a pass for nothing.
+        // Only when a depth prepass is actually attached: drawing depth nobody asked for is a pass
+        // for nothing.
         &'static bevy::core_pipeline::prepass::ViewPrepassTextures,
     );
 

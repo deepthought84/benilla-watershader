@@ -57,13 +57,9 @@ fn module_defs(module: &str) -> Vec<(&'static str, ShaderDefValue)> {
     }
 }
 
-/// The view-key defs of the world camera: the depth prepass (on while Improved Water is) and MSAA.
-const VIEW_KEYS: [&[&str]; 4] = [
-    &[],
-    &["DEPTH_PREPASS"],
-    &["MULTISAMPLED"],
-    &["DEPTH_PREPASS", "MULTISAMPLED"],
-];
+/// The view-key defs of the world camera: MSAA on or off. It carries no depth prepass
+/// (`benilla_water::depth`).
+const VIEW_KEYS: [&[&str]; 2] = [&[], &["MULTISAMPLED"]];
 
 /// The vertex layouts' defs: every liquid surface's (`benilla_world::liquid::warm_liquid_mesh`),
 /// the same with an interior pool's vertex colour, and the bare grid whose `#else` arms stand in
