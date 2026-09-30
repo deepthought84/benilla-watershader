@@ -554,10 +554,42 @@ box = "open"
             self.assertAlmostEqual(res["foam_fp"]["value"], 100 / 4000)
             self.assertTrue(res["foam_fp"]["pass"])
 
+    def test_contact_rows_count_water_only_against_a_second_view(self):
+        # Two views of one scene differ on water only; the bank's green above the waterline (row
+        # 20) is scene colour, not contact foam, and only counts without the second view.
+        view = flat([40, 180, 40], w=100, h=40)  # a green bank
+        view[20:, :] = 0  # water: no foam
+        view[20:22, 0:25] = [0, 200, 0]  # a collar along 25 columns
+        fres = view.copy()
+        fres[20:, :] = 90  # the Fresnel view's grey on the same water
+        box = [0, 0, 100, 40]
+        self.assertAlmostEqual(wm.contact_cov(view, box)["value"], 100.0)
+        r = wm.contact_cov(view, box, mask=fres)
+        self.assertAlmostEqual(r["value"], 25.0)
+        self.assertEqual((r["columns"], r["basis"]), (100, "water"))
+        f = wm.foam_fp(view, box, mask=fres)
+        self.assertAlmostEqual(f["value"], 100 * 50 / 2000)
+        self.assertAlmostEqual(wm.foam_fp(view, box)["value"], 100 * (2000 + 50) / 4000)
+
     def test_every_row_has_a_definition_and_a_direction_or_none(self):
         for name, row in wm.ROWS.items():
             self.assertTrue(row.fn.__doc__, name)
             self.assertIn(row.better, ("lower", "higher", None), name)
+
+    def test_the_region_files_name_their_scene_and_boxes_inside_the_frame(self):
+        files = sorted(wm.REGIONS.glob("*.toml"))
+        self.assertTrue(files, "no region file")
+        for path in files:
+            reg = wm.load_regions(path)
+            self.assertEqual(reg.get("scene"), path.stem, path.name)
+            boxes = dict(reg["box"])
+            for name, b in boxes.items():
+                x0, y0, x1, y1 = b
+                self.assertTrue(0 <= x0 < x1 <= 1600 and 0 <= y0 < y1 <= 900, f"{path.name} {name}")
+            for spec in reg["row"]:
+                for k in spec.keys() & wm.BOX_PARAMS:
+                    v = spec[k]
+                    self.assertTrue(isinstance(v, list) or v in boxes, f"{path.name} {k} = {v!r}")
 
 
 if __name__ == "__main__":

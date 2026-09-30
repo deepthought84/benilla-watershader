@@ -1,0 +1,8 @@
+# A water-free control, the Northshire sun glare and the glow's additive combine: Improved
+# Water must draw exactly its Reference twin (MAE 0; lum_vs_ref 1 over the whole frame).
+scene = "water-free-additive"
+[box]
+frame = [0, 0, 1600, 900]
+[[row]]
+metric = "lum_vs_ref"
+box = "frame"

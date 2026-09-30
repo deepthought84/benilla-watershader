@@ -1,0 +1,24 @@
+# wg-swamp-sorrows: murky swamp water in the Swamp of Sorrows under an orange fog; the far water
+# fades into the fog at y 463-480 (steepest between rows 468 and 469, x 550-850). Flake: x360-390
+# y460-476 moves by up to 3 codes run to run.
+scene = "water-swamp-sorrows"
+[box]
+water = [400, 600, 1100, 850]
+far = [550, 460, 850, 480]
+[[row]]
+metric = "deep_hue"
+box = "water"
+[[row]]
+metric = "deep_luma"
+box = "water"
+[[row]]
+metric = "deep_chroma"
+box = "water"
+[[row]]
+metric = "horizon_step"
+box = "far"
+water_y = 469
+sky_y = 468
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

@@ -1,0 +1,27 @@
+# wg-savage-night: the Savage Coast's sea at 22:44 facing the white moon (+14.9° on the 45°
+# bearing), its path on the water below it. Flake: sea-bed plants at x505-769 y520-634.
+scene = "water-savage-night"
+[box]
+moon_path = [550, 640, 1000, 880]
+water = [0, 640, 500, 880]
+[[row]]
+metric = "glint_peak"
+label = "moon_peak"
+box = "moon_path"
+[[row]]
+metric = "glint_width"
+label = "moon_width"
+box = "moon_path"
+[[row]]
+metric = "deep_hue"
+label = "night_hue"
+box = "water"
+[[row]]
+metric = "deep_luma"
+box = "water"
+[[row]]
+metric = "deep_chroma"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

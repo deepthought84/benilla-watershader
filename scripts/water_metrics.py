@@ -23,11 +23,12 @@ Files a scene reads from <dir> (only the ones its rows need):
     <scene>~<variant>.png       an A/B variant, e.g. ~noreflect for mirrors off
     <scene>.poses.csv           a moving burst's camera per shot: shot,ex,ey,ez,lx,ly,lz (WoW yd)
 
-Region file, scripts/water_regions/<scene>.toml: pixel boxes only, never install data.
+Region file, scripts/water_regions/<scene>.toml, one per golden water scene: pixel boxes only,
+never install data. Its first comment names what the scene shows and its flake boxes.
 
-    scene = "wg-loch-fp-noon"
+    scene = "water-loch-modan"   # the capture's name, the file's stem
     [box]                        # [x0, y0, x1, y1], half-open, capture pixels (1600x900)
-    crown = [540, 290, 600, 340]
+    crown = [545, 320, 595, 370]
     [[row]]
     metric = "refl_contrast"     # a row of the catalogue
     label = "crown"              # optional, tells two rows of one metric apart
@@ -672,18 +673,40 @@ def straight_line(img, box, thr=12.0, dark=False):
     return {"value": int(acc[t, rr]), "theta": int(t), "rho": int(2 * (rr - diag))}
 
 
-def contact_cov(view, box, channel=1, thr=0.2):
-    """Share of the box's columns whose contact-foam coverage reaches `thr` somewhere, in %. The
-    foam view holds c_line in r, c_contact in g and c_wake in b (0-1); `channel` picks one."""
-    c = crop(view, box)[..., channel] / 255.0
-    return {"value": float((c.max(axis=0) >= thr).mean() * 100.0)}
+def view_water(view, other):
+    """Water pixels from two WATER_VIEW captures of one scene taken alike (both without the glow):
+    each view repaints water only, so they differ on water and nowhere else. No erosion: contact
+    foam lies in the first water pixels at a silhouette."""
+    return water_mask(view, other, erode=0)
 
 
-def foam_fp(view, box, channel=1, thr=0.2):
-    """Foam where there is no contact: share of the open-water box's pixels whose contact-foam
-    coverage (the foam view's g, as contact_cov) reaches `thr`, in %."""
+def contact_cov(view, box, mask=None, channel=1, thr=0.2):
+    """Share of the box's columns whose contact-foam coverage reaches `thr` somewhere on water, in
+    %. The foam view holds c_line in r, c_contact in g and c_wake in b (0-1); `channel` picks one.
+    Water is where the foam view differs from a second view (`mask`, default fresnel; view_water),
+    and only columns holding water count; without it the whole box counts, bank included."""
     c = crop(view, box)[..., channel] / 255.0
-    return {"value": float((c >= thr).mean() * 100.0)}
+    if mask is None:
+        return {"value": float((c.max(axis=0) >= thr).mean() * 100.0), "basis": "box"}
+    m = crop(view_water(view, mask), box)
+    cols = m.any(axis=0)
+    if not cols.any():
+        return {"value": None, "columns": 0, "basis": "water"}
+    hit = (np.where(m, c, 0.0).max(axis=0) >= thr)[cols]
+    return {"value": float(hit.mean() * 100.0), "columns": int(cols.sum()), "basis": "water"}
+
+
+def foam_fp(view, box, mask=None, channel=1, thr=0.2):
+    """Foam where there is no contact: share of the open-water box's water pixels (view_water
+    against `mask`, as contact_cov; the whole box without it) whose contact-foam coverage reaches
+    `thr`, in %."""
+    c = crop(view, box)[..., channel] / 255.0
+    if mask is None:
+        return {"value": float((c >= thr).mean() * 100.0), "basis": "box"}
+    m = crop(view_water(view, mask), box)
+    if not m.any():
+        return {"value": None, "pixels": 0, "basis": "water"}
+    return {"value": float((c[m] >= thr).mean() * 100.0), "pixels": int(m.sum()), "basis": "water"}
 
 
 def horizon_step(img, box, water_y, sky_y):
@@ -840,8 +863,18 @@ ROWS: dict[str, Row] = {
     "band_width": Row(band_width, STILL, "lower", {"max": 4.0}),
     "autocorr_peak": Row(autocorr_peak, STILL, "lower", {"max": 0.2}),
     "straight_line": Row(straight_line, STILL, "lower", {"max": 150}),
-    "contact_cov": Row(contact_cov, [("view", "view", "foam", True)], "higher", {"min": 60.0}),
-    "foam_fp": Row(foam_fp, [("view", "view", "foam", True)], "lower", {"max": 0.5}),
+    "contact_cov": Row(
+        contact_cov,
+        [("view", "view", "foam", True), ("view", "mask", "fresnel", False)],
+        "higher",
+        {"min": 60.0},
+    ),
+    "foam_fp": Row(
+        foam_fp,
+        [("view", "view", "foam", True), ("view", "mask", "fresnel", False)],
+        "lower",
+        {"max": 0.5},
+    ),
     "ring_seam": Row(ring_seam, STILL, "lower", {"max": 2.0}),
     "horizon_step": Row(horizon_step, STILL, "lower", {"max": 3.0}),
     "luma_sd": Row(luma_sd, STILL, "higher"),

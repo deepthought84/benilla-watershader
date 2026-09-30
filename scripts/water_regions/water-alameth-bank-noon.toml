@@ -1,0 +1,25 @@
+# wg-alameth-bank-noon: Lake Al'Ameth in Teldrassil from its bank; the far bank's waterline runs
+# from y 610 at the left edge to y 520 at the right. Flake: the foliage above the far bank at
+# x1020-1360 y285-335 lands in one of two states, on both lanes.
+scene = "water-alameth-bank-noon"
+[box]
+waterline = [0, 500, 1500, 650]
+water = [200, 700, 1400, 900]
+[[row]]
+metric = "stair_step"
+box = "waterline"
+[[row]]
+metric = "band_width"
+box = "waterline"
+[[row]]
+metric = "autocorr_peak"
+box = "waterline"
+[[row]]
+metric = "deep_hue"
+box = "water"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

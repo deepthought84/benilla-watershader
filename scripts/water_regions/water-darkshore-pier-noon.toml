@@ -1,0 +1,27 @@
+# wg-darkshore-pier-noon: the Darkshore sea under a dock, the dock's foot standing in the water
+# (x 620-720, waterline y 575), the horizon at y 415. Flake: the Reference twin's x0-935 y174-434
+# moves by up to 5 codes run to run.
+scene = "water-darkshore-pier-noon"
+[box]
+foot = [630, 510, 710, 560]          # the dock's foot above the water
+sky = [1100, 250, 1300, 300]
+foot_refl = [630, 590, 710, 640]     # its reflection under the waterline
+sky_refl = [1100, 590, 1300, 640]    # open water at the same depth
+foot_waterline = [600, 555, 740, 595]
+water = [0, 650, 1600, 900]
+[[row]]
+metric = "refl_contrast"
+object = "foot"
+sky = "sky"
+object_refl = "foot_refl"
+sky_refl = "sky_refl"
+[[row]]
+metric = "contact_cov"
+label = "foot_contact"
+box = "foot_waterline"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

@@ -1,0 +1,26 @@
+# wg-menethil-wreck-noon: Menethil Bay facing north at noon, a wrecked boat in the water at the
+# left (x 200-500, y 520-700), a mast leaning out of the water, the bank's slope on the right.
+scene = "water-menethil-wreck-noon"
+[box]
+wreck_waterline = [200, 600, 520, 720]
+ship_waterline = [700, 560, 1000, 640]
+bank_waterline = [780, 640, 1000, 900]
+water = [0, 720, 700, 900]
+[[row]]
+metric = "contact_cov"
+label = "wreck_contact"
+box = "wreck_waterline"
+[[row]]
+metric = "contact_cov"
+label = "ship_contact"
+box = "ship_waterline"
+[[row]]
+metric = "contact_cov"
+label = "bank_contact"
+box = "bank_waterline"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

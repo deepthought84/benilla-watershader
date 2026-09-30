@@ -1,0 +1,24 @@
+# wg-darrowmere: Darrowmere Lake under the Plaguelands' red fog; a near doodad crosses the left
+# third. The far water fades into the fog over y 462-480 (steepest between rows 474 and 475,
+# x 800-1200).
+scene = "water-darrowmere"
+[box]
+water = [800, 600, 1600, 900]
+far = [800, 460, 1200, 480]
+[[row]]
+metric = "deep_hue"
+box = "water"
+[[row]]
+metric = "deep_luma"
+box = "water"
+[[row]]
+metric = "deep_chroma"
+box = "water"
+[[row]]
+metric = "horizon_step"
+box = "far"
+water_y = 475
+sky_y = 474
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

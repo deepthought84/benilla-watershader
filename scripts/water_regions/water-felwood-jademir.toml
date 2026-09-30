@@ -1,0 +1,23 @@
+# wg-felwood-jademir: Jademir Lake in Feralas, murky green-yellow water under fog; the far
+# waterline at y 475 on the right (x 1300-1600), where the water meets the fogged bank.
+scene = "water-felwood-jademir"
+[box]
+water = [0, 650, 1600, 900]
+far = [1300, 470, 1600, 480]
+[[row]]
+metric = "deep_hue"
+box = "water"
+[[row]]
+metric = "deep_luma"
+box = "water"
+[[row]]
+metric = "deep_chroma"
+box = "water"
+[[row]]
+metric = "horizon_step"
+box = "far"
+water_y = 475
+sky_y = 474
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

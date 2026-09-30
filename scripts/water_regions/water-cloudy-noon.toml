@@ -1,0 +1,17 @@
+# wg-cloudy-noon: water-loch-modan's camera under a half storm sky (rain type at grade 0.125: the
+# storm light blend at 0.5, no drops): clouds overhead and in the lake. Flake: water-loch-modan's
+# lake-bed patch at x815-837 y701-720, so the water box stops above it.
+scene = "water-cloudy-noon"
+[box]
+sky = [0, 0, 1600, 250]
+water = [0, 520, 1600, 690]
+[[row]]
+metric = "luma_sd"
+label = "sky_sd"
+box = "sky"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

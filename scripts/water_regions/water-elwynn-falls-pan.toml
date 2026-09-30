@@ -1,0 +1,10 @@
+# The yaw and pitch pan at wg-elwynn-falls-pool (20° and 10° either side over the burst).
+scene = "water-elwynn-falls-pan"
+[box]
+water = [100, 540, 1500, 720]
+[[row]]
+metric = "shimmer"
+box = "water"
+[[row]]
+metric = "pop"
+box = "water"

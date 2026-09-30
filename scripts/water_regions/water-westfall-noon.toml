@@ -1,0 +1,30 @@
+# wg-westfall-noon: the open sea off the Westfall coast at noon, the horizon at y 400, a beach in
+# the lower left, shallows along the bottom.
+scene = "water-westfall-noon"
+[box]
+far_water = [600, 470, 1400, 510]
+sky = [600, 360, 1400, 395]
+shallows = [700, 800, 1000, 880]
+deep = [500, 520, 1600, 640]
+wall = [300, 400, 1500, 480]
+water = [500, 520, 1600, 900]
+[[row]]
+metric = "horizon_ratio"
+water = "far_water"
+sky = "sky"
+[[row]]
+metric = "deep_hue"
+label = "shallows_hue"
+box = "shallows"
+[[row]]
+metric = "deep_luma"
+box = "deep"
+[[row]]
+metric = "deep_chroma"
+box = "deep"
+[[row]]
+metric = "zero_band"
+box = "wall"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

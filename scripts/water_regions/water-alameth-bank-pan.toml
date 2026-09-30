@@ -1,0 +1,10 @@
+# The pan burst at wg-alameth-bank-noon: its camera swept 20° either side over the burst.
+scene = "water-alameth-bank-pan"
+[box]
+water = [200, 700, 1400, 900]
+[[row]]
+metric = "shimmer"
+box = "water"
+[[row]]
+metric = "pop"
+box = "water"

@@ -1,0 +1,24 @@
+# wg-elwynn-falls-pool: the pool under Elwynn Falls, rocks at the far waterline (y 500), a moored
+# boat's bow across the bottom.
+scene = "water-elwynn-falls"
+[box]
+water = [100, 520, 1500, 720]
+rocks_waterline = [530, 470, 1330, 520]   # the rocks standing in the pool
+hull_waterline = [480, 730, 1300, 770]    # the boat's hull in the water
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
+[[row]]
+metric = "contact_cov"
+label = "rocks_contact"
+box = "rocks_waterline"
+[[row]]
+metric = "contact_cov"
+label = "hull_contact"
+box = "hull_waterline"
+[[row]]
+metric = "halo_count"
+box = "water"

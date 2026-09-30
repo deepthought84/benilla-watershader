@@ -1,0 +1,19 @@
+# wg-lordamere-rock: Lordamere Lake, a rock standing in the water on the right; its waterline runs
+# down from (1070, 700) to (1400, 900), where refraction would pull the rock into the water.
+scene = "water-lordamere-rock"
+[box]
+rock_edge = [1000, 600, 1300, 900]
+water = [0, 500, 1000, 900]
+[[row]]
+metric = "halo_count"
+box = "rock_edge"
+[[row]]
+metric = "luma_sd"
+label = "edge_sd"
+box = "rock_edge"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

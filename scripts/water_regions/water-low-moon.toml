@@ -1,0 +1,28 @@
+# wg-low-moon: Loch Modan at 02:30 from its south-east shore, facing the white moon at +14.9° on
+# its 45° bearing; the moon's path on the lake below it. Flake: the Reference twin's x1464-1482
+# y466-482 lands in one of two states.
+scene = "water-low-moon"
+[box]
+moon_path = [500, 520, 1100, 850]
+water = [0, 550, 500, 850]
+[[row]]
+metric = "glint_peak"
+label = "moon_peak"
+box = "moon_path"
+[[row]]
+metric = "glint_width"
+label = "moon_width"
+box = "moon_path"
+[[row]]
+metric = "deep_hue"
+label = "night_hue"
+box = "water"
+[[row]]
+metric = "deep_luma"
+box = "water"
+[[row]]
+metric = "deep_chroma"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

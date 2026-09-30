@@ -1,0 +1,61 @@
+# wg-baradin-noon and wg-baradin-burst: Baradin Bay in the Wetlands at noon, the far water's
+# horizon at y 490 under a mountain ridge, whose reflection fills the bay below it. Burst rows read
+# a 2 s static burst. Flake: patches of the bay at x660-1300 y615-690 land in one of two states,
+# so the water box starts below them.
+scene = "water-baradin-noon"
+[box]
+far_band = [0, 492, 1450, 520]
+far_water = [0, 492, 1450, 510]
+sky = [0, 300, 200, 380]
+ridge = [550, 150, 650, 250]
+ridge_sky = [300, 150, 450, 250]
+ridge_refl = [550, 730, 650, 830]
+ridge_sky_refl = [300, 730, 450, 830]
+deep = [0, 720, 1200, 900]
+wall = [0, 470, 1500, 560]
+water = [0, 700, 1200, 900]
+[[row]]
+metric = "horizon_ratio"
+water = "far_water"
+sky = "sky"
+[[row]]
+metric = "ridge_contrast"
+object = "ridge"
+sky = "ridge_sky"
+object_refl = "ridge_refl"
+sky_refl = "ridge_sky_refl"
+[[row]]
+metric = "deep_luma"
+box = "deep"
+[[row]]
+metric = "deep_chroma"
+box = "deep"
+[[row]]
+metric = "deep_hue"
+box = "deep"
+[[row]]
+metric = "zero_band"
+box = "wall"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
+[[row]]
+metric = "far_band_std"
+box = "far_band"
+[[row]]
+metric = "view_std"
+label = "far_std"
+box = "far_band"
+[[row]]
+metric = "view_std"
+label = "water_std"
+box = "water"
+[[row]]
+metric = "shimmer"
+box = "water"
+[[row]]
+metric = "pop"
+box = "water"

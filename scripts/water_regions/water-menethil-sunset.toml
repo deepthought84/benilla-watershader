@@ -1,0 +1,29 @@
+# wg-menethil-sunset-45: Menethil Bay at 19:40 facing the sun's 45° bearing, a ship behind the
+# pier (waterline y 495), the glint path below the sun.
+scene = "water-menethil-sunset"
+[box]
+hull = [560, 410, 700, 450]          # the ship's hull behind the pier
+sky = [150, 300, 300, 360]           # the dusk sky left of it
+hull_refl = [560, 540, 700, 580]     # both mirrored about the waterline
+sky_refl = [150, 630, 300, 690]
+glint = [450, 500, 1100, 850]
+water = [0, 750, 400, 900]
+[[row]]
+metric = "refl_contrast"
+object = "hull"
+sky = "sky"
+object_refl = "hull_refl"
+sky_refl = "sky_refl"
+[[row]]
+metric = "glint_peak"
+box = "glint"
+[[row]]
+metric = "glint_width"
+box = "glint"
+[[row]]
+metric = "deep_hue"
+label = "sunset_hue"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

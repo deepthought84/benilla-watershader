@@ -1,0 +1,22 @@
+# wg-booty-harbour: Booty Bay's harbour from a dock; to the right, water under a stilted platform
+# (its posts' waterline at y 505-515), the platform's shade above it.
+scene = "water-booty-harbour"
+[box]
+water = [1100, 515, 1350, 545]       # the water under the platform
+deck = [1200, 470, 1290, 500]        # the shade under the platform, above the water
+pilings = [1050, 495, 1550, 530]     # the posts' waterline
+harbour = [1050, 560, 1600, 700]
+[[row]]
+metric = "underdeck_ratio"
+water = "water"
+deck = "deck"
+[[row]]
+metric = "contact_cov"
+label = "pilings_contact"
+box = "pilings"
+[[row]]
+metric = "luma_sd"
+box = "harbour"
+[[row]]
+metric = "lum_vs_ref"
+box = "harbour"

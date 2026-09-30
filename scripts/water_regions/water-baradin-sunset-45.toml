@@ -1,0 +1,26 @@
+# wg-baradin-sunset-45: Baradin Bay at 19:40 facing the sun's 45° bearing, the sun above the
+# ridge, the glint path below it; the horizon at y 490. Flake: x1500-1565 y695-730 lands in one
+# of two states.
+scene = "water-baradin-sunset-45"
+[box]
+glint = [500, 500, 1100, 900]
+far_water = [0, 492, 400, 510]
+sky = [0, 380, 400, 470]
+water = [0, 650, 450, 900]
+[[row]]
+metric = "glint_peak"
+box = "glint"
+[[row]]
+metric = "glint_width"
+box = "glint"
+[[row]]
+metric = "horizon_ratio"
+water = "far_water"
+sky = "sky"
+[[row]]
+metric = "deep_hue"
+label = "sunset_hue"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

@@ -1,0 +1,12 @@
+# wg-lava-day: Blackrock Stronghold's magma at noon, 40° down. Its gate is MAE against the
+# pre-overhaul build per lane; the lava/rock edge pixels (82,253) and (1066,604) land in one of
+# two states run to run at this camera.
+scene = "water-lava-day"
+[box]
+lava = [100, 0, 700, 600]
+[[row]]
+metric = "luma_sd"
+box = "lava"
+[[row]]
+metric = "luma_p5"
+box = "lava"

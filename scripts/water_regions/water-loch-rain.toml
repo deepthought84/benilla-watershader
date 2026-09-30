@@ -1,0 +1,18 @@
+# wg-loch-rain: water-loch-modan's camera in heavy rain (grade 0.8): the storm sky and fog hide the
+# island; the lake fades into the fog band above y 462 (steepest between rows 466 and 467).
+# Flake: water-loch-modan's lake-bed patch at x815-837 y701-720, so the water box stops above it.
+scene = "water-loch-rain"
+[box]
+water = [0, 520, 1600, 690]
+far = [0, 460, 1600, 480]
+[[row]]
+metric = "horizon_step"
+box = "far"
+water_y = 467
+sky_y = 466
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

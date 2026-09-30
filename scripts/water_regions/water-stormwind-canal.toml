@@ -1,0 +1,29 @@
+# wg-sw-canal: a Stormwind canal (WMO liquid) from the quay, 10° down: the far quay wall's
+# waterline (y 300-330), two moored rowboats, the near one's hull in the water at y 600-660.
+scene = "water-stormwind-canal"
+[box]
+quay = [0, 290, 1400, 340]
+hull = [300, 580, 1100, 680]
+water = [600, 680, 1500, 880]
+open_water = [100, 700, 1500, 900]
+[[row]]
+metric = "contact_cov"
+label = "quay_contact"
+box = "quay"
+[[row]]
+metric = "contact_cov"
+label = "hull_contact"
+box = "hull"
+[[row]]
+metric = "straight_line"
+box = "open_water"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "deep_hue"
+label = "body_hue"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

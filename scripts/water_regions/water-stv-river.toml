@@ -1,0 +1,14 @@
+# wg-stv-river: Stranglethorn's rapids from the bank, looking upstream under a bridge; the channel
+# runs diagonally from the lower middle (y 900) to the upper right (y 300).
+scene = "water-stv-river"
+[box]
+water = [600, 450, 1300, 700]
+[[row]]
+metric = "deep_hue"
+box = "water"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

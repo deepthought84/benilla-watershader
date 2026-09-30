@@ -30,6 +30,11 @@
 //! unless every shot's file is written. A single shot has no time in it; a rate is measured across
 //! a burst.
 //!
+//! A scene's burst writes `<stem>.poses.csv` beside its shots, each shot's camera eye and look-at
+//! in raw WoW coords. `$WOW_CAPTURE_PAN=<yaw>[,<pitch>]`, or a scene's own pan
+//! ([`scenarios::scene_pan`]), sweeps the view that many degrees either side of the scene's over
+//! the burst ([`pan_pose`]), the eye fixed.
+//!
 //! ## Running one capture by hand
 //! Run through Cargo, never a bare `target/debug/benilla`, which may be stale:
 //! ```text
@@ -306,11 +311,23 @@ fn capture_deadline() -> Option<Duration> {
 /// lifetime. `$WOW_CAPTURE_AGE` overrides it for a scene that fills slowly (snow wants ~660).
 const AGE_FRAMES: u32 = 150;
 
-fn age_frames() -> u32 {
+/// The golden water scenes' age ([`scenarios::water_scene_names`]): the water probe takes its
+/// first cubes 2 s into the age and a slot at a time after that, so a 2.5 s shot races them; at
+/// 1000 steps (16.7 s) every cube is in and the shot repeats byte for byte.
+const WATER_AGE_FRAMES: u32 = 1000;
+
+/// The age `scene` runs: `$WOW_CAPTURE_AGE`, else its own.
+fn age_frames(scene: &str) -> u32 {
     std::env::var("WOW_CAPTURE_AGE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(AGE_FRAMES)
+        .unwrap_or_else(|| {
+            if scenarios::water_scene_names().any(|n| n == scene) {
+                WATER_AGE_FRAMES
+            } else {
+                AGE_FRAMES
+            }
+        })
 }
 
 /// The frozen clock's step, 1/60 s per capture frame, so everything integrated in seconds reaches
@@ -336,6 +353,64 @@ fn burst_every() -> u32 {
         .and_then(|s| s.parse().ok())
         .unwrap_or(BURST_EVERY)
         .max(1)
+}
+
+/// A burst's pan, `[yaw, pitch]` degrees either side of the view: `$WOW_CAPTURE_PAN=<yaw>[,<pitch>]`,
+/// else the scene's own ([`scenarios::scene_pan`]).
+fn burst_pan(scene: &str) -> Option<[f32; 2]> {
+    std::env::var("WOW_CAPTURE_PAN")
+        .ok()
+        .and_then(|v| {
+            let c: Vec<f32> = v.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            match c.as_slice() {
+                [yaw] => Some([*yaw, 0.0]),
+                [yaw, pitch] => Some([*yaw, *pitch]),
+                _ => None,
+            }
+        })
+        .or_else(|| scenarios::scene_pan(scene))
+}
+
+/// Burst shot `shot` of `shots` on a pan: the look-at point turned about the fixed eye, its
+/// heading and elevation swept linearly from `−pan` to `+pan` degrees over the burst, at the same
+/// distance. Raw WoW coords (Z up, headings counter-clockwise from +X). Without a pan, or for a
+/// single shot, the scene's own `look`.
+fn pan_pose(
+    eye: [f32; 3],
+    look: [f32; 3],
+    pan: Option<[f32; 2]>,
+    shot: u32,
+    shots: u32,
+) -> [f32; 3] {
+    let Some([yaw, pitch]) = pan.filter(|_| shots > 1) else {
+        return look;
+    };
+    let s = 2.0 * shot as f32 / (shots - 1) as f32 - 1.0;
+    let d = Vec3::from(look) - Vec3::from(eye);
+    let len = d.length();
+    let heading = d.y.atan2(d.x) + (s * yaw).to_radians();
+    let elev = (d.z / len).clamp(-1.0, 1.0).asin() + (s * pitch).to_radians();
+    let dir = Vec3::new(
+        elev.cos() * heading.cos(),
+        elev.cos() * heading.sin(),
+        elev.sin(),
+    );
+    (Vec3::from(eye) + dir * len).to_array()
+}
+
+/// `<stem>.poses.csv` beside a burst's shots: `shot,ex,ey,ez,lx,ly,lz`, each shot's camera eye and
+/// look-at in raw WoW coords, which the pan rows of `scripts/water_metrics.py` reproject through.
+fn write_poses(ctx: &CaptureCtx, scenario: &Scenario) -> std::io::Result<()> {
+    let mut csv = String::from("shot,ex,ey,ez,lx,ly,lz\n");
+    let e = scenario.eye;
+    for shot in 0..ctx.burst {
+        let l = pan_pose(e, scenario.look, ctx.pan, shot, ctx.burst);
+        csv.push_str(&format!(
+            "{shot},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}\n",
+            e[0], e[1], e[2], l[0], l[1], l[2]
+        ));
+    }
+    std::fs::write(Path::new(&ctx.out).with_extension("poses.csv"), csv)
 }
 
 /// Burst shot `shot`'s file: `<stem>-NNN.<ext>` beside `out`.
@@ -442,6 +517,10 @@ struct CaptureCtx {
     burst: u32,
     /// [`burst_every`]: fixed clock steps between two burst shots.
     burst_every: u32,
+    /// [`burst_pan`] on a burst, else `None`.
+    pan: Option<[f32; 2]>,
+    /// A golden water scene's settle met a one-colour frame and built on (logged once).
+    waited_flat: bool,
     /// The burst shot being taken, `0..burst`.
     shot: u32,
     phase: Phase,
@@ -749,6 +828,16 @@ impl Plugin for CapturePlugin {
         if let Some(m) = scenario.as_ref().and_then(|s| s.map) {
             std::env::set_var("WOW_MAP", m.to_string());
         }
+        // A scene's forced weather rides `WOW_WEATHER`, which the weather tick reads once; a
+        // script already in the environment wins.
+        if let Some(w) = scenario
+            .as_ref()
+            .and_then(|s| scenarios::scene_weather(s.name))
+        {
+            if std::env::var_os("WOW_WEATHER").is_none() {
+                std::env::set_var("WOW_WEATHER", w);
+            }
+        }
         let shot_name = scenario.map(|s| s.name).or(glue.map(|g| g.name)).unwrap();
         let out = std::env::var("WOW_CAPTURE_OUT")
             .unwrap_or_else(|_| format!("target/visual/{shot_name}.png"));
@@ -777,6 +866,8 @@ impl Plugin for CapturePlugin {
                 out,
                 burst: burst_shots(),
                 burst_every: burst_every(),
+                pan: burst_pan(shot_name).filter(|_| burst_shots() > 1),
+                waited_flat: false,
                 shot: 0,
                 phase: Phase::Building(0),
                 ui_seeded: false,
@@ -914,7 +1005,16 @@ fn pin_scene(
                 * Quat::from_rotation_x(-req.el_deg.to_radians());
             (look + orbit * (Vec3::Z * req.dist), look)
         }
-        _ => (wow_to_bevy(scenario.eye), wow_to_bevy(scenario.look)),
+        _ => (
+            wow_to_bevy(scenario.eye),
+            wow_to_bevy(pan_pose(
+                scenario.eye,
+                scenario.look,
+                ctx.pan,
+                ctx.shot,
+                ctx.burst,
+            )),
+        ),
     };
     for mut t in &mut cam {
         *t = Transform::from_translation(eye).looking_at(look, Vec3::Y);
@@ -1023,7 +1123,22 @@ fn drive_capture(
                     .as_deref()
                     .and_then(|px| px.as_chunks::<4>().0.split_first())
                 {
-                    if rest.iter().all(|p| p[..3] == first[..3]) {
+                    let flat = rest.iter().all(|p| p[..3] == first[..3]);
+                    // A golden water scene builds on until its world is in: its map can show
+                    // the clear colour for longer than the whole settle (the Kalimdor scenes do).
+                    let waits = scenarios::water_scene_names().any(|s| s == ctx.name);
+                    if flat && waits && !capped {
+                        if !ctx.waited_flat {
+                            ctx.waited_flat = true;
+                            info!(
+                                "capture: {} stable frames of one colour {:?}; the world is not \
+                                 in yet, building on",
+                                watch.stable,
+                                &first[..3],
+                            );
+                        }
+                        watch.stable = 0;
+                    } else if flat {
                         error!(
                             "capture: settled image is FLAT — every pixel is {:?} in the \
                              readback's channel order; the scene rendered nothing",
@@ -1054,7 +1169,7 @@ fn drive_capture(
                 info!(
                     "capture: image settled after {} frames, aging {}",
                     n + 1,
-                    age_frames()
+                    age_frames(ctx.name)
                 );
                 Phase::Aging(0)
             }
@@ -1092,7 +1207,7 @@ fn drive_capture(
         }
         Phase::Aging(n) => {
             // No restart on late arrivals: the image already stopped changing before release.
-            if n + 1 < age_frames() {
+            if n + 1 < age_frames(ctx.name) {
                 Phase::Aging(n + 1)
             } else if ctx.probe_frames > 0 {
                 // Hand the clock back to real time before the first sample, or `Probing` would
@@ -1114,7 +1229,7 @@ fn drive_capture(
                 }
                 info!(
                     "probe: scene aged {} frames; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
-                    age_frames(),
+                    age_frames(ctx.name),
                     if keep_vsync { "KEPT ON" } else { "off" }
                 );
                 Phase::ProbeWarmup(0)
@@ -1124,9 +1239,20 @@ fn drive_capture(
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(path.clone()));
                 if ctx.burst > 0 {
+                    if let Some(scenario) = ctx.scenario {
+                        if let Err(e) = write_poses(&ctx, &scenario) {
+                            error!(
+                                "capture: cannot write the burst's poses beside {}: {e}",
+                                ctx.out
+                            );
+                        }
+                    }
+                    let pan = ctx.pan.map_or(String::new(), |[yaw, pitch]| {
+                        format!(", panning ±{yaw}° heading and ±{pitch}° elevation")
+                    });
                     info!(
-                        "capture: scene aged, burst of {} shots {} steps apart; shot 0 at {:.6} s, \
-                         writing {path}",
+                        "capture: scene aged, burst of {} shots {} steps apart{pan}; shot 0 at \
+                         {:.6} s, writing {path}",
                         ctx.burst,
                         ctx.burst_every,
                         game_time.elapsed_secs_f64(),
@@ -1513,25 +1639,70 @@ mod tests {
             assert_eq!(shows, 1, "{scenario}");
         }
     }
-    /// A golden water scene settles on its own stable run; every other scene on the default.
+    /// A golden water scene settles on its own stable run and runs its own age; every other scene
+    /// takes the defaults.
     #[test]
-    fn a_golden_water_scene_carries_its_own_settle() {
+    fn a_golden_water_scene_carries_its_own_settle_and_age() {
         use super::*;
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
         let _l = ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _s = EnvGuard::unset("WOW_CAPTURE_STABLE");
+        let _a = EnvGuard::unset("WOW_CAPTURE_AGE");
         for name in scenarios::water_scene_names() {
             assert_eq!(stable_frames(name), WATER_STABLE_FRAMES, "{name}");
+            assert_eq!(age_frames(name), WATER_AGE_FRAMES, "{name}");
         }
         assert_eq!(stable_frames("water-noon"), STABLE_FRAMES);
+        assert_eq!(age_frames("water-noon"), AGE_FRAMES);
         let _s = EnvGuard::set("WOW_CAPTURE_STABLE", "45");
+        let _a = EnvGuard::set("WOW_CAPTURE_AGE", "150");
         assert_eq!(
             stable_frames("water-loch-modan"),
             45,
             "the env var still wins"
         );
+        assert_eq!(
+            age_frames("water-loch-modan"),
+            150,
+            "the env var still wins"
+        );
+    }
+
+    /// A pan turns the look-at point about the eye from −pan to +pan over the burst, at the
+    /// scene's distance; the middle shot of an odd burst is the scene's own view.
+    #[test]
+    fn a_pan_sweeps_the_view_either_side_of_the_scene() {
+        let eye = [10.0, 20.0, 5.0];
+        let look = [110.0, 20.0, 5.0]; // heading 0, level, 100 yd
+        let heading = |l: [f32; 3]| (l[1] - eye[1]).atan2(l[0] - eye[0]).to_degrees();
+        let elev = |l: [f32; 3]| {
+            let d = Vec3::from(l) - Vec3::from(eye);
+            (d.z / d.length()).asin().to_degrees()
+        };
+        let dist = |l: [f32; 3]| (Vec3::from(l) - Vec3::from(eye)).length();
+        assert_eq!(pan_pose(eye, look, None, 3, 9), look, "no pan");
+        assert_eq!(
+            pan_pose(eye, look, Some([20.0, 10.0]), 0, 1),
+            look,
+            "a still"
+        );
+        let pan = Some([20.0, 10.0]);
+        let first = pan_pose(eye, look, pan, 0, 9);
+        let mid = pan_pose(eye, look, pan, 4, 9);
+        let last = pan_pose(eye, look, pan, 8, 9);
+        assert!((heading(first) + 20.0).abs() < 1e-3, "{}", heading(first));
+        assert!((elev(first) + 10.0).abs() < 1e-3, "{}", elev(first));
+        assert!((heading(last) - 20.0).abs() < 1e-3, "{}", heading(last));
+        assert!((elev(last) - 10.0).abs() < 1e-3, "{}", elev(last));
+        assert!((Vec3::from(mid) - Vec3::from(look)).length() < 1e-3);
+        for l in [first, mid, last] {
+            assert!((dist(l) - 100.0).abs() < 1e-2, "{}", dist(l));
+        }
+        // A quarter of the way along: a quarter of the sweep, −20° to −10°.
+        let q = pan_pose(eye, look, pan, 2, 9);
+        assert!((heading(q) + 10.0).abs() < 1e-3, "{}", heading(q));
     }
 
     /// Burst shots sit beside the single shot's path, numbered from 000, keeping its extension.

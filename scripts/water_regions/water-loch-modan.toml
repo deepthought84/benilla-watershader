@@ -1,0 +1,43 @@
+# wg-loch-fp-noon: Loch Modan from the shore, the fir island across the water (waterline y 458).
+# Flake: a lake-bed patch at x815-837 y705-719 lands in one of two states.
+scene = "water-loch-modan"
+[box]
+crown = [545, 320, 595, 370]         # the central fir's crown
+sky = [650, 215, 700, 245]           # sky between the crowns
+crown_refl = [545, 546, 595, 596]    # the crown mirrored about the waterline
+sky_refl = [650, 671, 700, 701]      # the sky box mirrored
+trunk_refl = [460, 478, 492, 525]    # the thin trunk's reflection left of the central fir
+shore = [300, 452, 900, 466]         # the island's waterline
+bank = [320, 435, 880, 450]          # the island's grass above it
+shore_wide = [300, 440, 900, 480]
+water = [200, 480, 1400, 650]
+open_water = [1000, 560, 1500, 700]
+[[row]]
+metric = "refl_contrast"
+object = "crown"
+sky = "sky"
+object_refl = "crown_refl"
+sky_refl = "sky_refl"
+[[row]]
+metric = "trunk_wander"
+box = "trunk_refl"
+[[row]]
+metric = "shore_band_ratio"
+band = "shore"
+bank = "bank"
+[[row]]
+metric = "band_width"
+box = "shore_wide"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "contact_cov"
+label = "collar_cov"
+box = "shore_wide"
+[[row]]
+metric = "foam_fp"
+box = "open_water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

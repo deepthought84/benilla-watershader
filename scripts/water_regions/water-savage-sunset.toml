@@ -1,0 +1,29 @@
+# wg-savage-sunset: water-savage-coast's camera at 19:40: the sunset body of the sea, the horizon
+# at y 400, the far-clip wall below it. Flake: the sea-bed plants at x360-639 y680-839.
+scene = "water-savage-sunset"
+[box]
+wall = [0, 400, 900, 560]
+far_water = [0, 405, 1100, 430]
+sky = [0, 360, 1100, 395]
+deep = [0, 700, 340, 900]
+water = [0, 600, 340, 900]
+[[row]]
+metric = "zero_band"
+box = "wall"
+[[row]]
+metric = "horizon_ratio"
+water = "far_water"
+sky = "sky"
+[[row]]
+metric = "deep_hue"
+label = "sunset_hue"
+box = "deep"
+[[row]]
+metric = "deep_luma"
+box = "deep"
+[[row]]
+metric = "deep_chroma"
+box = "deep"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

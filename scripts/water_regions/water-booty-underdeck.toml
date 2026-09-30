@@ -1,0 +1,21 @@
+# wg-booty-underdeck: Booty Bay's harbour from under a dock, the eye 3.9 yd over the water: a deck
+# beam's underside across the top half (to y 480), the water under it between posts.
+scene = "water-booty-underdeck"
+[box]
+water = [150, 500, 650, 650]         # the water under the deck
+deck = [150, 400, 650, 470]          # the beam's underside above it
+pilings = [0, 480, 900, 700]
+[[row]]
+metric = "underdeck_ratio"
+water = "water"
+deck = "deck"
+[[row]]
+metric = "contact_cov"
+label = "pilings_contact"
+box = "pilings"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"

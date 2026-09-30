@@ -1,0 +1,34 @@
+# wg-crystal-3p-noon: Crystal Lake from a third-person camera, 11.5° down: murloc huts on the far
+# strip (waterline y 380-400), reeds and the near bank along the bottom. Burst rows read a 2 s
+# static burst.
+scene = "water-crystal-3p-noon"
+[box]
+hut = [1150, 335, 1205, 360]         # a hut's roof on the far strip
+grass = [1000, 250, 1100, 280]       # the grass behind it
+hut_refl = [1150, 405, 1205, 430]    # the hut's reflection under the strip
+grass_refl = [1000, 405, 1100, 430]  # the water beside it
+water = [100, 480, 1500, 680]
+near_bank = [400, 700, 1600, 800]
+[[row]]
+metric = "refl_contrast"
+object = "hut"
+sky = "grass"
+object_refl = "hut_refl"
+sky_refl = "grass_refl"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
+[[row]]
+metric = "contact_cov"
+label = "collar_cov"
+box = "near_bank"
+[[row]]
+metric = "view_std"
+label = "water_std"
+box = "water"
+[[row]]
+metric = "shimmer"
+box = "water"

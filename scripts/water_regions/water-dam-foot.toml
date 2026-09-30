@@ -1,0 +1,14 @@
+# wg-dam-foot: the pool at the Stonewrought Dam's foot, 6° up at the dam and its falls; the pool's
+# far waterline at y 600, the falls' plunge at x 780-930.
+scene = "water-dam-foot"
+[box]
+pool = [300, 610, 1100, 880]
+[[row]]
+metric = "halo_count"
+box = "pool"
+[[row]]
+metric = "luma_sd"
+box = "pool"
+[[row]]
+metric = "lum_vs_ref"
+box = "pool"

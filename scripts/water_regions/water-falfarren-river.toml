@@ -1,0 +1,36 @@
+# wg-falfarren: the Falfarren River under Ashenvale's canopy, the far bank's hedge above the
+# waterline (y 590-610). Flake: the near-left water at x0-571 y611-899 lands in two or three
+# states, so the water boxes start right of it. Burst rows read a 2 s static burst.
+scene = "water-falfarren-river"
+[box]
+water = [600, 680, 1400, 850]
+bank = [200, 450, 1400, 560]
+water_wide = [600, 620, 1500, 880]
+bank_edge = [600, 590, 1500, 640]       # the water along the far bank's waterline
+[[row]]
+metric = "water_bank_ratio"
+water = "water"
+bank = "bank"
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
+[[row]]
+metric = "view_std"
+label = "water_std"
+box = "water_wide"
+[[row]]
+metric = "view_std"
+label = "bank_edge_std"
+box = "bank_edge"
+[[row]]
+metric = "shimmer"
+box = "water_wide"
+[[row]]
+metric = "pulse"
+box = "water_wide"
+[[row]]
+metric = "pop"
+box = "water_wide"

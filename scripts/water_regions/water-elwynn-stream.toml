@@ -1,0 +1,26 @@
+# wg-elwynn-stream: water-noon's camera, the Elwynn water in the trees' shade, a murloc camp on the
+# far bank (waterline y 480-500). Burst rows read a 2 s static burst.
+scene = "water-elwynn-stream"
+[box]
+water = [300, 520, 1300, 850]
+far_edge = [500, 380, 1500, 480]     # the far water under the canopy's edge
+[[row]]
+metric = "luma_sd"
+box = "water"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
+[[row]]
+metric = "view_std"
+label = "water_std"
+box = "water"
+[[row]]
+metric = "view_std"
+label = "canopy_edge_std"
+box = "far_edge"
+[[row]]
+metric = "shimmer"
+box = "water"
+[[row]]
+metric = "pop"
+box = "water"

@@ -1,0 +1,12 @@
+# The underside scene (wg-redridge-under's role): 3 yd under Loch Modan's surface, 15° up; the
+# underwater fog fills the frame, the lake bed along the bottom edge.
+scene = "water-loch-modan-under"
+[box]
+fog = [0, 0, 1600, 700]
+bed = [0, 700, 1600, 900]
+[[row]]
+metric = "lum_vs_ref"
+box = "fog"
+[[row]]
+metric = "luma_sd"
+box = "bed"

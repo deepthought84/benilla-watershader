@@ -1,0 +1,32 @@
+# wg-savage-noon: the Savage Coast's sea at noon, the horizon at y 400, the far-clip wall below it,
+# a sandbar to the right. Flake: the sea-bed plants at x360-639 y680-839 appear in some runs only.
+scene = "water-savage-coast"
+[box]
+wall = [0, 400, 900, 560]            # far water to the horizon
+far_water = [0, 405, 1100, 430]
+sky = [0, 360, 1100, 395]
+deep = [0, 700, 340, 900]
+sandbar = [920, 620, 1500, 780]      # the sandbar's waterline
+water = [0, 600, 340, 900]
+[[row]]
+metric = "zero_band"
+box = "wall"
+[[row]]
+metric = "horizon_ratio"
+water = "far_water"
+sky = "sky"
+[[row]]
+metric = "deep_luma"
+box = "deep"
+[[row]]
+metric = "deep_chroma"
+box = "deep"
+[[row]]
+metric = "deep_hue"
+box = "deep"
+[[row]]
+metric = "stair_step"
+box = "sandbar"
+[[row]]
+metric = "lum_vs_ref"
+box = "water"
