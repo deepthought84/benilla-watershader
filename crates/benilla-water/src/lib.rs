@@ -80,9 +80,11 @@ impl Plugin for ImprovedWaterPlugin {
 /// Ask the stylised liquid pipelines for the variants this plugin's switches need: the debug views
 /// while one is chosen. A no-op unless the answer changes, so the materials are touched only then.
 fn drive_pipeline_caps(dev: Res<dev_state::DebugState>, mut caps: ResMut<WaterPipelineCaps>) {
-    caps.set_if_neq(WaterPipelineCaps {
+    let next = WaterPipelineCaps {
         view: dev.water.view != 0,
-    });
+        ..*caps
+    };
+    caps.set_if_neq(next);
 }
 
 /// Hand the engine's liquid materials this plugin's targets; each pass re-points them itself when

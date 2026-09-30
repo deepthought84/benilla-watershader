@@ -133,7 +133,7 @@ pub use spatial::WaterIndex;
 pub(crate) use surface::{
     spawn_liquids, spawn_wmo_liquids, LiquidAssets, LiquidSoundSource, WetLattice,
 };
-pub use surface::{LiquidSurface, WaterMapRef};
+pub use surface::{warm_liquid_mesh, LiquidSurface, WaterMapRef};
 
 /// Present when a plugin draws Improved Water (`benilla-water`); without it that option draws the
 /// reference, since the stylised lane alone has no reflection tiers to read.
@@ -246,4 +246,81 @@ impl Plugin for LiquidPlugin {
         }
         drift::register(app);
     }
+
+    /// Check the liquid layout against this device's per-stage limits, once the mesh pipeline
+    /// exists (`MeshRenderPlugin::finish`).
+    fn finish(&self, app: &mut App) {
+        check_liquid_limits(app);
+    }
+}
+
+/// Name, at startup, every per-stage binding limit the liquid pipelines exceed on this device.
+/// There is one liquid layout for both looks, so over a limit every liquid pipeline fails, the
+/// reference water's with the rest, and its draws drop with only a pipeline error in the log.
+///
+/// A liquid pipeline binds the two view groups, the mesh group (`model_only`: no skin, morph or
+/// lightmap) and the material group, which `StandardMaterial` and `LiquidExt` share because
+/// `LiquidExt` is not bindless. Each view key the world camera takes is counted: MSAA and the
+/// depth prepass, each on or off. Headless, it does nothing.
+fn check_liquid_limits(app: &App) {
+    use benilla_assets::materials::StageCount;
+    use bevy::pbr::{MeshPipeline, MeshPipelineViewLayoutKey as ViewKey};
+    use bevy::render::render_resource::{AsBindGroup, ShaderStages};
+    use bevy::render::renderer::{RenderAdapter, RenderDevice};
+
+    let Some(render_app) = app.get_sub_app(bevy::render::RenderApp) else {
+        return;
+    };
+    let world = render_app.world();
+    let (Some(device), Some(adapter), Some(mesh)) = (
+        world.get_resource::<RenderDevice>(),
+        world.get_resource::<RenderAdapter>(),
+        world.get_resource::<MeshPipeline>(),
+    ) else {
+        warn!("liquid: no mesh pipeline at startup, so the binding-limit check did not run");
+        return;
+    };
+    let material = LiquidMaterial::bind_group_layout_entries(device, false);
+    let limits = device.limits();
+    let downlevel = adapter.get_downlevel_capabilities().flags;
+    let count = |stage, key: ViewKey| {
+        let view = &mesh.view_layouts.0[key.bits() as usize];
+        StageCount::of(
+            stage,
+            view.main_layout
+                .entries
+                .iter()
+                .chain(&view.binding_array_layout.entries)
+                .chain(&mesh.mesh_layouts.model_only.entries)
+                .chain(&material),
+        )
+    };
+    for stage in [ShaderStages::VERTEX, ShaderStages::FRAGMENT] {
+        for key in [
+            ViewKey::empty(),
+            ViewKey::DEPTH_PREPASS,
+            ViewKey::MULTISAMPLED,
+            ViewKey::MULTISAMPLED | ViewKey::DEPTH_PREPASS,
+        ] {
+            let over = count(stage, key).overruns(stage, &limits, downlevel);
+            if !over.is_empty() {
+                error!(
+                    "liquid: the {stage:?} stage of the liquid layout (view key {key:?}) does not \
+                     fit this device: {}. No liquid will draw.",
+                    over.join("; ")
+                );
+            }
+        }
+    }
+    let frag = count(ShaderStages::FRAGMENT, ViewKey::DEPTH_PREPASS);
+    info!(
+        "liquid: the fragment stage binds {} sampled textures of {}, {} samplers of {}, {} \
+         storage buffers of {}",
+        frag.sampled_textures,
+        limits.max_sampled_textures_per_shader_stage,
+        frag.samplers,
+        limits.max_samplers_per_shader_stage,
+        frag.storage_buffers,
+        limits.max_storage_buffers_per_shader_stage,
+    );
 }

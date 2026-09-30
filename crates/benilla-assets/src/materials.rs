@@ -12,8 +12,10 @@ use bevy::pbr::{
 };
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, BlendComponent, BlendFactor, BlendOperation, BlendState, Buffer, ColorWrites,
-    CompareFunction, RenderPipelineDescriptor, SpecializedMeshPipelineError,
+    AsBindGroup, BindGroupLayoutEntry, BindingType, BlendComponent, BlendFactor, BlendOperation,
+    BlendState, Buffer, BufferBindingType, ColorWrites, CompareFunction, DownlevelFlags,
+    RenderPipelineDescriptor, ShaderStages, SpecializedMeshPipelineError, StorageTextureAccess,
+    WgpuLimits,
 };
 use bevy::shader::ShaderRef;
 
@@ -390,9 +392,23 @@ impl LiquidKey {
     pub const FULLBRIGHT: u16 = 1 << 1;
     /// `WATER_VIEW`, the debug views: `path.w` bit 0.
     pub const VIEW: u16 = 1 << 2;
+    /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High. No def reads
+    /// them yet, so every tier compiles the same text.
+    pub const TIER_SHIFT: u16 = 3;
+    /// The screen-space march as a debug variant (`path.w` bit 3); no def reads it yet.
+    pub const SSR: u16 = 1 << 5;
+    /// The linear composite while it is a variant (`path.w` bit 4); no def reads it yet.
+    pub const COMPOSITE: u16 = 1 << 6;
+    /// The highlight excess stored for the glow (`path.w` bit 5); no def reads it yet.
+    pub const GLOW: u16 = 1 << 7;
+    /// Per-channel transmittance through dual-source blending (`path.w` bit 6); no def reads it
+    /// yet.
+    pub const DUAL_SOURCE: u16 = 1 << 8;
+    /// The authored sheet as painted detail (`path.w` bit 7); no def reads it yet.
+    pub const PAINTED: u16 = 1 << 9;
     /// `path.w` holds the key's cap bits shifted down by this.
     pub const CAPS_SHIFT: u16 = 2;
-    /// The key bits `path.w` may set.
+    /// The key bits `path.w` may set: bits 2..=9.
     pub const CAPS_MASK: u16 = 0x3FC;
 
     /// The key of a material with these `kind` and `path` lanes. Magma and slime return
@@ -418,6 +434,43 @@ impl LiquidKey {
         self.0 & bit != 0
     }
 
+    /// The quality tier, 0 Low, 1 Medium, 2 High; tier bits reading 3 (a stale or hand-edited
+    /// `path.w`) are High, so the tier is always a valid index.
+    pub fn tier(self) -> u8 {
+        (((self.0 >> Self::TIER_SHIFT) & 3) as u8).min(2)
+    }
+
+    /// The `path.y` and `path.w` lanes a stylised or reference material carries for this key, so
+    /// [`Self::from_lanes`] reads it back. Magma and slime take their key from `kind.x` alone.
+    pub fn path_lanes(self) -> (f32, f32) {
+        let caps = (self.0 & Self::CAPS_MASK) >> Self::CAPS_SHIFT;
+        (f32::from(self.has(Self::STYLISED)), f32::from(caps))
+    }
+
+    /// The keys a player reaches without a debug switch: the reference lane, magma and slime, and
+    /// stylised water at each tier, carrying [`Self::GLOW`] from Medium up when `glow`,
+    /// [`Self::DUAL_SOURCE`] when `dual` and [`Self::PAINTED`] when `painted`. The pipeline warm
+    /// pass compiles these; [`Self::VIEW`] and [`Self::SSR`] are debug variants, compiled on first
+    /// use.
+    pub fn shipped(glow: bool, dual: bool, painted: bool) -> impl Iterator<Item = LiquidKey> {
+        let stylised = (0..3u16).map(move |tier| {
+            let mut k = Self::STYLISED | tier << Self::TIER_SHIFT;
+            if glow && tier >= 1 {
+                k |= Self::GLOW;
+            }
+            if dual {
+                k |= Self::DUAL_SOURCE;
+            }
+            if painted {
+                k |= Self::PAINTED;
+            }
+            LiquidKey(k)
+        });
+        [LiquidKey(0), LiquidKey(Self::FULLBRIGHT)]
+            .into_iter()
+            .chain(stylised)
+    }
+
     /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key: on stylised water,
     /// the stylised region and the complete depth, and each variant the key carries.
     pub fn frag_defs(self) -> Vec<&'static str> {
@@ -436,6 +489,113 @@ impl LiquidKey {
 impl From<&LiquidExt> for LiquidKey {
     fn from(e: &LiquidExt) -> Self {
         Self::from_lanes(e.kind, e.path)
+    }
+}
+
+/// The bindings one shader stage of a pipeline sees, by the kinds `wgpu::Limits` caps per stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StageCount {
+    pub sampled_textures: u32,
+    pub samplers: u32,
+    pub storage_buffers: u32,
+    pub storage_textures: u32,
+    pub uniform_buffers: u32,
+    /// Of the storage buffers and textures, those the stage may write.
+    pub writable_storage: u32,
+}
+
+impl StageCount {
+    /// Count the entries visible to `stage`, over every bind group of a pipeline; a binding array
+    /// counts each of its elements.
+    pub fn of<'a>(
+        stage: ShaderStages,
+        entries: impl IntoIterator<Item = &'a BindGroupLayoutEntry>,
+    ) -> Self {
+        let mut c = Self::default();
+        for e in entries {
+            if !e.visibility.contains(stage) {
+                continue;
+            }
+            let n = e.count.map_or(1, |n| n.get());
+            match e.ty {
+                BindingType::Texture { .. } => c.sampled_textures += n,
+                BindingType::Sampler(_) => c.samplers += n,
+                BindingType::StorageTexture { access, .. } => {
+                    c.storage_textures += n;
+                    if access != StorageTextureAccess::ReadOnly {
+                        c.writable_storage += n;
+                    }
+                }
+                BindingType::Buffer {
+                    ty: BufferBindingType::Storage { read_only },
+                    ..
+                } => {
+                    c.storage_buffers += n;
+                    if !read_only {
+                        c.writable_storage += n;
+                    }
+                }
+                BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    ..
+                } => c.uniform_buffers += n,
+                _ => {}
+            }
+        }
+        c
+    }
+
+    /// One line per limit this count exceeds on a device with `limits` and `downlevel`; empty
+    /// when the stage fits. A fragment stage that writes storage also needs
+    /// `FRAGMENT_WRITABLE_STORAGE`.
+    pub fn overruns(
+        &self,
+        stage: ShaderStages,
+        limits: &WgpuLimits,
+        downlevel: DownlevelFlags,
+    ) -> Vec<String> {
+        let rows = [
+            (
+                "max_sampled_textures_per_shader_stage",
+                self.sampled_textures,
+                limits.max_sampled_textures_per_shader_stage,
+            ),
+            (
+                "max_samplers_per_shader_stage",
+                self.samplers,
+                limits.max_samplers_per_shader_stage,
+            ),
+            (
+                "max_storage_buffers_per_shader_stage",
+                self.storage_buffers,
+                limits.max_storage_buffers_per_shader_stage,
+            ),
+            (
+                "max_storage_textures_per_shader_stage",
+                self.storage_textures,
+                limits.max_storage_textures_per_shader_stage,
+            ),
+            (
+                "max_uniform_buffers_per_shader_stage",
+                self.uniform_buffers,
+                limits.max_uniform_buffers_per_shader_stage,
+            ),
+        ];
+        let mut out: Vec<String> = rows
+            .into_iter()
+            .filter(|&(_, count, limit)| count > limit)
+            .map(|(name, count, limit)| format!("{count} against {name} {limit}"))
+            .collect();
+        if stage.contains(ShaderStages::FRAGMENT)
+            && self.writable_storage > 0
+            && !downlevel.contains(DownlevelFlags::FRAGMENT_WRITABLE_STORAGE)
+        {
+            out.push(format!(
+                "{} writable storage bindings without FRAGMENT_WRITABLE_STORAGE",
+                self.writable_storage
+            ));
+        }
+        out
     }
 }
 
@@ -593,8 +753,8 @@ impl MaterialExtension for LiquidExt {
     /// constant it would move the waterline, by an amount that doubles at every float exponent
     /// boundary, so neighbouring triangles' shorelines would disagree.
     ///
-    /// The [`LiquidKey`] defs go to the fragment stage before the attribute check returns: WMO
-    /// liquid and the warm quads carry none of those attributes and take the defs all the same.
+    /// The [`LiquidKey`] defs go to the fragment stage before the attribute check returns, so a
+    /// mesh without our attributes takes them all the same.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -1627,6 +1787,112 @@ mod tests {
         assert!(view.frag_defs().contains(&"WATER_VIEW"));
         // A negative lane reads as no bits.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
+        // The tier's two bits; a stale 3 reads as High.
+        for (bits, tier) in [(0.0, 0), (2.0, 1), (4.0, 2), (6.0, 2)] {
+            assert_eq!(key(0.0, 1.0, bits).tier(), tier, "path.w {bits}");
+        }
+    }
+
+    /// The warm set: five keys for every argument triple (the reference lane, magma and slime,
+    /// stylised water at each tier), the glow bit from Medium up, the other two wherever asked,
+    /// no debug bit, and each one read back from the lanes [`LiquidKey::path_lanes`] writes.
+    #[test]
+    fn the_shipped_keys_are_every_lane_at_every_tier() {
+        use super::LiquidKey as K;
+        use bevy::math::Vec4;
+        let mut union = std::collections::HashSet::new();
+        for triple in 0..8 {
+            let (glow, dual, painted) = (triple & 1 != 0, triple & 2 != 0, triple & 4 != 0);
+            let keys: Vec<K> = K::shipped(glow, dual, painted).collect();
+            assert_eq!(keys.len(), 5, "{triple:03b}");
+            assert_eq!(keys[0], K::default(), "the reference lane first");
+            assert!(keys[1].has(K::FULLBRIGHT) && !keys[1].composite());
+            for (tier, k) in (0u8..).zip(&keys[2..]) {
+                assert!(k.composite(), "{k:?}");
+                assert_eq!(k.tier(), tier);
+                assert_eq!(k.has(K::GLOW), glow && tier >= 1, "{k:?}");
+                assert_eq!(k.has(K::DUAL_SOURCE), dual, "{k:?}");
+                assert_eq!(k.has(K::PAINTED), painted, "{k:?}");
+                assert!(!k.has(K::VIEW) && !k.has(K::SSR) && !k.has(K::COMPOSITE));
+            }
+            for k in &keys {
+                let kind = Vec4::new(f32::from(k.has(K::FULLBRIGHT)), 0.0, 0.0, 6.0);
+                let (y, w) = k.path_lanes();
+                assert_eq!(K::from_lanes(kind, Vec4::new(0.0, y, 0.0, w)), *k);
+            }
+            union.extend(keys);
+        }
+        // The reference lane, magma and slime, and 4 + 8 + 8 stylised keys (Low has no glow).
+        assert_eq!(union.len(), 22);
+    }
+
+    /// The per-stage count reads visibility, binding arrays and write access, and names each
+    /// limit it exceeds.
+    #[test]
+    fn a_stage_count_names_every_limit_it_exceeds() {
+        use super::{StageCount, WgpuLimits};
+        use bevy::render::render_resource::{
+            BindGroupLayoutEntry, BindingType, BufferBindingType, DownlevelFlags,
+            SamplerBindingType, ShaderStages, TextureSampleType, TextureViewDimension,
+        };
+        let entry = |visibility, ty, count: Option<u32>| BindGroupLayoutEntry {
+            binding: 0,
+            visibility,
+            ty,
+            count: count.and_then(std::num::NonZeroU32::new),
+        };
+        let texture = BindingType::Texture {
+            sample_type: TextureSampleType::Float { filterable: true },
+            view_dimension: TextureViewDimension::D2,
+            multisampled: false,
+        };
+        let storage = |read_only| BindingType::Buffer {
+            ty: BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        };
+        let entries = [
+            entry(ShaderStages::FRAGMENT, texture, None),
+            entry(ShaderStages::FRAGMENT, texture, Some(4)),
+            entry(ShaderStages::VERTEX, texture, None),
+            entry(
+                ShaderStages::FRAGMENT,
+                BindingType::Sampler(SamplerBindingType::Filtering),
+                None,
+            ),
+            entry(ShaderStages::VERTEX_FRAGMENT, storage(true), None),
+            entry(ShaderStages::FRAGMENT, storage(false), None),
+        ];
+        let frag = StageCount::of(ShaderStages::FRAGMENT, &entries);
+        assert_eq!(
+            frag,
+            StageCount {
+                sampled_textures: 5,
+                samplers: 1,
+                storage_buffers: 2,
+                writable_storage: 1,
+                ..StageCount::default()
+            }
+        );
+        let vert = StageCount::of(ShaderStages::VERTEX, &entries);
+        assert_eq!((vert.sampled_textures, vert.storage_buffers), (1, 1));
+        let roomy = WgpuLimits::default();
+        let all = DownlevelFlags::all();
+        assert!(frag
+            .overruns(ShaderStages::FRAGMENT, &roomy, all)
+            .is_empty());
+        let tight = WgpuLimits {
+            max_sampled_textures_per_shader_stage: 4,
+            ..WgpuLimits::default()
+        };
+        let lines = frag.overruns(ShaderStages::FRAGMENT, &tight, DownlevelFlags::empty());
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains("max_sampled_textures_per_shader_stage 4"));
+        assert!(lines[1].contains("FRAGMENT_WRITABLE_STORAGE"));
+        // A vertex stage's write needs no fragment flag.
+        assert!(vert
+            .overruns(ShaderStages::VERTEX, &roomy, DownlevelFlags::empty())
+            .is_empty());
     }
 
     /// `liquid.wgsl` with `#ifdef`/`#ifndef`/`#else`/`#endif` resolved against `defs`: the text a
@@ -1658,42 +1924,90 @@ mod tests {
         out
     }
 
-    /// The reference and magma pipelines compile none of the stylised region: a symbol there that
-    /// one of them named would fail its shader and drop every draw it makes. The stylised pipelines
-    /// compile all of it, and no liquid pipeline reads the depth prepass.
+    /// The names the `WATER_STYLISED` region declares at module scope (`fn`, `struct`, `const`,
+    /// `var`, `alias`), the region's own list rather than a hand-picked one.
+    fn stylised_region_names() -> Vec<String> {
+        let src = include_str!("shaders/liquid.wgsl");
+        let (mut names, mut depth, mut inside) = (Vec::new(), 0usize, false);
+        for line in src.lines() {
+            let t = line.trim_start();
+            if t.starts_with("#ifdef") || t.starts_with("#ifndef") {
+                depth += 1;
+                if t.trim() == "#ifdef WATER_STYLISED" && depth == 1 {
+                    inside = true;
+                }
+            } else if t.starts_with("#endif") {
+                depth -= 1;
+                if depth == 0 {
+                    inside = false;
+                }
+            } else if inside && !line.starts_with(char::is_whitespace) {
+                let decl = ["fn ", "struct ", "const ", "var ", "alias "]
+                    .iter()
+                    .find_map(|kw| line.strip_prefix(kw))
+                    .or_else(|| {
+                        line.strip_prefix("var<")
+                            .and_then(|r| r.split_once("> "))
+                            .map(|(_, r)| r)
+                    });
+                if let Some(rest) = decl {
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() {
+                        names.push(name);
+                    }
+                }
+            }
+        }
+        names
+    }
+
+    /// Every identifier in `text` outside its `//` comments (the shader has no block comments).
+    fn identifiers(text: &str) -> std::collections::HashSet<&str> {
+        text.lines()
+            .map(|l| l.split_once("//").map_or(l, |(code, _)| code))
+            .flat_map(|code| code.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+            .filter(|w| !w.is_empty())
+            .collect()
+    }
+
+    /// The reference and magma pipelines compile none of the stylised region: a name declared there
+    /// that one of them used would fail its shader and drop every draw it makes. The stylised
+    /// pipelines with every def compile all of it, and no liquid pipeline reads the depth prepass.
     #[test]
     fn only_the_stylised_pipelines_compile_the_stylised_region() {
         use super::LiquidKey;
         use bevy::math::Vec4;
-        let region = [
-            "fn stylised_water(",
-            "stylised_water(",
-            "SceneBehind",
-            "scene_behind(",
-            "scene_depth_tex",
-            "ssr_trace(",
-            "sample_probe(",
-            "water_view_id(",
-        ];
+        let region = stylised_region_names();
+        for name in ["stylised_water", "SceneBehind", "sample_probe", "ssr_trace"] {
+            assert!(region.iter().any(|n| n == name), "the region lost `{name}`");
+        }
         let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::ZERO);
         let magma = LiquidKey::from_lanes(Vec4::X, Vec4::new(0.0, 1.0, 1.0, 1.0));
         for key in [reference, magma] {
             let text = liquid_under(&key.frag_defs());
-            for symbol in region {
-                assert!(!text.contains(symbol), "{key:?} compiles `{symbol}`");
-            }
+            let seen = identifiers(&text);
+            let leaked: Vec<&String> = region
+                .iter()
+                .filter(|n| seen.contains(n.as_str()))
+                .collect();
+            assert!(leaked.is_empty(), "{key:?} compiles {leaked:?}");
             assert!(
                 text.contains("fn stylised_lava("),
                 "{key:?} lost the magma grade"
             );
         }
-        for caps in [0.0, 1.0] {
-            let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, caps));
-            let text = liquid_under(&water.frag_defs());
-            for symbol in region.iter().filter(|s| caps > 0.5 || !s.contains("view")) {
-                assert!(text.contains(symbol), "{water:?} lacks `{symbol}`");
-            }
-        }
+        // The view variant carries every def the region's own guards name today.
+        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 1.0));
+        let text = liquid_under(&water.frag_defs());
+        let seen = identifiers(&text);
+        let missing: Vec<&String> = region
+            .iter()
+            .filter(|n| !seen.contains(n.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "{water:?} lacks {missing:?}");
         assert!(
             !include_str!("shaders/liquid.wgsl").contains("DEPTH_PREPASS"),
             "a liquid pipeline reads the depth prepass again: it misses the static world and \

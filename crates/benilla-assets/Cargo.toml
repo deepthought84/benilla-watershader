@@ -22,3 +22,10 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 # bytes, with no averaging to darken mid-tones.
 image = { version = "0.25", default-features = false }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# The WGSL tripwire (`tests/liquid_wgsl_compiles.rs`) composes and validates the liquid shader as
+# Bevy does. The versions and features are the ones Bevy's own build already uses, so nothing new
+# is compiled into the dependency graph.
+naga = { version = "27", features = ["wgsl-in"] }
+naga_oil = { version = "0.20", default-features = false, features = ["test_shader"] }

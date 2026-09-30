@@ -220,6 +220,18 @@ pub struct WaterPassImages {
 pub struct WaterPipelineCaps {
     /// The debug views (`WATER_VIEW`), while `WaterDebug::view` names one.
     pub view: bool,
+    /// The quality tier, 0 Low, 1 Medium, 2 High; a larger value is High.
+    pub tier: u8,
+    /// The screen-space march as a debug variant.
+    pub ssr: bool,
+    /// The linear composite while it is a variant.
+    pub composite: bool,
+    /// The highlight excess stored for the glow.
+    pub glow: bool,
+    /// Per-channel transmittance through dual-source blending.
+    pub dual_source: bool,
+    /// The authored sheet as painted detail.
+    pub painted: bool,
 }
 
 impl WaterPipelineCaps {
@@ -227,9 +239,18 @@ impl WaterPipelineCaps {
     /// key's own consts so the two cannot drift.
     pub fn bits(self) -> u32 {
         use benilla_assets::materials::LiquidKey as K;
-        let mut k: u16 = 0;
-        if self.view {
-            k |= K::VIEW;
+        let mut k: u16 = u16::from(self.tier.min(2)) << K::TIER_SHIFT;
+        for (on, bit) in [
+            (self.view, K::VIEW),
+            (self.ssr, K::SSR),
+            (self.composite, K::COMPOSITE),
+            (self.glow, K::GLOW),
+            (self.dual_source, K::DUAL_SOURCE),
+            (self.painted, K::PAINTED),
+        ] {
+            if on {
+                k |= bit;
+            }
         }
         u32::from(k >> K::CAPS_SHIFT)
     }
@@ -302,24 +323,54 @@ mod tests {
     use benilla_assets::materials::LiquidKey;
     use bevy::math::Vec4;
 
-    /// Every caps combination round-trips through `path.w` into the key's matching bits, on the
-    /// stylised lane only; magma and slime stay fullbright whatever `path.w` holds.
+    /// Every caps combination round-trips through `path.w` into the key's matching bits and tier,
+    /// on the stylised lane only; magma and slime stay fullbright whatever `path.w` holds.
     #[test]
     fn the_caps_round_trip_through_path_w() {
-        for view in [false, true] {
-            let caps = WaterPipelineCaps { view };
-            let lane = caps.bits() as f32;
-            let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, lane));
-            assert!(water.composite());
-            assert_eq!(water.has(LiquidKey::VIEW), view, "{caps:?}");
-            let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 0.0, 0.0, lane));
-            assert_eq!(
-                reference,
-                LiquidKey::default(),
-                "{caps:?} on the reference lane"
-            );
-            let magma = LiquidKey::from_lanes(Vec4::X, Vec4::new(0.0, 1.0, 1.0, lane));
-            assert!(magma.has(LiquidKey::FULLBRIGHT) && !magma.has(LiquidKey::VIEW));
+        for bools in 0u8..64 {
+            for tier in 0..=2 {
+                let on = |i: u8| bools & (1 << i) != 0;
+                let caps = WaterPipelineCaps {
+                    view: on(0),
+                    tier,
+                    ssr: on(1),
+                    composite: on(2),
+                    glow: on(3),
+                    dual_source: on(4),
+                    painted: on(5),
+                };
+                let lane = caps.bits() as f32;
+                let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, lane));
+                assert!(water.composite());
+                assert_eq!(water.tier(), tier, "{caps:?}");
+                for (want, bit) in [
+                    (caps.view, LiquidKey::VIEW),
+                    (caps.ssr, LiquidKey::SSR),
+                    (caps.composite, LiquidKey::COMPOSITE),
+                    (caps.glow, LiquidKey::GLOW),
+                    (caps.dual_source, LiquidKey::DUAL_SOURCE),
+                    (caps.painted, LiquidKey::PAINTED),
+                ] {
+                    assert_eq!(water.has(bit), want, "{caps:?} bit {bit:#x}");
+                }
+                let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 0.0, 0.0, lane));
+                assert_eq!(
+                    reference,
+                    LiquidKey::default(),
+                    "{caps:?} on the reference lane"
+                );
+                let magma = LiquidKey::from_lanes(Vec4::X, Vec4::new(0.0, 1.0, 1.0, lane));
+                assert!(magma.has(LiquidKey::FULLBRIGHT) && !magma.composite());
+                assert_eq!(magma, LiquidKey::from_lanes(Vec4::X, Vec4::ZERO));
+            }
         }
+        // A tier past High clamps rather than spilling into the next bit.
+        let past = WaterPipelineCaps {
+            tier: 3,
+            ..Default::default()
+        };
+        let key = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, past.bits() as f32));
+        assert_eq!(key.tier(), 2);
+        assert!(!key.has(LiquidKey::SSR));
     }
 }

@@ -830,6 +830,29 @@ fn liquid_bevy_mesh(
     mesh
 }
 
+/// One wet cell through [`liquid_bevy_mesh`], so it carries every liquid surface's vertex layout,
+/// with an interior pool's vertex colour when `body_color`: the pipeline warm pass's stand-in.
+pub fn warm_liquid_mesh(body_color: bool) -> Mesh {
+    let lq = LiquidMesh {
+        grid: [2, 2],
+        wet: vec![true],
+        shared: vec![false],
+        positions: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ],
+        uvs: vec![[0.0, 0.0]; 4],
+        depths: vec![0.0; 4],
+        indices: vec![0, 1, 2, 1, 3, 2],
+        sound_nibble: 0,
+        material_id: None,
+        kind: LiquidKind::Still,
+    };
+    liquid_bevy_mesh(&lq, body_color.then_some([1.0; 3]), None, None, false, None)
+}
+
 /// Spawn a WMO group's liquid surfaces at the building's placement `transform`, pushed onto
 /// `entities` to despawn with the placement. `interior` is the group's `MOGI & 0x48 == 0` class,
 /// which picks the renderer and the fog block; `pool` scopes each surface to its room and floor.
@@ -1249,6 +1272,39 @@ mod tests {
         assert!(!e.contains::<crate::model_render::ModelPart>());
         assert!(!e.contains::<crate::wmo_portal::WmoGroupVis>());
         assert!(!e.contains::<crate::world_unit::WorldUnit>());
+    }
+
+    /// The warm pass's stand-in carries every liquid surface's attributes, and the vertex colour
+    /// only when asked: its pipelines are the ones the world draws.
+    #[test]
+    fn the_warm_liquid_mesh_has_the_production_layout() {
+        use benilla_assets::materials::{
+            ATTRIBUTE_WOW_FLOW, ATTRIBUTE_WOW_PLANAR, ATTRIBUTE_WOW_SHORE_OFFSET,
+            ATTRIBUTE_WOW_SURFACE_NORMAL,
+        };
+        let lq = one_sheet([0.0, 0.0, 5.0]);
+        let production = liquid_bevy_mesh(&lq, None, None, None, false, None);
+        for body_color in [false, true] {
+            let warm = warm_liquid_mesh(body_color);
+            for attr in [
+                Mesh::ATTRIBUTE_POSITION,
+                Mesh::ATTRIBUTE_NORMAL,
+                Mesh::ATTRIBUTE_UV_0,
+                Mesh::ATTRIBUTE_UV_1,
+                ATTRIBUTE_WOW_SHORE_OFFSET,
+                ATTRIBUTE_WOW_SURFACE_NORMAL,
+                ATTRIBUTE_WOW_PLANAR,
+                ATTRIBUTE_WOW_FLOW,
+            ] {
+                assert!(warm.contains_attribute(attr), "{}", attr.name);
+                assert!(production.contains_attribute(attr), "{}", attr.name);
+            }
+            assert_eq!(warm.contains_attribute(Mesh::ATTRIBUTE_COLOR), body_color);
+            assert_eq!(
+                warm.attributes().count(),
+                production.attributes().count() + usize::from(body_color)
+            );
+        }
     }
 
     /// The mesh is built per wet cell, so every attribute has one entry per emitted vertex and
