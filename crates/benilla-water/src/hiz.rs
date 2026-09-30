@@ -1,15 +1,20 @@
 //! **The reflection march's hierarchical depth buffer, and the water's linear depth.**
 //!
-//! A pyramid of nearest-per-tile depths, rebuilt from the world view's depth every frame the
-//! stylised water is on. `shaders/hiz_reduce.wgsl` carries the reasoning for the pyramid and for
-//! why it reduces with `max` where Bevy's own depth pyramid reduces with `min`; this module is the
-//! plumbing that builds it.
+//! A pyramid of nearest-per-tile depths, rebuilt from the world view's depth on the frames a reader
+//! wants it ([`WaterHizConsumers`]). `shaders/hiz_reduce.wgsl` carries the reasoning for the
+//! pyramid and for why it reduces with `max` where Bevy's own depth pyramid reduces with `min`;
+//! this module is the plumbing that builds it.
 //!
 //! Its seed, `shaders/hiz_seed.wgsl`, is one compute pass that reads the view's depth once and
 //! writes mip 0 of both pyramids and, inside the water's screen rectangle
 //! ([`super::world_view::WaterScreenRect`]), the **linear depth**: view Z in yards behind every
 //! pixel, full resolution, 0 where nothing was drawn. That is what the water measures its column
-//! against; it is published as `WaterPassImages::scene_depth`.
+//! against; it is published as `WaterPassImages::scene_depth`. Texels outside this frame's
+//! rectangle keep whatever an earlier frame wrote there.
+//!
+//! **Only while stylised water is on screen.** The seed runs on the frames the rectangle is
+//! visible. With no pyramid reader it covers only the rectangle's texels and writes the linear
+//! depth alone, and the reduce chain does not run.
 //!
 //! The shape is `scene_color`'s, because the problem is the same one: an image the liquid material
 //! samples, sized to the view, rebuilt when the view resizes, re-pointed into every material, and
@@ -63,7 +68,9 @@ use bevy::render::view::{ExtractedView, Msaa, ViewDepthTexture};
 use bevy::render::{Render, RenderApp, RenderSystems};
 use bevy::shader::ShaderDefVal;
 
-use super::world_view::{serves_world_view, Visit, WaterScreenRect, WaterWorldView};
+use super::world_view::{
+    serves_world_view, water_on_screen, Visit, WaterScreenRect, WaterWorldView,
+};
 use super::{WaterPassImages, WaterStyle};
 
 /// The pyramid and the linear depth, and the sizes they were built for.
@@ -88,6 +95,30 @@ pub(crate) struct WaterHiz {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct WaterHizLabel;
+
+/// The readers that want the pyramid this frame, one bit each; extracted. With none, the seed
+/// writes only the linear depth, over the water's rectangle, and the reduce chain does not run.
+#[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
+pub(crate) struct WaterHizConsumers(pub(crate) u32);
+
+impl WaterHizConsumers {
+    /// The screen-space reflection march, the `WATER_SSR` debug variant.
+    pub(crate) const SSR: u32 = 1 << 0;
+    /// The sky floor's occlusion march; no reader sets it yet.
+    #[allow(dead_code)]
+    pub(crate) const FLOOR_OCCLUSION: u32 = 1 << 1;
+    /// The sun's and moon's per-pixel visibility for the glint; no reader sets it yet.
+    #[allow(dead_code)]
+    pub(crate) const SUN_VISIBILITY: u32 = 1 << 2;
+    /// The body's sky-visibility rays; no reader sets it yet.
+    #[allow(dead_code)]
+    pub(crate) const BODY_VISIBILITY: u32 = 1 << 3;
+
+    /// Whether any reader walks the pyramid.
+    pub(crate) fn any(self) -> bool {
+        self.0 != 0
+    }
+}
 
 /// The largest power of two not greater than `v`, floored at one.
 fn prev_pot(v: u32) -> u32 {
@@ -268,8 +299,31 @@ const SEED_ORTHOGRAPHIC: u32 = 2;
 #[derive(Resource, Default)]
 struct HizSeedParams {
     uniform: UniformBuffer<SeedParams>,
-    /// Whether this frame's parameters were written: the world view exists and the pass is armed.
+    /// Whether this frame's parameters were written: the world view exists, the pass is armed and
+    /// water is on screen.
     ready: bool,
+    /// The seed's dispatch, in pyramid texels from `tile_origin`: the whole pyramid when a reader
+    /// walks it, else the tiles that own the rectangle's pixels.
+    tiles: UVec2,
+    /// Whether the pyramid is built this frame: mip 0 by the seed and the reduce chain after it.
+    pyramid: bool,
+}
+
+/// The pyramid texels whose invocations write the linear depth of the view pixels `min..max`
+/// (exclusive), per axis: the first one and how many. [`owner`] never decreases along an axis, so
+/// the owners of the rectangle's first and last pixel bound every owner inside it.
+fn rect_tiles(min: UVec2, max: UVec2, src: UVec2, dst: UVec2) -> (UVec2, UVec2) {
+    let first = UVec2::new(owner(min.x, src.x, dst.x), owner(min.y, src.y, dst.y));
+    let last = UVec2::new(
+        owner(max.x - 1, src.x, dst.x),
+        owner(max.y - 1, src.y, dst.y),
+    );
+    (first, last - first + UVec2::ONE)
+}
+
+/// The pyramid texel view texel `x`'s centre falls in, per axis: `hiz_seed.wgsl`'s `owner`.
+fn owner(x: u32, src: u32, dst: u32) -> u32 {
+    ((2 * x + 1) * dst) / (2 * src)
 }
 
 /// The pipelines: the compute seed, one per sample count of the view's depth, then the render
@@ -409,12 +463,15 @@ fn init_hiz_pipelines(
 
 /// Render world, before the graph: queue the seed for the world view's sample count if it is new,
 /// and write this frame's `SeedParams` — the view's size and near plane, the pyramid's size, the
-/// water's rectangle.
+/// water's rectangle, and the tiles to dispatch. Nothing is written, and the node skips the frame,
+/// unless the look is armed and water is on screen.
+#[allow(clippy::too_many_arguments)]
 fn prepare_hiz_seed(
     pipes: Option<ResMut<HizPipelines>>,
     cache: Res<PipelineCache>,
     hiz: Option<Res<WaterHiz>>,
     rect: Option<Res<WaterScreenRect>>,
+    consumers: Option<Res<WaterHizConsumers>>,
     views: Query<(&ExtractedView, &ExtractedCamera, &Msaa), With<WaterWorldView>>,
     mut params: ResMut<HizSeedParams>,
     device: Res<RenderDevice>,
@@ -430,22 +487,34 @@ fn prepare_hiz_seed(
     let (Some(src), true) = (camera.physical_target_size, hiz.is_some_and(|h| h.armed)) else {
         return;
     };
-    // Nothing on screen is water: an empty rectangle, and the seed writes no linear depth.
-    let (lin_min, lin_max) = match rect.as_deref() {
-        Some(r) if r.visible => (r.min.min(src), r.max.min(src)),
-        _ => (UVec2::ZERO, UVec2::ZERO),
+    let Some(rect) = rect.filter(|r| r.visible) else {
+        return;
+    };
+    let (lin_min, lin_max) = (rect.min.min(src), rect.max.min(src));
+    if lin_min.cmpge(lin_max).any() {
+        return;
+    }
+    let dst = pyramid_size(src);
+    let pyramid = consumers.is_some_and(|c| c.any());
+    let (tile_origin, tiles) = if pyramid {
+        (UVec2::ZERO, dst)
+    } else {
+        rect_tiles(lin_min, lin_max, src, dst)
     };
     let orthographic = view.clip_from_view.w_axis.w != 0.0;
     params.uniform.set(SeedParams {
         src_size: src,
-        dst_size: pyramid_size(src),
+        dst_size: dst,
         lin_min,
         lin_max,
-        tile_origin: UVec2::ZERO,
-        write_hiz: SEED_WRITE_HIZ | if orthographic { SEED_ORTHOGRAPHIC } else { 0 },
+        tile_origin,
+        write_hiz: if pyramid { SEED_WRITE_HIZ } else { 0 }
+            | if orthographic { SEED_ORTHOGRAPHIC } else { 0 },
         near: view.clip_from_view.w_axis.z,
     });
     params.uniform.write_buffer(&device, &queue);
+    params.tiles = tiles;
+    params.pyramid = pyramid;
     params.ready = true;
 }
 
@@ -459,15 +528,15 @@ impl Node for WaterHizNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        // **Only the view the water marches in.** Core3d runs for every 3D view: the mirrors and
-        // the probe's cube faces too.
-        if !serves_world_view(world, graph.view_entity(), Visit::Pyramid) {
-            return Ok(());
-        }
+        // **Only while the look is armed and water is on screen, and only for the view the water
+        // is drawn in.** Core3d runs for every 3D view: the mirrors and the probe's cube faces too.
         let Some(hiz) = world.get_resource::<WaterHiz>() else {
             return Ok(());
         };
-        if !hiz.armed {
+        if !(hiz.armed
+            && water_on_screen(world)
+            && serves_world_view(world, graph.view_entity(), Visit::Pyramid))
+        {
             return Ok(());
         }
         let (Some(pipes), Some(cache), Some(params)) = (
@@ -499,12 +568,15 @@ impl Node for WaterHizNode {
             return Ok(());
         };
         let samples = view_depth.texture.sample_count();
-        let (Some(seed_pipeline), Some(reduce_pipeline)) = (
-            pipes
-                .seed(samples)
-                .and_then(|id| cache.get_compute_pipeline(id)),
-            cache.get_render_pipeline(pipes.reduce),
-        ) else {
+        let seed_pipeline = pipes
+            .seed(samples)
+            .and_then(|id| cache.get_compute_pipeline(id));
+        // The reduce chain only when the pyramid is built; a seed without it would leave mip 0
+        // ahead of the levels below it.
+        let reduce_pipeline = cache.get_render_pipeline(pipes.reduce);
+        let (Some(seed_pipeline), true) =
+            (seed_pipeline, !params.pyramid || reduce_pipeline.is_some())
+        else {
             return Ok(()); // still compiling
         };
         // **Sizes as the parameters say, or skip the frame**: a resize reaches the view's depth,
@@ -545,7 +617,8 @@ impl Node for WaterHizNode {
         // and DX12: the perf journal's `gpu_water`.
         let diagnostics = render_context.diagnostic_recorder();
 
-        // Mip 0 of both pyramids and the linear depth, one compute pass over the pyramid's texels.
+        // The linear depth, and mip 0 of both pyramids when they are built: one compute pass over
+        // the pyramid's texels, or over the rectangle's alone.
         let dst0 = level_view(0);
         let (layout, source) = if samples > 1 {
             (&pipes.seed_ms_layout, 1)
@@ -574,7 +647,7 @@ impl Node for WaterHizNode {
             let timed = diagnostics.pass_span(&mut pass, "water_hiz_seed");
             pass.set_pipeline(seed_pipeline);
             pass.set_bind_group(0, &seed_bind, &[]);
-            pass.dispatch_workgroups(p.dst_size.x.div_ceil(8), p.dst_size.y.div_ceil(8), 1);
+            pass.dispatch_workgroups(params.tiles.x.div_ceil(8), params.tiles.y.div_ceil(8), 1);
             timed.end(&mut pass);
         }
 
@@ -607,6 +680,9 @@ impl Node for WaterHizNode {
             timed.end(&mut p);
         };
 
+        let Some(reduce_pipeline) = reduce_pipeline.filter(|_| params.pyramid) else {
+            return Ok(());
+        };
         // **Top down, and it cannot be reordered**: each level reads the one above it.
         for level in 1..hiz.mips {
             let src = level_view(level - 1);
@@ -642,7 +718,11 @@ pub(super) fn register(app: &mut App) {
         lin_size: size,
         armed: false,
     })
-    .add_plugins(ExtractResourcePlugin::<WaterHiz>::default())
+    .init_resource::<WaterHizConsumers>()
+    .add_plugins((
+        ExtractResourcePlugin::<WaterHiz>::default(),
+        ExtractResourcePlugin::<WaterHizConsumers>::default(),
+    ))
     .add_systems(
         PostUpdate,
         (drive_hiz, restamp_hiz)
@@ -720,11 +800,6 @@ mod tests {
         min(((d + 1) * src + dst - 1) / dst, src) - 1
     }
 
-    /// The pyramid texel view texel `x`'s centre falls in.
-    fn owner(x: u32, src: u32, dst: u32) -> u32 {
-        ((2 * x + 1) * dst) / (2 * src)
-    }
-
     /// Every view size per axis from 8 to 4096, with the pyramid the node builds for it.
     fn sizes() -> impl Iterator<Item = (u32, u32)> {
         (8..=4096u32).map(|src| (src, pyramid_size(UVec2::splat(src)).x))
@@ -759,6 +834,49 @@ mod tests {
                     .filter(|&&n| !(1..=2).contains(&n))
                     .collect::<Vec<_>>()
             );
+        }
+    }
+
+    /// A seed over the rectangle's tiles alone still writes every pixel of it: each pixel's owner
+    /// lies inside the dispatched range, and the range ends on the owners of its first and last
+    /// pixel. Every rectangle of the small views, a stride of them on the large ones.
+    #[test]
+    fn the_rect_dispatch_owns_every_rect_pixel() {
+        let check = |src: u32, a: u32, b: u32| {
+            let dst = pyramid_size(UVec2::splat(src)).x;
+            let (first, count) = rect_tiles(
+                UVec2::splat(a),
+                UVec2::splat(b),
+                UVec2::splat(src),
+                UVec2::splat(dst),
+            );
+            assert!(
+                count.x >= 1 && first.x + count.x <= dst,
+                "src {src} {a}..{b}"
+            );
+            assert_eq!(first.x, owner(a, src, dst), "src {src} {a}..{b}");
+            assert_eq!(first.x + count.x - 1, owner(b - 1, src, dst));
+            for x in a..b {
+                let d = owner(x, src, dst);
+                assert!(
+                    (first.x..first.x + count.x).contains(&d),
+                    "src {src} rect {a}..{b}: pixel {x}'s owner {d} is not dispatched"
+                );
+            }
+        };
+        for src in 8..=72u32 {
+            for a in 0..src {
+                for b in a + 1..=src {
+                    check(src, a, b);
+                }
+            }
+        }
+        for src in [900u32, 1600, 1800, 3200, 3840] {
+            for a in (0..src).step_by(37) {
+                for b in (a + 1..=src).step_by(53).chain([src]) {
+                    check(src, a, b);
+                }
+            }
         }
     }
 

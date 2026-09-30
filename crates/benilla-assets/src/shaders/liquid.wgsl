@@ -1317,9 +1317,10 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     return sum * 0.2;
 }
 
-#ifdef WATER_SCENE_DEPTH
-
-
+#ifdef WATER_SSR
+// ---- the screen-space march: the `WATER_SSR` debug variant (`$WOW_SSR=1`) ----------------------
+//
+// Nothing outside this block names anything in it, so the shipped pipelines compile none of it.
 
 /// Read the scene snapshot where the ray landed, and score how much to believe it.
 ///
@@ -1647,7 +1648,7 @@ fn ssr_trace(origin: vec3<f32>, dir: vec3<f32>) -> SsrHit {
     }
     return ssr_read(p.xy);
 }
-#endif
+#endif // WATER_SSR
 
 /// One planar mirror's read for this fragment: its reprojected colour, and in `a` its weight —
 /// strength times coverage times [`plane_trust`] — zero where it does not serve this water.
@@ -2175,7 +2176,7 @@ fn stylised_water(
     var ssr: SsrHit;
     ssr.rgb = vec3<f32>(0.0);
     ssr.conf = 0.0;
-#ifdef WATER_SCENE_DEPTH
+#ifdef WATER_SSR
     if (water_reflect.flags.z > 0.0 && view.world_position.y > world_pos.y) {
         ssr = ssr_trace(
             world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y,

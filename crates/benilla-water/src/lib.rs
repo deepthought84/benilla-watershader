@@ -79,14 +79,27 @@ impl Plugin for ImprovedWaterPlugin {
     }
 }
 
-/// Ask the stylised liquid pipelines for the variants this plugin's switches need: the debug views
-/// while one is chosen. A no-op unless the answer changes, so the materials are touched only then.
-fn drive_pipeline_caps(dev: Res<dev_state::DebugState>, mut caps: ResMut<WaterPipelineCaps>) {
+/// Ask the stylised liquid pipelines for the variants this plugin's switches need, and the depth
+/// pyramid for the readers they turn on: the debug views while one is chosen, the screen-space march
+/// while its switch is on. A no-op unless the answer changes, so the materials are touched only
+/// then.
+fn drive_pipeline_caps(
+    dev: Res<dev_state::DebugState>,
+    mut caps: ResMut<WaterPipelineCaps>,
+    mut consumers: ResMut<hiz::WaterHizConsumers>,
+) {
     let next = WaterPipelineCaps {
         view: dev.water.view != 0,
+        ssr: dev.water.ssr,
         ..*caps
     };
     caps.set_if_neq(next);
+    let readers = if dev.water.ssr {
+        hiz::WaterHizConsumers::SSR
+    } else {
+        0
+    };
+    consumers.set_if_neq(hiz::WaterHizConsumers(readers));
 }
 
 /// Hand the engine's liquid materials this plugin's targets; each pass re-points them itself when

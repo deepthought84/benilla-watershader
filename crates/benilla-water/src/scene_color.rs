@@ -47,7 +47,7 @@ use bevy::render::renderer::RenderContext;
 use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewTarget;
 
-use super::world_view::{serves_world_view, Visit};
+use super::world_view::{serves_world_view, water_on_screen, Visit};
 use super::WaterStyle;
 
 /// How much smaller than the main view the snapshot is, per side.
@@ -134,7 +134,7 @@ fn restamp_scene_color(
     }
 }
 
-/// The copy itself: one `copy_texture_to_texture` per frame, and nothing else.
+/// The copy itself: one `copy_texture_to_texture` per frame water is on screen, and nothing else.
 #[derive(Default)]
 struct WaterSceneColorNode;
 
@@ -145,14 +145,15 @@ impl Node for WaterSceneColorNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        // Only the world view: Core3d runs for the mirrors and the probe's cube faces too.
-        if !serves_world_view(world, graph.view_entity(), Visit::Snapshot) {
-            return Ok(());
-        }
+        // Only while the look is armed and water is on screen, and only for the world view:
+        // Core3d runs for the mirrors and the probe's cube faces too.
         let Some(snap) = world.get_resource::<WaterSceneColor>() else {
             return Ok(());
         };
-        if !snap.armed {
+        if !(snap.armed
+            && water_on_screen(world)
+            && serves_world_view(world, graph.view_entity(), Visit::Snapshot))
+        {
             return Ok(());
         }
         let Some(gpu) = world

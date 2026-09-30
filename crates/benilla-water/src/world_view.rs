@@ -8,10 +8,12 @@
 //! not what makes it the world view.
 //!
 //! [`WaterViewCheck`] counts each node's visits to the marked view; a frame in which the passes are
-//! armed and a marked view rendered must count exactly one of each.
+//! armed, water is on screen and a marked view rendered must count exactly one of each, and any
+//! other frame none.
 //!
 //! [`WaterScreenRect`] is the world view's rectangle around every visible water surface, grown by
-//! a margin: what only the water reads (the linear depth) is written inside it alone.
+//! a margin: what only the water reads (the linear depth) is written inside it alone, and a frame
+//! with no water on screen runs none of the water's passes.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -59,8 +61,16 @@ pub(crate) struct WaterViewCheck {
     snapshot: AtomicU32,
 }
 
+/// Whether any stylised water is on the world view's screen this frame, by the extracted
+/// [`WaterScreenRect`]: the water's passes run only then.
+pub(crate) fn water_on_screen(world: &World) -> bool {
+    world
+        .get_resource::<WaterScreenRect>()
+        .is_some_and(|r| r.visible)
+}
+
 /// Whether `view` is the world view; a visit to it is counted for `pass`. Every water node that
-/// serves the world view opens with this.
+/// serves the world view asks this once it is armed.
 pub(crate) fn serves_world_view(world: &World, view: Entity, pass: Visit) -> bool {
     if world.get::<WaterWorldView>(view).is_none() {
         return false;
@@ -75,10 +85,15 @@ pub(crate) fn serves_world_view(world: &World, view: Entity, pass: Visit) -> boo
     true
 }
 
-/// The verdict on one frame's visits: `None` when nothing was owed (passes unarmed, or no marked
-/// view rendered), else whether each pass served the world view exactly once.
+/// The verdict on one frame's visits: armed (the look on and water on screen) with a marked view
+/// rendered, each pass served it exactly once; unarmed, neither ran; `None` when armed and no
+/// marked view rendered, which owes nothing.
 fn served_once(armed: bool, rendered: bool, visits: (u32, u32)) -> Option<bool> {
-    (armed && rendered).then_some(visits == (1, 1))
+    if armed {
+        rendered.then_some(visits == (1, 1))
+    } else {
+        Some(visits == (0, 0))
+    }
 }
 
 /// A marked view that rendered this frame: an active camera (`ExtractedCamera`, removed from an
@@ -89,19 +104,20 @@ type RenderedWorldView = (
     With<ViewTarget>,
 );
 
-/// Cleanup: while the passes are armed and a marked view rendered this frame, the pyramid and the
-/// snapshot each served it exactly once. `RUST_LOG=benilla_water::world_view=trace` logs the
-/// counts every frame.
+/// Cleanup: while the passes are armed, water is on screen and a marked view rendered this frame,
+/// the pyramid and the snapshot each served it exactly once; otherwise neither ran.
+/// `RUST_LOG=benilla_water::world_view=trace` logs the counts every frame.
 fn check_world_view(
     check: Res<WaterViewCheck>,
     hiz: Option<Res<super::hiz::WaterHiz>>,
+    rect: Option<Res<WaterScreenRect>>,
     views: Query<(), RenderedWorldView>,
 ) {
     let visits = (
         check.pyramid.swap(0, Ordering::Relaxed),
         check.snapshot.swap(0, Ordering::Relaxed),
     );
-    let armed = hiz.is_some_and(|h| h.armed);
+    let armed = hiz.is_some_and(|h| h.armed) && rect.is_some_and(|r| r.visible);
     let rendered = !views.is_empty();
     trace!(
         "world view visits: pyramid {} snapshot {} (armed {armed}, rendered {rendered})",
@@ -109,13 +125,13 @@ fn check_world_view(
         visits.1
     );
     if served_once(armed, rendered, visits) == Some(false) {
+        let owed = if armed { (1, 1) } else { (0, 0) };
         debug_assert_eq!(
-            visits,
-            (1, 1),
-            "water: the world view was served (pyramid, snapshot) {visits:?} times, not once each"
+            visits, owed,
+            "water: the world view was served (pyramid, snapshot) {visits:?} times, not {owed:?}"
         );
         warn_once!(
-            "water: the world view was served (pyramid, snapshot) {visits:?} times, not once each"
+            "water: the world view was served (pyramid, snapshot) {visits:?} times, not {owed:?}"
         );
     }
 }
@@ -264,13 +280,16 @@ pub(super) fn register(app: &mut App) {
 mod tests {
     use super::*;
 
-    /// Owed only while armed with a marked view rendered, and then exactly one visit each.
+    /// Armed with a marked view rendered, exactly one visit each; unarmed (the look off, or no
+    /// water on screen), none; armed with no marked view rendered, nothing owed.
     #[test]
     fn the_world_view_is_served_once_by_each_pass() {
         assert_eq!(served_once(true, true, (1, 1)), Some(true));
         assert_eq!(served_once(true, true, (0, 1)), Some(false));
         assert_eq!(served_once(true, true, (1, 2)), Some(false));
-        assert_eq!(served_once(false, true, (0, 0)), None);
+        assert_eq!(served_once(false, true, (0, 0)), Some(true));
+        assert_eq!(served_once(false, true, (1, 1)), Some(false));
+        assert_eq!(served_once(false, false, (0, 1)), Some(false));
         assert_eq!(served_once(true, false, (0, 0)), None);
     }
 

@@ -395,7 +395,7 @@ impl LiquidKey {
     /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High. No def reads
     /// them yet, so every tier compiles the same text.
     pub const TIER_SHIFT: u16 = 3;
-    /// The screen-space march as a debug variant (`path.w` bit 3); no def reads it yet.
+    /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3.
     pub const SSR: u16 = 1 << 5;
     /// The linear composite while it is a variant (`path.w` bit 4); no def reads it yet.
     pub const COMPOSITE: u16 = 1 << 6;
@@ -481,6 +481,9 @@ impl LiquidKey {
         defs.extend(["WATER_STYLISED", "WATER_SCENE_DEPTH"]);
         if self.has(Self::VIEW) {
             defs.push("WATER_VIEW");
+        }
+        if self.has(Self::SSR) {
+            defs.push("WATER_SSR");
         }
         defs
     }
@@ -1785,6 +1788,14 @@ mod tests {
         let view = key(0.0, 1.0, 1.0);
         assert!(view.composite() && view.has(LiquidKey::VIEW));
         assert!(view.frag_defs().contains(&"WATER_VIEW"));
+        // The march compiles only into its debug variant.
+        let ssr = key(0.0, 1.0, 8.0);
+        assert!(ssr.composite() && ssr.has(LiquidKey::SSR) && !ssr.has(LiquidKey::VIEW));
+        assert_eq!(
+            ssr.frag_defs(),
+            ["WATER_STYLISED", "WATER_SCENE_DEPTH", "WATER_SSR"]
+        );
+        assert!(!plain.frag_defs().contains(&"WATER_SSR"));
         // A negative lane reads as no bits.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
         // The tier's two bits; a stale 3 reads as High.
@@ -1999,8 +2010,9 @@ mod tests {
                 "{key:?} lost the magma grade"
             );
         }
-        // The view variant carries every def the region's own guards name today.
-        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 1.0));
+        // The debug views with the march (`path.w` bits 0 and 3) carry every def the region's own
+        // guards name today.
+        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
         let text = liquid_under(&water.frag_defs());
         let seen = identifiers(&text);
         let missing: Vec<&String> = region
