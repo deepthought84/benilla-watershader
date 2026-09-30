@@ -1227,6 +1227,10 @@ fn drive_capture(
                         w.present_mode = probe_uncap_mode();
                     }
                 }
+                // An instrumented run opens unfocused (`benilla_world::bgwin`), and bevy's default
+                // `WinitSettings::game()` updates an unfocused window at 60 Hz whatever the present
+                // mode: the probe runs the loop continuously, so the frame rate is the frame cost.
+                commands.insert_resource(bevy::winit::WinitSettings::continuous());
                 info!(
                     "probe: scene aged {} frames; vsync {}, warming {PROBE_WARMUP_FRAMES} frames",
                     age_frames(ctx.name),
