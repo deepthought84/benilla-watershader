@@ -16,6 +16,10 @@
 //! visible. With no pyramid reader it covers only the rectangle's texels and writes the linear
 //! depth alone, and the reduce chain does not run.
 //!
+//! **Built once, bound every frame.** The level views and the seed's and the reduce's bind groups
+//! live in [`HizBindings`], rebuilt only when a texture or buffer they bind changes: a steady frame
+//! creates none.
+//!
 //! The shape is `scene_color`'s, because the problem is the same one: an image the liquid material
 //! samples, sized to the view, rebuilt when the view resizes, re-pointed into every material, and
 //! filled by a render-graph node. The differences are that this one carries a mip chain and is
@@ -55,12 +59,13 @@ use bevy::render::render_resource::binding_types::{
     texture_2d, texture_depth_2d, texture_depth_2d_multisampled, texture_storage_2d, uniform_buffer,
 };
 use bevy::render::render_resource::{
-    BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, CachedComputePipelineId,
-    CachedRenderPipelineId, ColorTargetState, ColorWrites, ComputePassDescriptor,
-    ComputePipelineDescriptor, Extent3d, FragmentState, Operations, PipelineCache,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor, ShaderStages,
-    ShaderType, StorageTextureAccess, TextureAspect, TextureDimension, TextureFormat,
-    TextureSampleType, TextureUsages, TextureViewDescriptor, TextureViewDimension, UniformBuffer,
+    BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries, BufferId,
+    CachedComputePipelineId, CachedRenderPipelineId, ColorTargetState, ColorWrites,
+    ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, FragmentState, Operations,
+    PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
+    ShaderStages, ShaderType, StorageTextureAccess, Texture, TextureAspect, TextureDimension,
+    TextureFormat, TextureId, TextureSampleType, TextureUsages, TextureView, TextureViewDescriptor,
+    TextureViewDimension, TextureViewId, UniformBuffer,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
@@ -375,6 +380,152 @@ impl HizPipelines {
     }
 }
 
+/// Render world: the views and bind groups the pyramid's passes bind, built for the textures and
+/// the buffer they bind and kept until one of them changes (a resize, an MSAA switch, a new
+/// parameters buffer), so a steady frame creates none.
+#[derive(Resource, Default)]
+struct HizBindings {
+    /// The two pyramids' textures [`Self::levels`] and [`Self::reduce`] were built for.
+    pyramid: Option<(TextureId, TextureId)>,
+    /// Per level, the nearest's and the farthest's single-level view: the reduce's targets, and at
+    /// level 0 the seed's storage writes.
+    levels: Vec<(TextureView, TextureView)>,
+    /// Per level from 1, the reduce's bind group, reading the level above.
+    reduce: Vec<BindGroup>,
+    /// What [`Self::seed`] binds.
+    seed_key: Option<SeedKey>,
+    /// The seed's bind group.
+    seed: Option<BindGroup>,
+}
+
+/// Every resource the seed's bind group binds, by id: the view depth's texture (its sample count
+/// picks the layout), the pyramids' textures, the linear depth's view and the parameters' buffer.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SeedKey {
+    source: TextureId,
+    pyramid: (TextureId, TextureId),
+    lin: TextureViewId,
+    params: BufferId,
+}
+
+/// One single-level 2D view of a pyramid, for a reduce target or a storage write.
+fn level_view(texture: &Texture, level: u32) -> TextureView {
+    texture.create_view(&TextureViewDescriptor {
+        label: Some("hiz_level"),
+        dimension: Some(TextureViewDimension::D2),
+        base_mip_level: level,
+        mip_level_count: Some(1),
+        ..default()
+    })
+}
+
+/// Render world, after the parameters: (re)build the pyramid's level views and reduce bind groups,
+/// and the seed's bind group, only where a texture or buffer they bind is not the one they were
+/// built for. `RUST_LOG=benilla_water::hiz=debug` logs each build.
+#[allow(clippy::too_many_arguments)]
+fn prepare_hiz_bindings(
+    hiz: Option<Res<WaterHiz>>,
+    params: Res<HizSeedParams>,
+    pipes: Option<Res<HizPipelines>>,
+    cache: Res<PipelineCache>,
+    images: Res<RenderAssets<GpuImage>>,
+    views: Query<&ViewDepthTexture, With<WaterWorldView>>,
+    device: Res<RenderDevice>,
+    mut bindings: ResMut<HizBindings>,
+) {
+    let (Some(hiz), Some(pipes)) = (hiz.filter(|h| h.armed), pipes) else {
+        return;
+    };
+    let (Some(near), Some(far), Some(lin)) = (
+        images.get(&hiz.image),
+        images.get(&hiz.far),
+        images.get(&hiz.lin),
+    ) else {
+        return;
+    };
+    let pyramid = (near.texture.id(), far.texture.id());
+    if bindings.pyramid != Some(pyramid) {
+        let levels: Vec<_> = (0..near.mip_level_count.min(far.mip_level_count))
+            .map(|level| {
+                (
+                    level_view(&near.texture, level),
+                    level_view(&far.texture, level),
+                )
+            })
+            .collect();
+        let layout = cache.get_bind_group_layout(&pipes.reduce_layout);
+        let reduce: Vec<_> = levels
+            .windows(2)
+            .map(|above| {
+                device.create_bind_group(
+                    "hiz_reduce_bind",
+                    &layout,
+                    &BindGroupEntries::with_indices(((1, &above[0].0), (3, &above[0].1))),
+                )
+            })
+            .collect();
+        debug!(
+            "hiz: {} level views and {} reduce bind groups for a {}x{} pyramid",
+            2 * levels.len(),
+            reduce.len(),
+            near.size.width,
+            near.size.height
+        );
+        bindings.levels = levels;
+        bindings.reduce = reduce;
+        bindings.pyramid = Some(pyramid);
+    }
+    // The view's own depth, bindable once `depth` has asked for it; its sample count picks the
+    // seed's layout.
+    let Some(depth) = views
+        .single()
+        .ok()
+        .filter(|d| d.texture.usage().contains(TextureUsages::TEXTURE_BINDING))
+    else {
+        return;
+    };
+    let (Some(buffer), Some(params_binding), Some(level0)) = (
+        params.uniform.buffer(),
+        params.uniform.binding(),
+        bindings.levels.first(),
+    ) else {
+        return;
+    };
+    let key = SeedKey {
+        source: depth.texture.id(),
+        pyramid,
+        lin: lin.texture_view.id(),
+        params: buffer.id(),
+    };
+    if bindings.seed_key == Some(key) {
+        return;
+    }
+    let source_view = depth.texture.create_view(&TextureViewDescriptor {
+        label: Some("hiz_view_depth"),
+        aspect: TextureAspect::DepthOnly,
+        ..default()
+    });
+    let (layout, source) = if depth.texture.sample_count() > 1 {
+        (&pipes.seed_ms_layout, 1)
+    } else {
+        (&pipes.seed_layout, 0)
+    };
+    let seed = device.create_bind_group(
+        "hiz_seed_bind",
+        &cache.get_bind_group_layout(layout),
+        &BindGroupEntries::with_indices((
+            (source, &source_view),
+            (2, &level0.0),
+            (3, &level0.1),
+            (4, &lin.texture_view),
+            (5, params_binding),
+        )),
+    );
+    debug!("hiz: 1 view and the seed bind group for {key:?}");
+    bindings.seed = Some(seed);
+    bindings.seed_key = Some(key);
+}
+
 fn init_hiz_pipelines(
     mut commands: Commands,
     fullscreen_shader: Res<FullscreenShader>,
@@ -539,16 +690,17 @@ impl Node for WaterHizNode {
         {
             return Ok(());
         }
-        let (Some(pipes), Some(cache), Some(params)) = (
+        let (Some(pipes), Some(cache), Some(params), Some(bindings)) = (
             world.get_resource::<HizPipelines>(),
             world.get_resource::<PipelineCache>(),
             world.get_resource::<HizSeedParams>(),
+            world.get_resource::<HizBindings>(),
         ) else {
             return Ok(());
         };
-        let Some(params_binding) = params.uniform.binding().filter(|_| params.ready) else {
+        if !params.ready {
             return Ok(());
-        };
+        }
         let Some(images) = world.get_resource::<RenderAssets<GpuImage>>() else {
             return Ok(());
         };
@@ -591,26 +743,15 @@ impl Node for WaterHizNode {
         {
             return Ok(());
         }
-        let source_view = view_depth.texture.create_view(&TextureViewDescriptor {
-            label: Some("hiz_view_depth"),
-            aspect: TextureAspect::DepthOnly,
-            ..default()
+        // **Bound as built, or skip the frame**: the seed's group must bind this frame's view
+        // depth, pyramids and linear depth, and the levels these pyramids.
+        let built = bindings.seed_key.is_some_and(|k| {
+            k.source == view_depth.texture.id()
+                && k.pyramid == (gpu.texture.id(), gpu_far.texture.id())
+                && k.lin == gpu_lin.texture_view.id()
         });
-
-        let view_of = |texture: &bevy::render::render_resource::Texture, level: u32| {
-            texture.create_view(&TextureViewDescriptor {
-                label: Some("hiz_level"),
-                dimension: Some(TextureViewDimension::D2),
-                base_mip_level: level,
-                mip_level_count: Some(1),
-                ..default()
-            })
-        };
-        let level_view = |level: u32| {
-            (
-                view_of(&gpu.texture, level),
-                view_of(&gpu_far.texture, level),
-            )
+        let Some(seed_bind) = bindings.seed.as_ref().filter(|_| built) else {
+            return Ok(());
         };
 
         // `render/water_hiz_seed` and `render/water_hiz_reduce` (one per level, summed) on Vulkan
@@ -619,23 +760,6 @@ impl Node for WaterHizNode {
 
         // The linear depth, and mip 0 of both pyramids when they are built: one compute pass over
         // the pyramid's texels, or over the rectangle's alone.
-        let dst0 = level_view(0);
-        let (layout, source) = if samples > 1 {
-            (&pipes.seed_ms_layout, 1)
-        } else {
-            (&pipes.seed_layout, 0)
-        };
-        let seed_bind = render_context.render_device().create_bind_group(
-            "hiz_seed_bind",
-            &cache.get_bind_group_layout(layout),
-            &BindGroupEntries::with_indices((
-                (source, &source_view),
-                (2, &dst0.0),
-                (3, &dst0.1),
-                (4, &gpu_lin.texture_view),
-                (5, params_binding),
-            )),
-        );
         {
             let mut pass =
                 render_context
@@ -646,18 +770,16 @@ impl Node for WaterHizNode {
                     });
             let timed = diagnostics.pass_span(&mut pass, "water_hiz_seed");
             pass.set_pipeline(seed_pipeline);
-            pass.set_bind_group(0, &seed_bind, &[]);
+            pass.set_bind_group(0, seed_bind, &[]);
             pass.dispatch_workgroups(params.tiles.x.div_ceil(8), params.tiles.y.div_ceil(8), 1);
             timed.end(&mut pass);
         }
 
-        let pass = |ctx: &mut RenderContext,
-                    views: &(
-            bevy::render::render_resource::TextureView,
-            bevy::render::render_resource::TextureView,
-        ),
-                    pipeline: &bevy::render::render_resource::RenderPipeline,
-                    bind: &bevy::render::render_resource::BindGroup| {
+        let Some(reduce_pipeline) = reduce_pipeline.filter(|_| params.pyramid) else {
+            return Ok(());
+        };
+        // **Top down, and it cannot be reordered**: each level reads the one above it.
+        for (views, bind) in bindings.levels.iter().skip(1).zip(&bindings.reduce) {
             let attach = |view| {
                 Some(RenderPassColorAttachment {
                     view,
@@ -666,7 +788,7 @@ impl Node for WaterHizNode {
                     ops: Operations::default(),
                 })
             };
-            let mut p = ctx.begin_tracked_render_pass(RenderPassDescriptor {
+            let mut p = render_context.begin_tracked_render_pass(RenderPassDescriptor {
                 label: Some("hiz_level"),
                 color_attachments: &[attach(&views.0), attach(&views.1)],
                 depth_stencil_attachment: None,
@@ -674,25 +796,10 @@ impl Node for WaterHizNode {
                 occlusion_query_set: None,
             });
             let timed = diagnostics.pass_span(&mut p, "water_hiz_reduce");
-            p.set_render_pipeline(pipeline);
+            p.set_render_pipeline(reduce_pipeline);
             p.set_bind_group(0, bind, &[]);
             p.draw(0..3, 0..1);
             timed.end(&mut p);
-        };
-
-        let Some(reduce_pipeline) = reduce_pipeline.filter(|_| params.pyramid) else {
-            return Ok(());
-        };
-        // **Top down, and it cannot be reordered**: each level reads the one above it.
-        for level in 1..hiz.mips {
-            let src = level_view(level - 1);
-            let dst = level_view(level);
-            let bind = render_context.render_device().create_bind_group(
-                "hiz_reduce_bind",
-                &cache.get_bind_group_layout(&pipes.reduce_layout),
-                &BindGroupEntries::with_indices(((1, &src.0), (3, &src.1))),
-            );
-            pass(render_context, &dst, reduce_pipeline, &bind);
         }
         Ok(())
     }
@@ -738,10 +845,14 @@ pub(super) fn register(app: &mut App) {
 
     render_app
         .init_resource::<HizSeedParams>()
+        .init_resource::<HizBindings>()
         .add_systems(bevy::render::RenderStartup, init_hiz_pipelines)
         .add_systems(
             Render,
-            prepare_hiz_seed.in_set(RenderSystems::PrepareResources),
+            (
+                prepare_hiz_seed.in_set(RenderSystems::PrepareResources),
+                prepare_hiz_bindings.in_set(RenderSystems::PrepareBindGroups),
+            ),
         )
         .add_render_graph_node::<WaterHizNode>(Core3d, WaterHizLabel)
         // After the opaque world has written the view's depth, before the water is drawn — the
