@@ -655,6 +655,15 @@ pub struct LiquidExt {
     /// `textureLoad`, and only under `WATER_SCENE_DEPTH`.
     #[texture(116, sample_type = "float", filterable = false, visibility(fragment))]
     pub scene_depth: Handle<Image>,
+    /// The sky floor's occlusion over the mirror planes (`benilla_water`'s `water_compute`), a
+    /// quarter of the view's resolution: the open sky, the body's sky and sun visibility, and
+    /// whether the march reached a verdict. Read bilinearly through [`Self::scene_color`]'s sampler.
+    #[texture(120, visibility(fragment))]
+    pub water_occl: Handle<Image>,
+    /// The occluder's radiance times the shut share of the sky, linear, and `rho_c` in alpha; the
+    /// size of [`Self::water_occl`].
+    #[texture(121, visibility(fragment))]
+    pub floor_occ: Handle<Image>,
     /// The reflection's per-frame parameters (`benilla_world::liquid::reflect`), a buffer so the
     /// per-frame write does not rebuild every liquid material's bind group.
     #[storage(107, read_only, buffer, visibility(fragment))]

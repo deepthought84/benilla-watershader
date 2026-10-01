@@ -49,8 +49,8 @@ ANSI = re.compile(r"\x1b\[[0-9;]*m")
 PAIR = re.compile(r"(\S(?:[^=]*\S)?)=(\S+)")
 # Columns of the summary, from the shot's record.
 SHOWN = ["frames", "mean_ms", "gpu_mean", "gpu_passes", "gpu_water", "water_hiz_seed",
-         "water_hiz_reduce", "water_snapshot", "main_transparent_pass_3d", "main_opaque_pass_3d",
-         "cpu_ms", "main_ms", FIXED_PASS]
+         "water_hiz_reduce", "water_snapshot", "water_compute", "main_transparent_pass_3d",
+         "main_opaque_pass_3d", "cpu_ms", "main_ms", FIXED_PASS]
 
 
 def pairs(text: str) -> dict[str, str]:
@@ -144,8 +144,8 @@ def fmt(v) -> str:
 def report(results: dict) -> int:
     """One line per shot; the count of shots that are not a clean saturated probe."""
     bad = 0
-    heads = ["frames", "wall", "gpu", "passes", "water", "seed", "reduce", "snap", "transp",
-             "opaque", "cpu", "main", "fixed"]
+    heads = ["frames", "wall", "gpu", "passes", "water", "seed", "reduce", "snap", "compute",
+             "transp", "opaque", "cpu", "main", "fixed"]
     print(f"{'shot':34s} " + " ".join(f"{h:>7s}" for h in heads))
     for stem, r in results.items():
         why = []

@@ -73,7 +73,7 @@ pub(crate) struct WaterSceneColor {
 
 /// The render-graph node's label.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct WaterSceneColorLabel;
+pub(crate) struct WaterSceneColorLabel;
 
 /// An HDR image matching the view target's own format, so the copy is a straight blit and the
 /// colours arrive on the scale the water is mixing them into.

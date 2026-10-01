@@ -2,7 +2,8 @@
 //! (`benilla_world::liquid::hooks`): the whole-map classification of which water the planar
 //! mirrors serve and where the fixed cube probes stand (`liquid_planar`, cached by `water_map`),
 //! the two planar mirrors (`reflect`), the probes (`probe`), the depth pyramid and scene colour
-//! the screen-space march reads (`depth`, `hiz`, `scene_color`), the wave simulation
+//! the screen-space march reads (`depth`, `hiz`, `scene_color`), the sky floor's occlusion over the
+//! mirror planes (`water_compute`), the wave simulation
 //! (`ripple_sim`), the surface's clock (`clock`) and the look's knobs (`look`). The surface shading
 //! is `liquid.wgsl`'s stylised lane, in the engine.
 //!
@@ -23,6 +24,7 @@ mod probe;
 mod reflect;
 mod ripple_sim;
 mod scene_color;
+mod water_compute;
 mod water_map;
 mod world_view;
 
@@ -54,6 +56,7 @@ impl Plugin for ImprovedWaterPlugin {
         bevy::asset::embedded_asset!(app, "shaders/probe_filter.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/hiz_reduce.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/hiz_seed.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/water_compute.wgsl");
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
@@ -63,6 +66,7 @@ impl Plugin for ImprovedWaterPlugin {
         world_view::register(app);
         hiz::register(app);
         scene_color::register(app);
+        water_compute::register(app);
         depth::register(app);
         probe::register(app);
         app.add_systems(
@@ -123,10 +127,18 @@ fn publish_pass_images(
     scene_color: Option<Res<scene_color::WaterSceneColor>>,
     probe: Option<Res<probe::WaterProbe>>,
     hiz: Option<Res<hiz::WaterHiz>>,
+    occ: Option<Res<water_compute::FloorOcc>>,
     sim: Option<Res<ripple_sim::RippleSim>>,
 ) {
-    let (Some(reflect), Some(reflect_buf), Some(scene_color), Some(probe), Some(hiz), Some(sim)) =
-        (reflect, reflect_buf, scene_color, probe, hiz, sim)
+    let (
+        Some(reflect),
+        Some(reflect_buf),
+        Some(scene_color),
+        Some(probe),
+        Some(hiz),
+        Some(occ),
+        Some(sim),
+    ) = (reflect, reflect_buf, scene_color, probe, hiz, occ, sim)
     else {
         return;
     };
@@ -138,6 +150,8 @@ fn publish_pass_images(
         hiz: hiz.image.clone(),
         hiz_far: hiz.far.clone(),
         scene_depth: hiz.lin.clone(),
+        water_occl: occ.occl.clone(),
+        floor_occ: occ.col.clone(),
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
     });

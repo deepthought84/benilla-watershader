@@ -67,6 +67,11 @@ const PROBE_TAPS_MAX: i32 = 3;
 // The same pyramid's FARTHEST-depth twin — what lets a ray pass behind a tile. Read only on the steps
 // where the ray is behind a tile's nearest surface; see `liquid::hiz` for why it is a separate image.
 @group(#{MATERIAL_BIND_GROUP}) @binding(117) var hiz_far_tex: texture_2d<f32>;
+// The sky floor's occlusion over the mirror planes (`benilla_water::water_compute`), a quarter of the
+// view's resolution: r the open sky, g and b the body's sky and sun visibility, a 1 where the march
+// reached a verdict; then the occluder's radiance times (1 − r) in linear light, and rho_c in a.
+@group(#{MATERIAL_BIND_GROUP}) @binding(120) var water_occl: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(121) var floor_occ: texture_2d<f32>;
 #ifdef WATER_SCENE_DEPTH
 // The opaque world's linear depth behind each pixel (`liquid::hiz`): view Z in yards, written after
 // the opaque pass inside the water's screen rectangle, 0 where nothing was drawn.
@@ -1139,9 +1144,10 @@ fn luma709(c: vec3<f32>) -> f32 {
 #ifdef WATER_SCENE_DEPTH
 // ---- floor march law: begin ----
 //
-// The sky floor's occlusion march. It reads only `view`, the two depth pyramids, the scene
-// snapshot and `water_dec`, and nothing of the screen-space reflection march it is ported from, so
-// its text stands unchanged in any shader that declares those alike.
+// The sky floor's occlusion march, byte-identical in `liquid.wgsl` and `water_compute.wgsl` (a
+// `benilla_water` test compares the text between these markers). It reads only `view`, the two
+// depth pyramids, the scene snapshot and `water_dec`, which both files declare alike, and nothing
+// of the screen-space reflection march it is ported from.
 
 /// How thick every surface in the depth buffer is taken to be, in yards: McGuire & Mara's
 /// `zThickness`, the screen-space march's value.
@@ -2226,10 +2232,34 @@ fn floor_occlusion_wanted(floor_share: f32, world_pos: vec3<f32>) -> bool {
         && (floor_share > 1.0 / 1024.0 || water_reflect.look.grade.x > 0.0);
 }
 
-/// The sky floor's occlusion at `world_pos`. The VERDICT comes from the unrippled point along the
-/// flat reflection, so a still camera gets a still answer and no silhouette flickers with the
-/// ripple; only the occluder's colour tap follows the rippled lookup point (`n` slides it, as it
-/// slides the mirrors' and the probe's), shifted on screen by as much as the ripple moves it.
+/// The share of this fragment the compute pass's plane result describes: 1 within 0.75 yd of an
+/// active mirror plane, 0 beyond a yard (the classification's rule: no plane spans more than a
+/// yard), crossfaded between and scaled by the plane's own strength, so a plane's election and
+/// drop fade rather than pop.
+fn occl_plane_weight(y: f32) -> f32 {
+    let a = (1.0 - smoothstep(0.75, 1.0, abs(y - water_reflect.params.x)))
+        * saturate(water_reflect.params.y);
+    let b = (1.0 - smoothstep(0.75, 1.0, abs(y - water_reflect.mirror2.x)))
+        * saturate(water_reflect.mirror2.y);
+    return max(a, b);
+}
+
+fn floor_occ_mix(a: FloorOcc, b: FloorOcc, t: f32) -> FloorOcc {
+    return FloorOcc(
+        mix(a.rgb, b.rgb, t),
+        mix(a.v, b.v, t),
+        mix(a.rho_c, b.rho_c, t),
+        mix(a.known, b.known, t),
+    );
+}
+
+/// The sky floor's occlusion at `world_pos`. On a mirror plane, the compute pass's quarter-
+/// resolution answer at the rippled lookup point, read bilinearly, so it is smooth and never
+/// binary. Off the planes the fragment marches itself, and the VERDICT comes from the unrippled
+/// point along the flat reflection, so a still camera gets a still answer and no silhouette
+/// flickers with the ripple; only the occluder's colour tap follows the rippled lookup point (`n`
+/// slides it, as it slides the mirrors' and the probe's), shifted on screen by as much as the ripple
+/// moves it. Between the two, both run and crossfade ([`occl_plane_weight`]).
 fn floor_occlusion(
     world_pos: vec3<f32>,
     n: vec3<f32>,
@@ -2239,6 +2269,16 @@ fn floor_occlusion(
 ) -> FloorOcc {
     let p_look = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
     let uv_look = ndc_to_uv(position_world_to_ndc(p_look).xy);
+    let wp = occl_plane_weight(world_pos.y);
+    var plane = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    if (wp > 0.0) {
+        let o = textureSampleLevel(water_occl, scene_samp, uv_look, 0.0);
+        let c = textureSampleLevel(floor_occ, scene_samp, uv_look, 0.0);
+        plane = FloorOcc(c.rgb, o.r, c.a, o.a);
+        if (wp >= 1.0) {
+            return plane;
+        }
+    }
     let m = floor_march(
         world_pos + vec3<f32>(0.0, 0.05, 0.0),
         reflect(-to_view, flat_n),
@@ -2246,7 +2286,7 @@ fn floor_occlusion(
         FLOOR_MARCH_STEPS,
     );
     let shift = uv_look - ndc_to_uv(position_world_to_ndc(world_pos).xy);
-    return floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift);
+    return floor_occ_mix(floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift), plane, wp);
 }
 
 #ifdef WATER_VIEW
@@ -2696,7 +2736,7 @@ fn stylised_water(
 #endif
     if (floor_occlusion_wanted(floor_share, world_pos)) {
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view, d_eye);
-        occ_marched = 1.0;
+        occ_marched = 1.0 - occl_plane_weight(world_pos.y);
         floor_g = water_enc(occ.rgb + occ.v * water_dec(sky_lit));
     }
     let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
@@ -2964,8 +3004,8 @@ fn stylised_water(
         } else if (view_id == WV_SLOPE_LO) {
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * surf.n_lo.xz, 0.0);
         } else if (view_id == WV_FLOOR_OCC) {
-            // r the open sky v, g rho_c, b the per-pixel march's share; half bright where the
-            // verdict is unknown.
+            // r the open sky v, g rho_c, b the per-pixel march's share (1 off the planes, 0 on
+            // them, between in the crossfade band); half bright where the verdict is unknown.
             v = vec3<f32>(occ.v, occ.rho_c, occ_marched) * (0.5 + 0.5 * occ.known);
         }
         return vec4<f32>(v, 1.0);

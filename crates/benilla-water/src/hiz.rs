@@ -99,7 +99,7 @@ pub(crate) struct WaterHiz {
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct WaterHizLabel;
+pub(crate) struct WaterHizLabel;
 
 /// The readers that want the pyramid this frame, one bit each; extracted. With none, the seed
 /// writes only the linear depth, over the water's rectangle, and the reduce chain does not run.

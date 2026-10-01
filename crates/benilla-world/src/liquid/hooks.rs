@@ -232,6 +232,11 @@ pub struct WaterPassImages {
     /// size, 0 where nothing was drawn; what the stylised lane measures its water column against.
     /// The placeholder is one texel, which the shader reads as unknown.
     pub scene_depth: Handle<Image>,
+    /// The sky floor's occlusion over the mirror planes and the occluder's colour, a quarter of the
+    /// view's resolution. The placeholders read as the sky open, the verdict unknown and no
+    /// occluder.
+    pub water_occl: Handle<Image>,
+    pub floor_occ: Handle<Image>,
     /// The wave simulation's field.
     pub wake: Handle<Image>,
     /// The reflection block, [`REFLECT_FLOATS`] floats, written once a frame in the render world.
@@ -299,9 +304,19 @@ impl Default for RippleAniso {
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WaterPassSet;
 
-/// A one-texel image of `format`, `layers` deep, viewed as `view`.
+/// A one-texel image of `format`, `layers` deep, viewed as `view`, zero.
 fn placeholder(format: TextureFormat, layers: u32, view: Option<TextureViewDimension>) -> Image {
     let texel = vec![0u8; format.block_copy_size(None).unwrap_or(4) as usize];
+    placeholder_filled(format, &texel, layers, view)
+}
+
+/// A one-texel image of `format` holding `texel`, `layers` deep, viewed as `view`.
+fn placeholder_filled(
+    format: TextureFormat,
+    texel: &[u8],
+    layers: u32,
+    view: Option<TextureViewDimension>,
+) -> Image {
     let mut image = Image::new_fill(
         Extent3d {
             width: 1,
@@ -309,7 +324,7 @@ fn placeholder(format: TextureFormat, layers: u32, view: Option<TextureViewDimen
             depth_or_array_layers: layers,
         },
         TextureDimension::D2,
-        &texel,
+        texel,
         format,
         RenderAssetUsages::RENDER_WORLD,
     );
@@ -337,6 +352,13 @@ pub(super) fn placeholder_pass_images(
         6,
         Some(TextureViewDimension::CubeArray),
     ));
+    // The sky open (r, g, b) and the verdict unknown (a).
+    let occl = images.add(placeholder_filled(
+        TextureFormat::Rgba8Unorm,
+        &[255, 255, 255, 0],
+        1,
+        None,
+    ));
     let reflect_buf = device.create_buffer(&BufferDescriptor {
         label: Some("water_reflect_params"),
         size: (REFLECT_FLOATS * 4) as u64,
@@ -351,6 +373,8 @@ pub(super) fn placeholder_pass_images(
         hiz: depth.clone(),
         hiz_far: depth.clone(),
         scene_depth: depth,
+        water_occl: occl,
+        floor_occ: flat.clone(),
         wake: flat,
         reflect_buf,
     });
