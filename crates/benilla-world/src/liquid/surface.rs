@@ -1148,6 +1148,8 @@ pub(super) fn apply_ripple_aniso(
     if let Some(image) = images.get_mut(&map.image) {
         image.sampler = sampler;
     }
+    // A mutable walk queues `AssetEvent::Modified` for every material, which rebuilds its bind
+    // group.
     for _ in materials.iter_mut() {}
 }
 
@@ -1194,8 +1196,8 @@ fn load_frame_array(
 mod tests {
     use super::*;
 
-    /// A tier's clamp lands on the ripple map's sampler, and the same clamp again leaves the image
-    /// alone, so a steady state re-uploads nothing.
+    /// A tier's clamp lands on the ripple map's sampler and touches the liquid materials, and the
+    /// same clamp again leaves both alone, so a steady state re-uploads and rebinds nothing.
     #[test]
     fn the_ripple_sampler_takes_the_tiers_anisotropy() {
         use bevy::ecs::system::RunSystemOnce;
@@ -1218,10 +1220,27 @@ mod tests {
             ImageSampler::Descriptor(d) => d.anisotropy_clamp,
             other => panic!("the ripple map lost its own sampler: {other:?}"),
         };
-        for n in [4, 1, 8] {
-            world.insert_resource(super::super::RippleAniso(n));
+        let touched = |world: &World| {
+            world
+                .get_resource_change_ticks::<Assets<LiquidMaterial>>()
+                .unwrap()
+                .changed
+        };
+        // Each run on its own tick, so a write shows as a newer change tick.
+        let mut run = |world: &mut World| {
+            world.increment_change_tick();
             world.run_system_once(apply_ripple_aniso).unwrap();
+        };
+        for n in [4, 1, 8] {
+            let before = touched(&world);
+            world.insert_resource(super::super::RippleAniso(n));
+            run(&mut world);
             assert_eq!(clamp(&world), n);
+            assert_ne!(
+                touched(&world),
+                before,
+                "clamp {n} left the materials' bind groups"
+            );
         }
         let changed = |world: &World| {
             world
@@ -1229,12 +1248,17 @@ mod tests {
                 .unwrap()
                 .changed
         };
-        let before = changed(&world);
-        world.run_system_once(apply_ripple_aniso).unwrap();
+        let (before, materials) = (changed(&world), touched(&world));
+        run(&mut world);
         assert_eq!(
             changed(&world),
             before,
             "the same clamp re-uploaded the map"
+        );
+        assert_eq!(
+            touched(&world),
+            materials,
+            "the same clamp rebound the materials"
         );
     }
 
