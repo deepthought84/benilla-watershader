@@ -697,7 +697,8 @@ const PROBE_REFLECT_CEIL: f32 = 0.85;
 /// answered by the reflection ceiling above and by the finest ripple layer's weight below — a
 /// surface looks oily when it is smooth, mirror-like and finely crinkled all at once, and all three
 /// had to come down together.
-/// How hard the ambient ripples tilt the surface — see the normal's construction.
+/// How hard the ambient ripples tilt the surface ([`water_surface`]): enough to swing the reflected
+/// sun off the highlight and back within one wave, which breaks its column into a mottle.
 const NORMAL_STRENGTH: f32 = 1.35;
 
 const SPEC_POWER: f32 = 24.0;
@@ -801,49 +802,6 @@ const WAKE_FOAM_GAIN: f32 = 2.6;
 /// screen when you are looking STEEPLY DOWN at it — the angle at which Fresnel is nothing, the sky
 /// mix and the reflection are gone, and the body colour is the only term left.
 const WAKE_BODY_DEPTH: f32 = 0.22;
-/// One octave of the wave slope, read off the tiling map on its **own rotated lattice**.
-///
-/// `rot` is `(cos, sin)` of the angle this layer's world plane is turned through before the lookup.
-/// Without it every layer reads the same 256-texel tile on the same axes, so their seams land on
-/// top of each other and the sum repeats on that one grid — a twelve-yard chequer that walks across
-/// open water and was the "the noise is repeating" report. Turned against each other by angles that
-/// share no common fraction of a turn, the layers' periods no longer line up and the sum has no
-/// visible period at all.
-///
-/// The gradient comes back out of the rotated frame at the end. Skipping that is the trap: the map
-/// holds a slope, and a slope sampled in a turned frame is a slope *in that frame*, so leaving it
-/// there would light every wave as though its crests ran at an angle to the wave itself.
-fn ripple_layer(
-    world_xz: vec2<f32>,
-    // The layer's drift so far, in map tiles (`water_reflect.drift`).
-    offset: vec2<f32>,
-    inv_wavelength: f32,
-    weight: f32,
-    rot: vec2<f32>,
-) -> vec2<f32> {
-    let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
-    let uv = (r * world_xz) * inv_wavelength + offset;
-    // **Fade the octave out once a pixel covers more than a texel of it.**
-    //
-    // This is the Nyquist limit, not a taste setting. A layer whose texels are smaller than the
-    // pixel sampling it cannot be resolved: what comes back is not the wave, it is whichever part
-    // of the wave happened to land under the sample point, and across a surface seen at a grazing
-    // angle that is a moire — horizontal striation running along the lines of equal distance,
-    // because that is where the footprint is constant. The sampler cannot save it either: a grazing
-    // footprint is long in one axis and short in the other, and this map is deliberately sampled
-    // without anisotropy (see `liquid::ripple`, where the cost of it was measured and declined), so
-    // the mip it picks is wrong for one axis whichever it picks.
-    //
-    // Detail that cannot be resolved should be ABSENT rather than aliased, so the weight falls to
-    // zero across the octave between "a pixel spans one texel" and "a pixel spans four". Distant
-    // water loses its finest crinkle and keeps its larger structure, which is what distant water
-    // actually looks like — the alternative is a shimmer that is not on the surface at all.
-    let texels = f32(textureDimensions(ripples).x);
-    let footprint = length(fwidth(uv)) * texels;
-    let resolvable = 1.0 - smoothstep(1.0, 4.0, footprint);
-    let g = (textureSample(ripples, ripples_samp, uv).rg * 2.0 - 1.0) * weight * resolvable;
-    return transpose(r) * g;
-}
 
 // **What the linear march left behind, because it was expensive to learn.**
 //
@@ -1003,7 +961,7 @@ fn sky_reflection(dir: vec3<f32>) -> vec3<f32> {
 /// `fw` comes back for the same reason: the threshold that cuts these flecks softens itself by the
 /// noise's own screen footprint, and `fwidth` of the result is no longer available to measure it
 /// with. It does not have to be. **The map's R/G is the gradient of its B** — that is what it holds
-/// and what `ripple_layer` reads it as (`benilla_world::liquid::ripple`) — so the same fetches that
+/// and what `ripple_octave` reads it as (`benilla_world::liquid::ripple`) — so the fetches that
 /// give the value give its slope, and the footprint is that slope against the pixel's own step.
 /// The stored slope is a central difference over two texels of a [`RIPPLE_TEXELS`]-wide map, so
 /// `d(b)/d(uv)` is the decoded value times half the map's width.
@@ -1723,30 +1681,248 @@ fn planar_read(
 /// this is the unflowed layer exactly.
 const FLOW_PERIOD_S: f32 = 1.6;
 
-/// [`ripple_layer`], carried along `flow` (world XZ yards a second).
-fn ripple_flowing(
-    world_xz: vec2<f32>,
-    offset: vec2<f32>,
-    inv_wavelength: f32,
-    weight: f32,
+// ---- the surface's roughness (WAV-2) ------------------------------------------------------------
+//
+// Each ripple octave is read through its mip, never deleted, and the slope variance the mip and the
+// feature fade remove becomes GGX roughness: `RippleStats`' table, per level, of the covariance a
+// level loses against level 0 (`look.ripple_stats`), interpolated at the octave's own LOD.
+
+/// Σ w² of the five octaves' weights (0.85, 1.0, 1.0, 0.70, 0.20): the fully unresolved surface's
+/// slope variance in units of the map's.
+const OCTAVE_W2_SUM: f32 = 3.2525;
+
+/// The pixel's footprint on the water in world XZ: log2 of its major extent in yards and of each
+/// anisotropic probe's along the minor axis, the major axis (unit) and the major extent.
+struct PixelFootprint {
+    log_maj: f32,
+    log_min: f32,
+    e: vec2<f32>,
+    major: f32,
+};
+
+/// The footprint from world XZ's screen derivatives, taken once for every octave in uniform control
+/// flow: an octave's drift is uniform and its flow phases a smooth shift, so they add nothing, and
+/// the footprint holds still while they move.
+fn pixel_footprint(xz: vec2<f32>) -> PixelFootprint {
+    let dx = dpdx(xz);
+    let dy = dpdy(xz);
+    let lx = length(dx);
+    let ly = length(dy);
+    let major = max(max(lx, ly), 1e-6);
+    let minor = max(min(lx, ly), 1e-6);
+    // The sampler's anisotropy clamp N: each probe's extent is ρmax / min(ρmax / ρmin, N).
+    let n = max(water_reflect.look.surf.y, 1.0);
+    var p: PixelFootprint;
+    p.log_maj = log2(major);
+    p.log_min = log2(max(minor, major / n));
+#ifdef WATER_TIER_LOW
+    // Low takes the loss as isotropic.
+    p.log_min = p.log_maj;
+#endif
+    p.e = select(dy, dx, lx >= ly) / major;
+    p.major = major;
+    return p;
+}
+
+/// An octave's footprint: the hardware's LOD along the major axis, each anisotropic probe's along
+/// the minor one, the major axis (world XZ, unit), the map's feature wavelength in pixels along it,
+/// and how much of the octave the feature fade keeps.
+struct OctaveFootprint {
+    lam_maj: f32,
+    lam_min: f32,
+    e: vec2<f32>,
+    feat_px: f32,
+    keep: f32,
+};
+
+/// The pixel's footprint in the texels of an octave `inv_wavelength` tiles a yard. Rotation keeps
+/// lengths, so the lattice's turn does not enter.
+fn octave_footprint(px: PixelFootprint, inv_wavelength: f32) -> OctaveFootprint {
+    let texels_per_yd = f32(textureDimensions(ripples).x) * inv_wavelength;
+    let lt = log2(texels_per_yd) + view.mip_bias;
+    var f: OctaveFootprint;
+    f.lam_maj = px.log_maj + lt;
+    f.lam_min = px.log_min + lt;
+    f.e = px.e;
+    f.feat_px = water_reflect.look.ripple_mean.w / (px.major * texels_per_yd);
+    // Features under 2 px along the major axis are not resolved (Nyquist): the octave fades out
+    // between 4 and 2 px and its variance joins the loss.
+    f.keep = smoothstep(water_reflect.look.surf.z, water_reflect.look.surf.w, f.feat_px);
+    return f;
+}
+
+/// The ripple table at a fractional mip level: lost xx, lost zz, lost xz, resolved per axis.
+fn ripple_stats_at(lam: f32) -> vec4<f32> {
+    let l = clamp(lam, 0.0, 8.0);
+    let i = u32(floor(l));
+    let j = min(i + 1u, 8u);
+    return mix(water_reflect.look.ripple_stats[i], water_reflect.look.ripple_stats[j], l - f32(i));
+}
+
+/// The world-XZ slope covariance (xx, zz, xz, × weight²) an octave's filtering and feature fade
+/// remove at `fp`: per axis of the footprint, the table's level loss averaged over the map's two
+/// axes (it is isotropic), so the lattice's turn does not enter.
+fn octave_loss(fp: OctaveFootprint, weight: f32) -> vec3<f32> {
+    let lost_maj = ripple_stats_at(fp.lam_maj);
+    let lost_min = ripple_stats_at(fp.lam_min);
+    let l_maj = 0.5 * (lost_maj.x + lost_maj.y);
+    let l_min = 0.5 * (lost_min.x + lost_min.y);
+    let faded = lost_maj.w * (1.0 - fp.keep * fp.keep);
+    // (l_min + faded)·I + (l_maj − l_min)·e eᵀ
+    let a = l_min + faded;
+    let b = l_maj - l_min;
+    return vec3<f32>(a + b * fp.e.x * fp.e.x, a + b * fp.e.y * fp.e.y, b * fp.e.x * fp.e.y)
+        * (weight * weight);
+}
+
+/// One octave's mip-filtered slope on its rotated lattice, back in world XZ (as Rᵀ g), less the
+/// map's mean (the bias of its 8-bit truncation), × weight × the feature fade's keep.
+fn octave_slope(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> vec2<f32> {
+    let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
+    let g = textureSampleBias(ripples, ripples_samp, uv, view.mip_bias).rg * 2.0 - 1.0
+        - water_reflect.look.ripple_mean.xy;
+    return transpose(r) * g * (weight * fp.keep);
+}
+
+/// One octave: its slope (world XZ, × weight × keep), the covariance its filtering removed
+/// (xx, zz, xz, × weight²) and its feature wavelength in pixels.
+struct Octave {
+    slope: vec2<f32>,
+    cov: vec3<f32>,
+    feat_px: f32,
+};
+
+/// One still octave on its own rotated lattice.
+fn ripple_octave(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> Octave {
+    var o: Octave;
+    o.slope = octave_slope(uv, fp, weight, rot);
+    o.cov = octave_loss(fp, weight);
+    o.feat_px = fp.feat_px;
+    return o;
+}
+
+/// An octave's lattice coordinate: world XZ turned by `rot`, in tiles, plus its drift so far.
+fn octave_uv(xz: vec2<f32>, rot: vec2<f32>, inv_wavelength: f32, drift: vec2<f32>) -> vec2<f32> {
+    let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
+    return (r * xz) * inv_wavelength + drift;
+}
+
+/// [`ripple_octave`] carried along `flow` (world XZ yards a second) by the two-phase flow map at
+/// phase `ph0`, both phases on the unflowed footprint `fp`.
+fn ripple_octave_flowing(
+    xz: vec2<f32>,
     rot: vec2<f32>,
+    inv_wavelength: f32,
+    drift: vec2<f32>,
+    weight: f32,
     flow: vec2<f32>,
-) -> vec2<f32> {
-    let ph0 = water_reflect.cycle.x;
+    ph0: f32,
+    fp: OctaveFootprint,
+) -> Octave {
     let ph1 = fract(ph0 + 0.5);
     let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
-    // The second phase reads another stretch of the map, or the two restarts would show one
-    // pattern pulsing; scaled by the current, so still water keeps its one pattern.
+    // The second phase reads another stretch of the map, scaled by the current, so still water
+    // keeps its one pattern.
     let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) / inv_wavelength;
-    let a = ripple_layer(world_xz - flow * ph0 * FLOW_PERIOD_S, offset, inv_wavelength, weight, rot);
-    let b = ripple_layer(
-        world_xz - flow * ph1 * FLOW_PERIOD_S + apart,
-        offset,
-        inv_wavelength,
+    let a = octave_slope(
+        octave_uv(xz - flow * ph0 * FLOW_PERIOD_S, rot, inv_wavelength, drift),
+        fp,
         weight,
         rot,
     );
-    return a * w0 + b * (1.0 - w0);
+    let b = octave_slope(
+        octave_uv(xz - flow * ph1 * FLOW_PERIOD_S + apart, rot, inv_wavelength, drift),
+        fp,
+        weight,
+        rot,
+    );
+    var o: Octave;
+    o.slope = a * w0 + b * (1.0 - w0);
+    // The surface's loss, not the blend's: both phases share one footprint, so one phase's.
+    o.cov = octave_loss(fp, weight);
+    o.feat_px = fp.feat_px;
+    return o;
+}
+
+/// The surface at a fragment: the filtered full-band normal and the resolved low band's, each with
+/// the wake; the isotropic GGX α = det(A)^¼ of the roughness tensor A (world XZ: xx, zz, xz); α's
+/// place between the calm surface and the fully unresolved one; the slope scale.
+struct WaterSurface {
+    n: vec3<f32>,
+    n_lo: vec3<f32>,
+    alpha: f32,
+    a2: vec3<f32>,
+    rho_a: f32,
+    k: f32,
+};
+
+/// An octave's slope if its features span at least ~8 px: the resolved low band.
+fn octave_low(o: Octave) -> vec2<f32> {
+    return o.slope * smoothstep(4.0, 8.0, o.feat_px);
+}
+
+/// The five ripple octaves, tiles of 110.4, 40.8, 12, 3.6 and 1.44 yd, each on its own rotated
+/// lattice so their periods never line up, with the live wake's slope; called in uniform control
+/// flow.
+fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> WaterSurface {
+    let px = pixel_footprint(xz);
+    let ph0 = water_reflect.cycle.x;
+    // Each octave's lattice: its turn, its tiles a yard (12 yd a tile at scale 1), its drift so
+    // far in tiles.
+    let rot0 = vec2<f32>(1.0, 0.0);
+    let rot1 = vec2<f32>(0.8572, 0.5150);
+    let rot2 = vec2<f32>(0.4540, 0.8910);
+    let rot3 = vec2<f32>(-0.2924, 0.9563);
+    let rot4 = vec2<f32>(-0.8572, 0.5150);
+    let f0 = 1.0 / (12.0 * 9.2);
+    let f1 = 1.0 / (12.0 * 3.4);
+    let f2 = 1.0 / 12.0;
+    let f3 = 1.0 / (12.0 * 0.30);
+    let f4 = 1.0 / (12.0 * 0.12);
+    let d0 = water_reflect.drift[0];
+    let d1 = water_reflect.drift[1];
+    let d2 = water_reflect.drift[2];
+    let d3 = water_reflect.drift[3];
+    let d4 = water_reflect.drift[4];
+    let fp0 = octave_footprint(px, f0);
+    let fp1 = octave_footprint(px, f1);
+    let fp2 = octave_footprint(px, f2);
+    let fp3 = octave_footprint(px, f3);
+    let fp4 = octave_footprint(px, f4);
+    // The two longest octaves are still; the three shorter ones ride the current.
+    let o0 = ripple_octave(octave_uv(xz, rot0, f0, d0), fp0, 0.85, rot0);
+    let o1 = ripple_octave(octave_uv(xz, rot1, f1, d1), fp1, 1.00, rot1);
+    let o2 = ripple_octave_flowing(xz, rot2, f2, d2, 1.00, flow, ph0, fp2);
+    let o3 = ripple_octave_flowing(xz, rot3, f3, d3, 0.70, flow, ph0, fp3);
+    let o4 = ripple_octave_flowing(xz, rot4, f4, d4, 0.20, flow, ph0, fp4);
+    let slope = o0.slope + o1.slope + o2.slope + o3.slope + o4.slope;
+    let slope_lo = octave_low(o0) + octave_low(o1) + octave_low(o2) + octave_low(o3)
+        + octave_low(o4);
+    let cov = o0.cov + o1.cov + o2.cov + o3.cov + o4.cov;
+    // `probe_box_min.w` scales the whole ripple: 1, 0 for a dead-flat surface.
+    let scale = water_reflect.probe_box_min.w;
+    var s: WaterSurface;
+    s.k = NORMAL_STRENGTH * scale;
+    s.n = normalize(vec3<f32>(
+        slope.x * s.k + wake_slope.x * scale,
+        1.0,
+        slope.y * s.k + wake_slope.y * scale,
+    ));
+    // The wake is in the low band: its window sits at the camera, where its texels outsize the
+    // pixels.
+    s.n_lo = normalize(vec3<f32>(
+        slope_lo.x * s.k + wake_slope.x * scale,
+        1.0,
+        slope_lo.y * s.k + wake_slope.y * scale,
+    ));
+    // GGX α² is twice the slope variance per axis (Beckmann): A = α0² I + 2k² cov.
+    let a0 = water_reflect.look.surf.x;
+    let k2 = 2.0 * s.k * s.k;
+    s.a2 = vec3<f32>(a0 * a0 + k2 * cov.x, a0 * a0 + k2 * cov.y, k2 * cov.z);
+    s.alpha = pow(max(s.a2.x * s.a2.y - s.a2.z * s.a2.z, 1e-12), 0.25);
+    let alpha_full = sqrt(a0 * a0 + k2 * OCTAVE_W2_SUM * water_reflect.look.ripple_mean.z);
+    s.rho_a = smoothstep(a0, max(alpha_full, a0 + 1e-4), s.alpha);
+    return s;
 }
 
 #ifdef WATER_VIEW
@@ -1763,6 +1939,10 @@ const WV_FLOW: u32 = 6u;
 const WV_FOAM: u32 = 7u;
 const WV_THICKNESS: u32 = 8u;
 const WV_FRESNEL: u32 = 9u;
+const WV_ROUGHNESS: u32 = 10u;
+const WV_ROUGHNESS_ANISO: u32 = 11u;
+const WV_SLOPE_FULL: u32 = 12u;
+const WV_SLOPE_LO: u32 = 13u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -1803,64 +1983,10 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
-    // One tile every 12 yd at scale 1; the three layers run at 3.4x, 1x and 0.3x of it.
-    let inv_tile = 1.0 / 12.0;
-    // The fourth layer is the smallest and does the most: at ~1.4 yd it is the only one whose
-    // features are smaller than the sun's specular lobe, so it is what breaks the highlight into a
-    // glitter path instead of a single blown-out disc on a nearly flat plane. It carries the least
-    // weight of the four, and the mip chain retires it first with distance.
-    //
-    // Five octaves now, from ~110 yd down to ~1.4 yd, each on its own rotated lattice (see
-    // [`ripple_layer`]). The **long swell at the head is new**, and it is there for the distance:
-    // everything shorter than it either mips away toward the horizon or subtends too little of a
-    // pixel to be seen there, which is what left the far water looking like a painted plate. A
-    // 110-yard swell is still several pixels of tilt at the far clip, and it is the only layer that
-    // is, so it is the one carrying the far field — read through the sky gradient below, which is
-    // what turns half a degree of tilt into a visible colour.
-    //
-    // The drifts on the two longest layers are the other half of that: at the old rates the far
-    // water moved a third of a yard a second, which over a horizon-sized wave is no motion at all.
-    let slope =
-        ripple_layer(xz, water_reflect.drift[0], inv_tile / 9.2, 0.85, vec2<f32>(1.0, 0.0))
-        + ripple_layer(
-            xz,
-            water_reflect.drift[1],
-            inv_tile / 3.4,
-            1.00,
-            vec2<f32>(0.8572, 0.5150),
-        )
-        // The two middle layers are what the broken highlight is MADE of: at twelve and at
-        // three-and-a-half yards their features are the size of the bright patches in the
-        // reference's sun column, so lifting them is what turns a smooth sheet into a mottle.
-        + ripple_flowing(
-            xz,
-            water_reflect.drift[2],
-            inv_tile,
-            1.00,
-            vec2<f32>(0.4540, 0.8910),
-            flow,
-        )
-        + ripple_flowing(
-            xz,
-            water_reflect.drift[3],
-            inv_tile / 0.30,
-            0.70,
-            vec2<f32>(-0.2924, 0.9563),
-            flow,
-        )
-        // Dialled back from 0.30 with the specular: the finest layer is the crinkle, and a fine
-        // crinkle under a tight highlight is the texture of oil on water.
-        + ripple_flowing(
-            xz,
-            water_reflect.drift[4],
-            inv_tile / 0.12,
-            0.20,
-            vec2<f32>(-0.8572, 0.5150),
-            flow,
-        );
+
     // ---- the live wave field ----------------------------------------------------------------
     //
-    // Everything above is a texture of waves. This is water that has actually been pushed on: a
+    // The ambient ripple is a texture of waves. This is water that has actually been pushed on: a
     // height field integrated on the CPU under the 2-D wave equation, with every swimmer in range a
     // moving source in it (`benilla_world::liquid::ripple_sim`). What arrives here is its slope,
     // and it is simply added to the ambient ripple's — a wake is not a decal drawn over the water,
@@ -1892,38 +2018,21 @@ fn stylised_water(
     let wake_height = (sim_tex.b * 2.0 - 1.0) * sim_w;
     let wake_foam = saturate((length(wake_slope) - WAKE_FOAM_FLOOR) * WAKE_FOAM_GAIN);
 
-    // The map holds slope, so the normal is rebuilt with Y up — no tangent frame, because a liquid
-    // surface is a flat axis-aligned plane that never rotates.
-    //
-    // **The strength is what breaks the light.** In the reference the sun's column on the water is
-    // not a wash, it is shattered — a mottle of bright patches and dark gaps several yards across,
-    // moving. That look comes from the surface having enough tilt to swing the reflected ray right
-    // off the highlight and back onto it again across a single wave, and at the sandbox's 0.75 it
-    // simply does not: every facet stays near enough to flat that the highlight slides over the
-    // whole surface as one smooth sheet.
-    //
-    // Note this is the opposite lever from the one that fixed "oily". A tighter specular lobe would
-    // also break the highlight up, into hard little chips — which is exactly the film-on-water read
-    // that complaint was about. Breaking it with the SURFACE instead keeps the lobe broad and the
-    // water rough, which is the same thing real water does.
-    // `probe_box_min.w` scales the whole ripple — 1, and 0 for a
-    // dead-flat surface. Flat water is the only way to compare two REFLECTIONS against each other:
-    // with waves in, the planar tier's ripple is a small bounded offset into an already-correct
-    // image while the cube's goes through `reflect()`, which at a grazing eye swings across a huge
-    // arc for the same tilt — so the two tiers are being asked different questions and the
-    // comparison says nothing. Flattening removes the wave from both sides at once.
-    let ripple_scale = water_reflect.probe_box_min.w;
-    let rippled_n = normalize(vec3<f32>(
-        (slope.x * NORMAL_STRENGTH + wake_slope.x) * ripple_scale,
-        1.0,
-        (slope.y * NORMAL_STRENGTH + wake_slope.y) * ripple_scale,
-    ));
+    // The surface: the ripple octaves through their mips, the wake, and the roughness the mips
+    // removed ([`water_surface`]).
+    let surf = water_surface(xz, flow, wake_slope);
+    // The reflections' lookup point slides by the resolved low band only: the octaves finer than
+    // ~8 px of footprint would make a reflected trunk wander sideways row to row.
 #ifdef WATER_VIEW
     // `flat` is a mode, not a paint: the whole look runs on the unrippled normal.
-    let n = select(rippled_n, flat_n, water_view_id() == WV_FLAT);
+    let flat_view = water_view_id() == WV_FLAT;
+    let n = select(surf.n, flat_n, flat_view);
+    let n_slide = select(surf.n_lo, flat_n, flat_view);
 #else
-    let n = rippled_n;
+    let n = surf.n;
+    let n_slide = surf.n_lo;
 #endif
+    let to_view = normalize(view.world_position.xyz - world_pos);
 
     // Body: the zone's own swatch, deepening with V. sqrt, not linear — absorption in real water is
     // exponential, and the square root keeps the shallows a distinct band instead of a thin gradient.
@@ -1974,7 +2083,6 @@ fn stylised_water(
     let body = body_rgb * lit * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
 
     // Fresnel toward the horizon. Schlick's 5th power, floored at the 2 % water reflects head-on.
-    let to_view = normalize(view.world_position.xyz - world_pos);
     let fresnel = pow(1.0 - saturate(dot(n, to_view)), 5.0);
     // What the surface reflects when the mirrored pass has nothing for it: the sky, read at the
     // reflected view ray's own elevation rather than as one flat colour — see [`sky_reflection`],
@@ -2082,7 +2190,7 @@ fn stylised_water(
         // About the facet's geometric normal, as the march does: on a sloping stream straight up
         // is off by the slope, and the reflected ray twice that.
         let r = reflect(-to_view, flat_n);
-        let probe_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
+        let probe_pos = world_pos + vec3<f32>(n_slide.x, 0.0, n_slide.z) * water_reflect.march.y;
         // The tier's strength is the weighted mean, over the taps, of each probe's availability, so
         // it does not depend on which tap ranks first. A probe serves its whole region, so it does
         // not fade with distance from it. The taps are blended by weight and nothing cleverer: the
@@ -2180,7 +2288,7 @@ fn stylised_water(
 #ifdef WATER_SSR
     if (water_reflect.flags.z > 0.0 && view.world_position.y > world_pos.y) {
         ssr = ssr_trace(
-            world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y,
+            world_pos + vec3<f32>(n_slide.x, 0.0, n_slide.z) * water_reflect.march.y,
             reflect(-to_view, flat_n),
         );
     }
@@ -2224,8 +2332,8 @@ fn stylised_water(
     // times coverage times trust. Where both reach a fragment they blend by weight.
     // Off probe water the mirrors stand down, so the probe beneath them shows through.
     let serve = vec4<f32>(1.0, 1.0, 1.0, smoothstep(0.0, 1.0, planar.x));
-    let m1 = planar_read(water_reflect.params, false, world_pos, n, frag_coord, tilt) * serve;
-    let m2 = planar_read(water_reflect.mirror2, true, world_pos, n, frag_coord, tilt) * serve;
+    let m1 = planar_read(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt) * serve;
+    let m2 = planar_read(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt) * serve;
     // The colour favours the mirror whose plane is nearer this water — both are trusted across
     // their whole tolerance, so without this a body between the two planes took an even mix of a
     // right image and a wrong one. The overall weight below is untouched.
@@ -2500,6 +2608,26 @@ fn stylised_water(
             v = select(vec3<f32>(0.0), column, sb.known);
         } else if (view_id == WV_FRESNEL) {
             v = vec3<f32>(fres);
+        } else if (view_id == WV_ROUGHNESS || view_id == WV_ROUGHNESS_ANISO) {
+            // α between the calm surface (0) and the fully unresolved one (1).
+            let a0 = water_reflect.look.surf.x;
+            let k2 = 2.0 * surf.k * surf.k;
+            let a_full = sqrt(a0 * a0 + k2 * OCTAVE_W2_SUM * water_reflect.look.ripple_mean.z);
+            let g = saturate((surf.alpha - a0) / max(a_full - a0, 1e-6));
+            if (view_id == WV_ROUGHNESS) {
+                // Grey, red where α has reached the unresolved surface's.
+                v = select(vec3<f32>(g), vec3<f32>(1.0, 0.0, 0.0), surf.rho_a >= 1.0);
+            } else {
+                // r (α_major / α_minor − 1)·4 from the tensor's eigenvalues, g the normalised α.
+                let mid = 0.5 * (surf.a2.x + surf.a2.y);
+                let half_gap = length(vec2<f32>(0.5 * (surf.a2.x - surf.a2.y), surf.a2.z));
+                let ratio = sqrt((mid + half_gap) / max(mid - half_gap, 1e-12));
+                v = vec3<f32>(saturate((ratio - 1.0) * 4.0), g, 0.0);
+            }
+        } else if (view_id == WV_SLOPE_FULL) {
+            v = vec3<f32>(vec2<f32>(0.5) + 4.0 * n.xz, 0.0);
+        } else if (view_id == WV_SLOPE_LO) {
+            v = vec3<f32>(vec2<f32>(0.5) + 4.0 * surf.n_lo.xz, 0.0);
         }
         return vec4<f32>(v, 1.0);
     }

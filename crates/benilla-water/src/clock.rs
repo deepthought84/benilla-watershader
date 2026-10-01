@@ -17,7 +17,7 @@ use benilla_world::liquid::CLOCK_LANES;
 const CLOCK_FLOATS: usize = CLOCK_LANES.end - CLOCK_LANES.start;
 
 /// The five ambient ripple octaves' drifts in map tiles a second, longest first — the order
-/// `stylised_water` sums them in.
+/// `water_surface` sums them in.
 const RIPPLE_DRIFT: [[f64; 2]; 5] = [
     [0.012, 0.007],
     [0.016, 0.021],
@@ -242,14 +242,16 @@ mod tests {
 
     /// **The stylised surface animates on this clock alone.** Its ripple, flow and shore foam read
     /// the published lanes and never `globals.time`, which wraps at the hour, and each map offset
-    /// is its own drift's lane: the five octaves longest first in `stylised_water`, then
+    /// is its own drift's lane: the five octaves longest first in `water_surface`, then
     /// `foam_noise`'s three; the flow restart is `cycle.x` and the swell `cycle.y`.
     #[test]
     fn the_stylised_surface_reads_its_phases_off_this_clock() {
         for name in [
             "stylised_water",
-            "ripple_layer",
-            "ripple_flowing",
+            "water_surface",
+            "ripple_octave",
+            "ripple_octave_flowing",
+            "octave_uv",
             "foam_noise",
         ] {
             let body = wgsl_fn(name);
@@ -262,14 +264,14 @@ mod tests {
         }
         let ripples = RIPPLE_DRIFT.len();
         assert_eq!(
-            drift_reads(&wgsl_fn("stylised_water")),
+            drift_reads(&wgsl_fn("water_surface")),
             (0..ripples).collect::<Vec<_>>()
         );
         assert_eq!(
             drift_reads(&wgsl_fn("foam_noise")),
             (ripples..ripples + FOAM_DRIFT.len()).collect::<Vec<_>>()
         );
-        assert!(wgsl_fn("ripple_flowing").contains("water_reflect.cycle.x"));
+        assert!(wgsl_fn("water_surface").contains("water_reflect.cycle.x"));
         assert!(wgsl_fn("stylised_water").contains("water_reflect.cycle.y"));
     }
 }

@@ -1,5 +1,6 @@
 # wg-westfall-noon: the open sea off the Westfall coast at noon, the horizon at y 400, a beach in
-# the lower left, shallows along the bottom.
+# the lower left, shallows along the bottom; the sea reaches the far clip at y 456, where the
+# roughness rows' three ROUGHNESS-view columns start.
 scene = "water-westfall-noon"
 [box]
 far_water = [600, 470, 1400, 510]
@@ -8,6 +9,9 @@ shallows = [700, 800, 1000, 880]
 deep = [500, 520, 1600, 640]
 wall = [300, 400, 1500, 480]
 water = [500, 520, 1600, 900]
+rough_a = [790, 458, 810, 900]
+rough_b = [1190, 458, 1210, 900]
+rough_c = [1490, 458, 1510, 900]
 [[row]]
 metric = "horizon_ratio"
 water = "far_water"
@@ -28,3 +32,19 @@ box = "wall"
 [[row]]
 metric = "lum_vs_ref"
 box = "water"
+# The roughness rises to the far clip with no step over 2% of the unresolved surface's alpha.
+[[row]]
+metric = "roughness_profile"
+label = "rough_a"
+box = "rough_a"
+max = 10.8
+[[row]]
+metric = "roughness_profile"
+label = "rough_b"
+box = "rough_b"
+max = 10.8
+[[row]]
+metric = "roughness_profile"
+label = "rough_c"
+box = "rough_c"
+max = 10.8

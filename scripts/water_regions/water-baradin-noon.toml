@@ -1,7 +1,8 @@
 # wg-baradin-noon and wg-baradin-burst: Baradin Bay in the Wetlands at noon, the far water's
 # horizon at y 490 under a mountain ridge, whose reflection fills the bay below it. Burst rows read
-# a 2 s static burst. Flake: patches of the bay at x660-1300 y615-690 land in one of two states,
-# so the water box starts below them.
+# a 2 s static burst; the roughness rows read the ROUGHNESS view (its still and its 2 s static
+# burst), three columns from the bay's far shore to the bottom edge. Flake: patches of the bay at
+# x660-1300 y615-690 land in one of two states, so the water box starts below them.
 scene = "water-baradin-noon"
 [box]
 far_band = [0, 492, 1450, 520]
@@ -14,6 +15,9 @@ ridge_sky_refl = [300, 730, 450, 830]
 deep = [0, 720, 1200, 900]
 wall = [0, 470, 1500, 560]
 water = [0, 700, 1200, 900]
+rough_a = [190, 470, 210, 900]
+rough_b = [790, 470, 810, 900]
+rough_c = [1090, 470, 1110, 900]
 [[row]]
 metric = "horizon_ratio"
 water = "far_water"
@@ -59,3 +63,32 @@ box = "water"
 [[row]]
 metric = "pop"
 box = "water"
+[[row]]
+metric = "luma_sd"
+label = "far_detail"
+box = "far_band"
+# The roughness rises toward the far shore with no step over 2% of the unresolved surface's alpha
+# (0.02 * 0.1037 / (0.1037 - 0.0548) of the view's 255 codes).
+[[row]]
+metric = "roughness_profile"
+label = "rough_a"
+box = "rough_a"
+max = 10.8
+[[row]]
+metric = "roughness_profile"
+label = "rough_b"
+box = "rough_b"
+max = 10.8
+[[row]]
+metric = "roughness_profile"
+label = "rough_c"
+box = "rough_c"
+max = 10.8
+# Still water: the roughness is the footprint's alone, so a static burst holds it exactly.
+[[row]]
+metric = "view_std"
+label = "alpha_still"
+box = "far_band"
+view = "roughness"
+channel = 0
+max = 0.0

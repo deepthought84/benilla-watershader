@@ -102,7 +102,7 @@ impl Default for WaterDebug {
 /// The Improved Water debug views by id (`WaterDebug::view`, `liquid.wgsl`'s `WV_*` consts); 0 is
 /// off. A view paints one quantity over the water; `flat` is a mode instead, the whole look on the
 /// unrippled normal.
-pub const WATER_VIEWS: [&str; 10] = [
+pub const WATER_VIEWS: [&str; 14] = [
     "off",
     "mirror1",
     "mirror2",
@@ -113,6 +113,10 @@ pub const WATER_VIEWS: [&str; 10] = [
     "foam",
     "thickness",
     "fresnel",
+    "roughness",
+    "roughness_aniso",
+    "slope_full",
+    "slope_lo",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.
@@ -250,7 +254,8 @@ mod tests {
         assert_eq!(parse_water_view(" TIERS "), Some(4));
         assert_eq!(parse_water_view("9"), Some(9));
         assert_eq!(parse_water_view("0"), Some(0));
-        assert_eq!(parse_water_view("10"), None);
+        assert_eq!(parse_water_view("Roughness_Aniso"), Some(11));
+        assert_eq!(parse_water_view("14"), None);
         assert_eq!(parse_water_view("glass"), None);
     }
 
