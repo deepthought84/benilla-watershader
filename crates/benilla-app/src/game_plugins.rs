@@ -974,15 +974,16 @@ pub(crate) mod schedule_tests {
     /// - the minimap's draw (`minimap::emit_minimap`), which reads `QuestGiver`'s dialog statuses,
     ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
     ///   write that window's cell and panel latches and never a status;
-    /// - the water's style switch, depth-prepass toggle, layer stamp, world-view marker and probe
-    ///   gizmos against `apply_net_updates` and `finish_colliders` over the world, as
-    ///   `drift::setup_drift`: they touch only water and cameras; the gizmos read `DebugState` a
+    /// - the water's style switch, ripple anisotropy, bindable view depth, layer stamp, world-view
+    ///   marker and probe gizmos against `apply_net_updates` and `finish_colliders` over the
+    ///   world, as `drift::setup_drift`: they touch only water and cameras (the ripple map's
+    ///   sampler and the liquid materials, which neither creates); the gizmos read `DebugState` a
     ///   frame late at worst.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_473;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_475;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
