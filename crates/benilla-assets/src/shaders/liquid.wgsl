@@ -2119,14 +2119,7 @@ fn stylised_water(
     // bright sky still painted over it, the body was robbed to pay for it, and a river read as flat
     // while a coast, where the tier is looking at the sky anyway, read as correct.
     let fres = mix(0.02, 0.45, fresnel);
-    // What is reflected. The sky is the FLOOR, not a layer: it is the answer for a direction no
-    // tier has a better one for, and each tier below replaces it over the coverage it actually has.
-    var refl = sky_lit;
     let layered = water_reflect.flags.w > 0.5;
-    // How much of the final `refl` came from the CUBE PROBE, tracked down the tier chain so the
-    // Fresnel weight can be lifted where — and only where — the probe is the tier answering. Each
-    // tier that mixes over `refl` takes the same share out of this. See the final mix.
-    var probe_share = 0.0;
     var rgb = mix(body, sky_lit, fres);
 
     // ---- the cubemap probe, tier four ---------------------------------------------------------
@@ -2313,38 +2306,31 @@ fn stylised_water(
     }
 #endif
 
-    // ---- the probe's contribution ------------------------------------------------------------
+    // ---- the tiers' weights ----------------------------------------------------------------------
     //
-    // **Composited here rather than where it is sampled, so that it can stand down for the march.**
-    // Every other tier is attenuated by `1 - ssr.conf` — where the screen found the answer itself,
-    // nothing else averages into it, because two reflections of one surface blended together is a
-    // double image and not a better one. The probe was missing that term purely because it was
-    // mixed in before `ssr` had been traced, which made it the one tier that painted at full weight
-    // over a march that already had the fragment. Against the planar tier's
-    // `fresnel * params.y * mirrored.a * trust * (1 - ssr.conf)` it carried a single attenuation,
-    // and it read as visibly heavier water than the mirror gives.
-    //
-    // The order is unchanged: still directly over the sky and under the plane and the march. Only
-    // the point at which it is applied has moved.
-    if (probe_w > 0.0) {
-        refl = mix(refl, probe_rgb, saturate(probe_w));
-        probe_share = saturate(probe_w);
-        if (layered) {
-            // **Saturated**, because `probe_w` carries a strength that is allowed above 1. WGSL's
-            // `mix` extrapolates rather than clamping, so an unsaturated weight past 1.0 does not
-            // merely show more reflection — it runs past the reflection and out the other side,
-            // subtracting the water's own body colour.
-            rgb = mix(
-                rgb,
-                probe_rgb,
-                saturate(
-                    mix(0.02, REFLECT_MAX, fresnel)
-                        * probe_w
-                        * max(water_reflect.probe_box_max.x, 0.0)
-                        * (1.0 - ssr.conf),
-                ),
-            );
-        }
+    // **One reflection, four answers to what is in it**, in confidence order: the sky floor, then
+    // the probe, the mirrors and the march, each covering its weight `w` of what the ones beneath
+    // it give. The shares are explicit products:
+    // `refl = ((floor·(1 − w_p) + probe·w_p)·(1 − w_m) + mirror·w_m)·(1 − w_s) + ssr·w_s`, and the
+    // floor's share is `(1 − w_p)(1 − w_m)(1 − w_s)`. Where the march found the answer itself,
+    // nothing beneath it averages in: two reflections of one surface blended together are a double
+    // image, not a better one.
+    let w_p = saturate(probe_w);
+    if (layered && probe_w > 0.0) {
+        // **Saturated**, because `probe_w` carries a strength that is allowed above 1. WGSL's
+        // `mix` extrapolates rather than clamping, so an unsaturated weight past 1.0 does not
+        // merely show more reflection — it runs past the reflection and out the other side,
+        // subtracting the water's own body colour.
+        rgb = mix(
+            rgb,
+            probe_rgb,
+            saturate(
+                mix(0.02, REFLECT_MAX, fresnel)
+                    * probe_w
+                    * max(water_reflect.probe_box_max.x, 0.0)
+                    * (1.0 - ssr.conf),
+            ),
+        );
     }
 
     // Each mirror serves the water near its own plane: its colour and its weight here — strength
@@ -2359,36 +2345,41 @@ fn stylised_water(
     let k1 = m1.a / (1.0 + abs(world_pos.y - water_reflect.params.x));
     let k2 = m2.a / (1.0 + abs(world_pos.y - water_reflect.mirror2.x));
     let msum = k1 + k2;
+    var w_m = 0.0;
+    var mirror_g = vec3<f32>(0.0);
     if (msum > 0.0) {
-        let mirrored = vec4<f32>((m1.rgb * k1 + m2.rgb * k2) / msum, 1.0);
+        mirror_g = (m1.rgb * k1 + m2.rgb * k2) / msum;
         // `$WOW_MIRROR_SHOW` — the capture as the water sees it.
         if (water_reflect.params.y > 1.5) {
-            return vec4<f32>(mirrored.rgb, 1.0);
+            return vec4<f32>(mirror_g, 1.0);
         }
         // Either mirror's weight counts; together they are an "either", not a sum past one.
-        let w_planar = saturate(m1.a + m2.a - m1.a * m2.a);
-        refl = mix(refl, mirrored.rgb, w_planar);
-        probe_share = probe_share * (1.0 - w_planar);
+        w_m = saturate(m1.a + m2.a - m1.a * m2.a);
         if (layered) {
-            let amount = mix(0.02, REFLECT_MAX, fresnel) * w_planar * (1.0 - ssr.conf);
-            rgb = mix(rgb, mirrored.rgb, amount);
+            let amount = mix(0.02, REFLECT_MAX, fresnel) * w_m * (1.0 - ssr.conf);
+            rgb = mix(rgb, mirror_g, amount);
         }
     }
 
-    // …and the march's own contribution, on the same Fresnel weight the tiers below it use, so the
-    // water does not change how reflective it is depending on which tier answered.
-    if (ssr.conf > 0.0) {
-        let w_ssr = saturate(water_reflect.flags.z * ssr.conf);
-        refl = mix(refl, ssr.rgb, w_ssr);
-        probe_share = probe_share * (1.0 - w_ssr);
-        if (layered) {
-            rgb = mix(
-                rgb,
-                ssr.rgb,
-                mix(0.02, REFLECT_MAX, fresnel) * water_reflect.flags.z * ssr.conf,
-            );
-        }
+    // …and the march's own weight, on the same Fresnel weight the tiers below it use, so the water
+    // does not change how reflective it is depending on which tier answered.
+    let w_s = saturate(water_reflect.flags.z * ssr.conf);
+    if (layered && ssr.conf > 0.0) {
+        rgb = mix(
+            rgb,
+            ssr.rgb,
+            mix(0.02, REFLECT_MAX, fresnel) * water_reflect.flags.z * ssr.conf,
+        );
     }
+
+    // The sky is the FLOOR, not a layer: the answer for a direction no tier has a better one for.
+    let floor_g = sky_lit;
+    let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
+        * (1.0 - w_s)
+        + ssr.rgb * w_s;
+    // How much of `refl` came from the CUBE PROBE, so the Fresnel weight can be lifted where — and
+    // only where — the probe is the tier answering. See the final mix.
+    let probe_share = w_p * (1.0 - w_m) * (1.0 - w_s);
 
     // **The probe lane draws its reflection and nothing else** (`probe_at.w`). Not a debug switch:
     // it is what that lane is while the tier is being made correct, because a reflection arriving
