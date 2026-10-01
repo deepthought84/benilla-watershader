@@ -1126,7 +1126,7 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    (time, clock, look): (
+    (time, clock, mut look): (
         Res<Time>,
         Res<super::clock::WaterClock>,
         super::look::LookSources,
@@ -1439,9 +1439,9 @@ mod tests {
             mirror2 < drift && drift < cycle,
             "the clock's offsets, then its cycles, come after the second mirror's row"
         );
-        // The look block: 28 rows after the clock, 16-byte aligned, and the struct's last member.
+        // The look block: 139 rows after the clock, 16-byte aligned, and the struct's last member.
         assert_eq!(LOOK_LANES.start, CLOCK_LANES.end);
-        assert_eq!(LOOK_LANES.len(), 112);
+        assert_eq!(LOOK_LANES.len(), 556);
         assert_eq!(LOOK_LANES.start % 4, 0, "a vec4 row starts on 16 bytes");
         assert_eq!(REFLECT_FLOATS, LOOK_LANES.end);
         let look = body.find("look: WaterLook").unwrap();
@@ -1458,9 +1458,10 @@ mod tests {
         );
         // Each row's lane, in the order and size of `WaterLook` and `WaterBody`.
         use benilla_world::liquid::{
-            LOOK_BODY, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_QUALITY, LOOK_RIPPLE_MEAN,
-            LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
+            LOOK_BODY, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_QUALITY, LOOK_RIPPLE_LOSS,
+            LOOK_RIPPLE_MEAN, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF, RIPPLE_LOSS_ROWS,
         };
+        let loss = format!("ripple_loss: array<vec4<f32>, {RIPPLE_LOSS_ROWS}>");
         let rows = [
             ("quality: vec4<f32>", LOOK_QUALITY, 1),
             ("composite: vec4<f32>", LOOK_COMPOSITE, 1),
@@ -1468,7 +1469,7 @@ mod tests {
             ("surf: vec4<f32>", LOOK_SURF, 1),
             ("grade: vec4<f32>", LOOK_GRADE, 1),
             ("detail: vec4<f32>", LOOK_DETAIL, 1),
-            ("ripple_stats: array<vec4<f32>, 9>", LOOK_RIPPLE_STATS, 9),
+            (loss.as_str(), LOOK_RIPPLE_LOSS, RIPPLE_LOSS_ROWS),
             ("ripple_mean: vec4<f32>", LOOK_RIPPLE_MEAN, 1),
             ("body: WaterBody", LOOK_BODY, 10),
             ("shore: vec4<f32>", LOOK_SHORE, 1),

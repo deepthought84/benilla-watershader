@@ -179,9 +179,10 @@ pub const MIRROR2_LANES: std::ops::Range<usize> = MARCH_LANES.end..MARCH_LANES.e
 /// (the five ripple octaves, then the shore bubbles' three reads) and a row of cycles (flow
 /// restart, shore swell) — the shader's `WaterReflect::drift` and `cycle`.
 pub const CLOCK_LANES: std::ops::Range<usize> = MIRROR2_LANES.end..MIRROR2_LANES.end + 20;
-/// The stylised look's rows, the shader's `WaterReflect::look` (a `WaterLook`): 28 `vec4`s, one
+/// The stylised look's rows, the shader's `WaterReflect::look` (a `WaterLook`): 139 `vec4`s, one
 /// writer per row (`benilla_water`'s `look`, and the render world for [`LOOK_WATER_RECT`]).
-pub const LOOK_LANES: std::ops::Range<usize> = CLOCK_LANES.end..CLOCK_LANES.end + 112;
+pub const LOOK_LANES: std::ops::Range<usize> =
+    CLOCK_LANES.end..CLOCK_LANES.end + 76 + 4 * RIPPLE_LOSS_ROWS;
 /// `quality`: the tier (a copy), the sky floor's occlusion.
 pub const LOOK_QUALITY: usize = LOOK_LANES.start;
 /// `composite`: the grazing ceiling, the linear glint weight, a forced glow excess.
@@ -194,16 +195,19 @@ pub const LOOK_SURF: usize = LOOK_LANES.start + 12;
 pub const LOOK_GRADE: usize = LOOK_LANES.start + 16;
 /// `detail`: the painted detail's contrast.
 pub const LOOK_DETAIL: usize = LOOK_LANES.start + 20;
-/// `ripple_stats`: nine rows, the slope each ripple mip loses and resolves.
-pub const LOOK_RIPPLE_STATS: usize = LOOK_LANES.start + 24;
+/// `ripple_loss`: the slope the ripple octaves lose over the pixel's footprint, one row per eighth
+/// of a LOD ([`RIPPLE_LOSS_ROWS`]).
+pub const LOOK_RIPPLE_LOSS: usize = LOOK_LANES.start + 24;
+/// The rows of `ripple_loss` (`liquid.wgsl`'s `RIPPLE_LOSS_ROWS`).
+pub const RIPPLE_LOSS_ROWS: usize = 120;
 /// `ripple_mean`: the ripple's mean slope, variance and feature wavelength.
-pub const LOOK_RIPPLE_MEAN: usize = LOOK_LANES.start + 60;
+pub const LOOK_RIPPLE_MEAN: usize = LOOK_RIPPLE_LOSS + 4 * RIPPLE_LOSS_ROWS;
 /// `body`: the ten rows of a `WaterBody`.
-pub const LOOK_BODY: usize = LOOK_LANES.start + 64;
+pub const LOOK_BODY: usize = LOOK_RIPPLE_MEAN + 4;
 /// `shore`: the wet line, wet darkening, contact foam and meniscus gains.
-pub const LOOK_SHORE: usize = LOOK_LANES.start + 104;
+pub const LOOK_SHORE: usize = LOOK_BODY + 40;
 /// `shore_kind`: the wet line per kind of water, and the shore lap's phase.
-pub const LOOK_SHORE_KIND: usize = LOOK_LANES.start + 108;
+pub const LOOK_SHORE_KIND: usize = LOOK_SHORE + 4;
 /// The reflection block's length in floats — `liquid.wgsl`'s `WaterReflect`.
 pub const REFLECT_FLOATS: usize = LOOK_LANES.end;
 

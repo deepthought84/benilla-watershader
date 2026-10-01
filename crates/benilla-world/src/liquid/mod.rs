@@ -42,10 +42,10 @@ pub(crate) use hooks::world_camera_layers;
 pub use hooks::{
     mirror_view_shape, ProbeCull, ProbeFace, ProbeMark, ProbeMarks, ReflectionCamera, RippleAniso,
     WaterPassImages, WaterPassSet, WaterPipelineCaps, CLOCK_LANES, DOME_LANES, LOOK_BODY,
-    LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY, LOOK_RIPPLE_MEAN,
-    LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF, LOOK_WATER_RECT, MARCH_LANES,
-    MIRROR2_LANES, PROBE_LANES, PROBE_SLOT_MAX, REFLECT_FLOATS, UNMIRRORED_RENDER_LAYER,
-    WATER_RENDER_LAYER,
+    LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY, LOOK_RIPPLE_LOSS,
+    LOOK_RIPPLE_MEAN, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF, LOOK_WATER_RECT, MARCH_LANES,
+    MIRROR2_LANES, PROBE_LANES, PROBE_SLOT_MAX, REFLECT_FLOATS, RIPPLE_LOSS_ROWS,
+    UNMIRRORED_RENDER_LAYER, WATER_RENDER_LAYER,
 };
 
 // The submodules are private: this list is everything the rest of the client may name.
@@ -196,7 +196,7 @@ pub use query::{
     EyeLiquid, FoamPatch, LiquidClaim, LiquidHit, LiquidSource, RoomPlacements, SubmergedEye,
     Underwater, WaterChunkInfo, WmoPool,
 };
-pub use ripple::RippleStats;
+pub use ripple::{RippleStats, SIZE as RIPPLE_SIZE};
 pub(crate) use spatial::maintain_water_index;
 pub use spatial::WaterIndex;
 pub(crate) use surface::{

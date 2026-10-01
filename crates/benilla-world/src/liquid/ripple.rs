@@ -39,9 +39,9 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 /// Edge length of the generated map. Small on purpose: the shader samples it at three different
 /// world scales, so its own texel grid never becomes the visible detail.
-const SIZE: usize = 256;
+pub const SIZE: usize = 256;
 
-/// The chain's levels, [`SIZE`] down to 1: the look block's nine `ripple_stats` rows.
+/// The chain's levels, [`SIZE`] down to 1: [`RippleStats::levels`].
 const LEVELS: usize = SIZE.trailing_zeros() as usize + 1;
 
 /// The octave ladder: `(lattice period, amplitude)`. Every period divides [`SIZE`], so each layer

@@ -228,9 +228,10 @@ struct WaterLook {
     grade: vec4<f32>,
     // x the painted detail's contrast, yzw spare.
     detail: vec4<f32>,
-    // Per ripple mip 0..8: the slope covariance the mip loses against mip 0 (xx, zz, xz) and the
-    // per-axis slope variance it keeps.
-    ripple_stats: array<vec4<f32>, 9>,
+    // The slope variance the ripple octaves lose per axis over the pixel's footprint
+    // (`ripple_loss_at`): row i holds every loss and the mips' share at row i's footprint, then at
+    // row i + 1's.
+    ripple_loss: array<vec4<f32>, 120>,
     // The ripple's mean slope x and z (the 8-bit truncation's bias), its per-axis slope variance,
     // its feature wavelength in texels.
     ripple_mean: vec4<f32>,
@@ -1684,20 +1685,23 @@ const FLOW_PERIOD_S: f32 = 1.6;
 // ---- the surface's roughness (WAV-2) ------------------------------------------------------------
 //
 // Each ripple octave is read through its mip, never deleted, and the slope variance the mip and the
-// feature fade remove becomes GGX roughness: `RippleStats`' table, per level, of the covariance a
-// level loses against level 0 (`look.ripple_stats`), interpolated at the octave's own LOD.
+// feature fade remove becomes GGX roughness. What the five octaves lose together is a function of the
+// pixel's footprint alone (`RippleStats`' per-level table at each octave's own LOD, w²-weighted), so
+// `benilla_water`'s look rows tabulate it over the footprint (`look.ripple_loss`) and a pixel reads
+// one row per axis.
 
 /// Σ w² of the five octaves' weights (0.85, 1.0, 1.0, 0.70, 0.20): the fully unresolved surface's
 /// slope variance in units of the map's.
 const OCTAVE_W2_SUM: f32 = 3.2525;
 
-/// The pixel's footprint on the water in world XZ: log2 of its major extent in yards and of each
-/// anisotropic probe's along the minor axis, the major axis (unit) and the major extent.
+/// The pixel's footprint on the water in world XZ: its major and minor extents in yards, log2 of
+/// the major, the major axis (unit), and the map's feature wavelength in pixels at one tile a yard.
 struct PixelFootprint {
-    log_maj: f32,
-    log_min: f32,
-    e: vec2<f32>,
     major: f32,
+    minor: f32,
+    log_maj: f32,
+    e: vec2<f32>,
+    feat_px1: f32,
 };
 
 /// The footprint from world XZ's screen derivatives, taken once for every octave in uniform control
@@ -1708,71 +1712,47 @@ fn pixel_footprint(xz: vec2<f32>) -> PixelFootprint {
     let dy = dpdy(xz);
     let lx = length(dx);
     let ly = length(dy);
-    let major = max(max(lx, ly), 1e-6);
-    let minor = max(min(lx, ly), 1e-6);
-    // The sampler's anisotropy clamp N: each probe's extent is ρmax / min(ρmax / ρmin, N).
-    let n = max(water_reflect.look.surf.y, 1.0);
     var p: PixelFootprint;
-    p.log_maj = log2(major);
-    p.log_min = log2(max(minor, major / n));
-#ifdef WATER_TIER_LOW
-    // Low takes the loss as isotropic.
-    p.log_min = p.log_maj;
-#endif
-    p.e = select(dy, dx, lx >= ly) / major;
-    p.major = major;
+    p.major = max(max(lx, ly), 1e-6);
+    p.minor = max(min(lx, ly), 1e-6);
+    p.log_maj = log2(p.major);
+    p.e = select(dy, dx, lx >= ly) / p.major;
+    p.feat_px1 = water_reflect.look.ripple_mean.w / (p.major * f32(textureDimensions(ripples).x));
     return p;
 }
 
-/// An octave's footprint: the hardware's LOD along the major axis, each anisotropic probe's along
-/// the minor one, the major axis (world XZ, unit), the map's feature wavelength in pixels along it,
-/// and how much of the octave the feature fade keeps.
+/// An octave's footprint: the map's feature wavelength in pixels along the major axis, and how much
+/// of the octave the feature fade keeps.
 struct OctaveFootprint {
-    lam_maj: f32,
-    lam_min: f32,
-    e: vec2<f32>,
     feat_px: f32,
     keep: f32,
 };
 
-/// The pixel's footprint in the texels of an octave `inv_wavelength` tiles a yard. Rotation keeps
-/// lengths, so the lattice's turn does not enter.
+/// The pixel's footprint on an octave `inv_wavelength` tiles a yard. Rotation keeps lengths, so the
+/// lattice's turn does not enter.
 fn octave_footprint(px: PixelFootprint, inv_wavelength: f32) -> OctaveFootprint {
-    let texels_per_yd = f32(textureDimensions(ripples).x) * inv_wavelength;
-    let lt = log2(texels_per_yd) + view.mip_bias;
     var f: OctaveFootprint;
-    f.lam_maj = px.log_maj + lt;
-    f.lam_min = px.log_min + lt;
-    f.e = px.e;
-    f.feat_px = water_reflect.look.ripple_mean.w / (px.major * texels_per_yd);
+    f.feat_px = px.feat_px1 / inv_wavelength;
     // Features under 2 px along the major axis are not resolved (Nyquist): the octave fades out
     // between 4 and 2 px and its variance joins the loss.
     f.keep = smoothstep(water_reflect.look.surf.z, water_reflect.look.surf.w, f.feat_px);
     return f;
 }
 
-/// The ripple table at a fractional mip level: lost xx, lost zz, lost xz, resolved per axis.
-fn ripple_stats_at(lam: f32) -> vec4<f32> {
-    let l = clamp(lam, 0.0, 8.0);
-    let i = u32(floor(l));
-    let j = min(i + 1u, 8u);
-    return mix(water_reflect.look.ripple_stats[i], water_reflect.look.ripple_stats[j], l - f32(i));
-}
+/// The loss table (`look.ripple_loss`): its rows, and row 0's footprint LOD at one texel a yard
+/// (log2 yards plus the view's mip bias), with as many rows to each doubling of the footprint.
+const RIPPLE_LOSS_ROWS: u32 = 120u;
+const RIPPLE_LOSS_FROM: f32 = -8.0;
+const RIPPLE_LOSS_PER_LOD: f32 = 8.0;
 
-/// The world-XZ slope covariance (xx, zz, xz, × weight²) an octave's filtering and feature fade
-/// remove at `fp`: per axis of the footprint, the table's level loss averaged over the map's two
-/// axes (it is isotropic), so the lattice's turn does not enter.
-fn octave_loss(fp: OctaveFootprint, weight: f32) -> vec3<f32> {
-    let lost_maj = ripple_stats_at(fp.lam_maj);
-    let lost_min = ripple_stats_at(fp.lam_min);
-    let l_maj = 0.5 * (lost_maj.x + lost_maj.y);
-    let l_min = 0.5 * (lost_min.x + lost_min.y);
-    let faded = lost_maj.w * (1.0 - fp.keep * fp.keep);
-    // (l_min + faded)·I + (l_maj − l_min)·e eᵀ
-    let a = l_min + faded;
-    let b = l_maj - l_min;
-    return vec3<f32>(a + b * fp.e.x * fp.e.x, a + b * fp.e.y * fp.e.y, b * fp.e.x * fp.e.y)
-        * (weight * weight);
+/// The slope variance the five octaves lose per axis at footprint LOD `lod` (one texel a yard),
+/// w²-weighted: x what their mips and their feature fade remove, y their mips' share alone.
+fn ripple_loss_at(lod: f32) -> vec2<f32> {
+    let t = clamp((lod - RIPPLE_LOSS_FROM) * RIPPLE_LOSS_PER_LOD, 0.0, f32(RIPPLE_LOSS_ROWS));
+    let i = min(u32(t), RIPPLE_LOSS_ROWS - 1u);
+    // A row holds its own point and the next one's, so one read interpolates.
+    let row = water_reflect.look.ripple_loss[i];
+    return mix(row.xy, row.zw, t - f32(i));
 }
 
 /// One octave's mip-filtered slope on its rotated lattice, back in world XZ (as Rᵀ g), less the
@@ -1784,11 +1764,9 @@ fn octave_slope(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>)
     return transpose(r) * g * (weight * fp.keep);
 }
 
-/// One octave: its slope (world XZ, × weight × keep), the covariance its filtering removed
-/// (xx, zz, xz, × weight²) and its feature wavelength in pixels.
+/// One octave: its slope (world XZ, × weight × keep) and its feature wavelength in pixels.
 struct Octave {
     slope: vec2<f32>,
-    cov: vec3<f32>,
     feat_px: f32,
 };
 
@@ -1796,7 +1774,6 @@ struct Octave {
 fn ripple_octave(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> Octave {
     var o: Octave;
     o.slope = octave_slope(uv, fp, weight, rot);
-    o.cov = octave_loss(fp, weight);
     o.feat_px = fp.feat_px;
     return o;
 }
@@ -1838,8 +1815,6 @@ fn ripple_octave_flowing(
     );
     var o: Octave;
     o.slope = a * w0 + b * (1.0 - w0);
-    // The surface's loss, not the blend's: both phases share one footprint, so one phase's.
-    o.cov = octave_loss(fp, weight);
     o.feat_px = fp.feat_px;
     return o;
 }
@@ -1898,7 +1873,6 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     let slope = o0.slope + o1.slope + o2.slope + o3.slope + o4.slope;
     let slope_lo = octave_low(o0) + octave_low(o1) + octave_low(o2) + octave_low(o3)
         + octave_low(o4);
-    let cov = o0.cov + o1.cov + o2.cov + o3.cov + o4.cov;
     // `probe_box_min.w` scales the whole ripple: 1, 0 for a dead-flat surface.
     let scale = water_reflect.probe_box_min.w;
     var s: WaterSurface;
@@ -1915,11 +1889,32 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
         1.0,
         slope_lo.y * s.k + wake_slope.y * scale,
     ));
-    // GGX α² is twice the slope variance per axis (Beckmann): A = α0² I + 2k² cov.
+    // GGX α² is twice the slope variance per axis (Beckmann): A = α0² I + 2k² cov, with cov the
+    // loss at the footprint alone, so on still water α holds still while the phases move. Along
+    // the footprint's major axis A takes the whole loss; across it the finer mips an anisotropic
+    // sampler's probes read lose less, and the fade is the same.
     let a0 = water_reflect.look.surf.x;
     let k2 = 2.0 * s.k * s.k;
-    s.a2 = vec3<f32>(a0 * a0 + k2 * cov.x, a0 * a0 + k2 * cov.y, k2 * cov.z);
-    s.alpha = pow(max(s.a2.x * s.a2.y - s.a2.z * s.a2.z, 1e-12), 0.25);
+    let maj = ripple_loss_at(px.log_maj + view.mip_bias);
+    var mips_min = maj.y;
+#ifndef WATER_TIER_LOW
+    // The sampler's anisotropy clamp N: each probe's extent is ρmax / min(ρmax / ρmin, N). Low
+    // takes the loss as isotropic.
+    let n = water_reflect.look.surf.y;
+    if (n > 1.0) {
+        mips_min = ripple_loss_at(log2(max(px.minor, px.major / n)) + view.mip_bias).y;
+    }
+#endif
+    let c_maj = a0 * a0 + k2 * maj.x;
+    let c_min = c_maj - k2 * (maj.y - mips_min);
+    let d = c_maj - c_min;
+    s.a2 = vec3<f32>(
+        c_min + d * px.e.x * px.e.x,
+        c_min + d * px.e.y * px.e.y,
+        d * px.e.x * px.e.y,
+    );
+    // det(A) = c_maj · c_min.
+    s.alpha = sqrt(sqrt(c_maj * c_min));
     let alpha_full = sqrt(a0 * a0 + k2 * OCTAVE_W2_SUM * water_reflect.look.ripple_mean.z);
     s.rho_a = smoothstep(a0, max(alpha_full, a0 + 1e-4), s.alpha);
     return s;
@@ -2640,7 +2635,7 @@ fn stylised_water(
             let g = saturate((surf.alpha - a0) / max(a_full - a0, 1e-6));
             if (view_id == WV_ROUGHNESS) {
                 // Grey, red where α has reached the unresolved surface's.
-                v = select(vec3<f32>(g), vec3<f32>(1.0, 0.0, 0.0), surf.rho_a >= 1.0);
+                v = select(vec3<f32>(g), vec3<f32>(1.0, 0.0, 0.0), surf.rho_a >= 0.999);
             } else {
                 // r (α_major / α_minor − 1)·4 from the tensor's eigenvalues, g the normalised α.
                 let mid = 0.5 * (surf.a2.x + surf.a2.y);
