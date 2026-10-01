@@ -75,7 +75,9 @@ impl Plugin for ImprovedWaterPlugin {
         .add_systems(
             PreUpdate,
             drive_pipeline_caps.run_if(
-                resource_changed::<dev_state::DebugState>.or(resource_changed::<WaterQuality>),
+                resource_changed::<dev_state::DebugState>
+                    .or(resource_changed::<WaterQuality>)
+                    .or(resource_changed::<look::WaterLook>),
             ),
         );
     }
@@ -83,11 +85,13 @@ impl Plugin for ImprovedWaterPlugin {
 
 /// Ask the stylised liquid pipelines for the variants this plugin's switches need, the depth
 /// pyramid for the readers they turn on and the ripple map for the tier's anisotropy: the quality
-/// tier, the debug views while one is chosen, the screen-space march while its switch is on. A
-/// no-op unless the answer changes, so the materials are touched only then.
+/// tier, the debug views while one is chosen, the screen-space march while its switch is on, the
+/// sky floor's occlusion while its lane is. A no-op unless the answer changes, so the materials are
+/// touched only then.
 fn drive_pipeline_caps(
     dev: Res<dev_state::DebugState>,
     quality: Res<WaterQuality>,
+    look: Res<look::WaterLook>,
     mut caps: ResMut<WaterPipelineCaps>,
     mut consumers: ResMut<hiz::WaterHizConsumers>,
     mut aniso: ResMut<RippleAniso>,
@@ -99,11 +103,13 @@ fn drive_pipeline_caps(
         ..*caps
     };
     caps.set_if_neq(next);
-    let readers = if dev.water.ssr {
-        hiz::WaterHizConsumers::SSR
-    } else {
-        0
-    };
+    let mut readers = 0;
+    if dev.water.ssr {
+        readers |= hiz::WaterHizConsumers::SSR;
+    }
+    if look.floor_occlusion {
+        readers |= hiz::WaterHizConsumers::FLOOR_OCCLUSION;
+    }
     consumers.set_if_neq(hiz::WaterHizConsumers(readers));
     aniso.set_if_neq(RippleAniso(look::ripple_aniso(quality.tier())));
 }
@@ -154,6 +160,7 @@ mod tests {
         world.init_resource::<super::WaterPipelineCaps>();
         world.init_resource::<super::hiz::WaterHizConsumers>();
         world.init_resource::<super::RippleAniso>();
+        world.insert_resource(super::look::WaterLook::default());
         world
             .resource_mut::<super::dev_state::DebugState>()
             .water
@@ -174,6 +181,36 @@ mod tests {
                 super::look::ripple_aniso(quality.tier()),
                 "{quality:?}: the ripple map's anisotropy follows the tier"
             );
+        }
+    }
+
+    /// The sky floor's occlusion walks the depth pyramids, so its lane asks for them, beside the
+    /// march's switch and without it.
+    #[test]
+    fn the_floor_occlusion_asks_for_the_pyramid() {
+        use super::hiz::WaterHizConsumers as C;
+        let mut world = World::new();
+        world.init_resource::<super::dev_state::DebugState>();
+        world.init_resource::<super::WaterPipelineCaps>();
+        world.init_resource::<C>();
+        world.init_resource::<super::RippleAniso>();
+        world.insert_resource(super::WaterQuality::Medium);
+        for (ssr, floor, want) in [
+            (false, true, C::FLOOR_OCCLUSION),
+            (true, true, C::SSR | C::FLOOR_OCCLUSION),
+            (true, false, C::SSR),
+            (false, false, 0),
+        ] {
+            world
+                .resource_mut::<super::dev_state::DebugState>()
+                .water
+                .ssr = ssr;
+            world.insert_resource(super::look::WaterLook {
+                floor_occlusion: floor,
+                ..default()
+            });
+            world.run_system_once(super::drive_pipeline_caps).unwrap();
+            assert_eq!(world.resource::<C>().0, want, "ssr {ssr}, floor {floor}");
         }
     }
 }

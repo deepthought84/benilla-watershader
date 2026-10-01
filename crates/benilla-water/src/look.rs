@@ -67,6 +67,13 @@ fn feature_fade() -> (f32, f32) {
         .unwrap_or(FEATURE_FADE_PX)
 }
 
+/// Whether the sky floor is occluded: on, unless `$WOW_WATER_FLOOR_OCC=0` (read once) turns it
+/// off, for an A/B.
+fn floor_occlusion() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    !*OFF.get_or_init(|| std::env::var("WOW_WATER_FLOOR_OCC").is_ok_and(|v| v.trim() == "0"))
+}
+
 /// The ripple map's anisotropy clamp for quality tier `tier` (0 Low, 1 Medium, 2 High).
 pub(crate) fn tier_ripple_aniso(tier: u8) -> u16 {
     if tier >= 2 {
@@ -132,7 +139,7 @@ impl Default for WaterLook {
             grade_strength: 0.0,
             grade_c_near: 0.2,
             grade_c_far: 0.3,
-            floor_occlusion: true,
+            floor_occlusion: floor_occlusion(),
             painted_detail: 0.0,
             k_line: 0.35,
             f_wet: 0.61,

@@ -1114,6 +1114,257 @@ fn scene_behind(world_pos: vec3<f32>, frag_xy: vec2<f32>) -> SceneBehind {
 }
 #endif
 
+// ---- colour transfer ---------------------------------------------------------------------------
+
+/// The water's display gamma: a pure power law, so `enc(a·b) = enc(a)·enc(b)`. The composite's CPU
+/// mirror (`liquid_composite`) holds the same value, and a test compares them.
+const WATER_GAMMA: f32 = 2.2;
+/// Rec. 709 luminance.
+const LUMA_709: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+
+/// Gamma to linear light.
+fn water_dec(g: vec3<f32>) -> vec3<f32> {
+    return pow(max(g, vec3<f32>(0.0)), vec3<f32>(WATER_GAMMA));
+}
+
+/// Linear light to gamma.
+fn water_enc(l: vec3<f32>) -> vec3<f32> {
+    return pow(max(l, vec3<f32>(0.0)), vec3<f32>(1.0 / WATER_GAMMA));
+}
+
+fn luma709(c: vec3<f32>) -> f32 {
+    return dot(c, LUMA_709);
+}
+
+#ifdef WATER_SCENE_DEPTH
+// ---- floor march law: begin ----
+//
+// The sky floor's occlusion march. It reads only `view`, the two depth pyramids, the scene
+// snapshot and `water_dec`, and nothing of the screen-space reflection march it is ported from, so
+// its text stands unchanged in any shader that declares those alike.
+
+/// How thick every surface in the depth buffer is taken to be, in yards: McGuire & Mara's
+/// `zThickness`, the screen-space march's value.
+const LAW_THICKNESS: f32 = 6.0;
+/// How far past a cell wall a ray is placed when it leaves the cell, in level-0 texels: FFX SSSR's
+/// `uv_offset`.
+const LAW_CROSS: f32 = 0.005;
+/// The march's hard step bound: the largest tier's budget.
+const LAW_MAX_STEPS: i32 = 16;
+
+/// Bevy's infinite reverse-Z near plane in yards (`perspective_camera_near`).
+fn law_near() -> f32 {
+    return view.clip_from_view[3][2];
+}
+
+/// A world point in the march's space: `xy` the screen UV (y down), `z` reverse-Z device depth.
+fn law_world_to_screen(p: vec3<f32>) -> vec3<f32> {
+    let c = view.clip_from_world * vec4<f32>(p, 1.0);
+    let ndc = c.xyz / c.w;
+    return vec3<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5, ndc.z);
+}
+
+/// The view Z (negative, yards) of a reverse-Z device depth (`depth_ndc_to_view_z`).
+fn law_view_z(ndc_z: f32) -> f32 {
+    return -law_near() / ndc_z;
+}
+
+fn law_uv_to_ndc(uv: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+}
+
+fn law_ndc_to_world(ndc: vec3<f32>) -> vec3<f32> {
+    let w = view.world_from_clip * vec4<f32>(ndc, 1.0);
+    return w.xyz / w.w;
+}
+
+/// Is a ray at device depth `ray` behind the slab of the surface at `depth`, the point
+/// [`LAW_THICKNESS`] yards behind it? Depth is `near / distance`, so the slab's back sits at
+/// `near·d / (near + T·d)`, asked without a divide. Sky (depth 0) is never passed behind.
+fn law_behind_slab(ray: f32, depth: f32, near: f32) -> bool {
+    return ray * (near + LAW_THICKNESS * depth) < near * depth;
+}
+
+/// The occluder as the frame shows it, over the walked level's cell: four bilinear taps at
+/// ±2^(level − 1) pixels, averaged, gamma.
+fn snapshot_box(uv: vec2<f32>, level: i32) -> vec3<f32> {
+    let o = exp2(f32(level) - 1.0) / vec2<f32>(textureDimensions(scene_tex));
+    return 0.25 * (textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, -o.y), 0.0).rgb
+        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, -o.y), 0.0).rgb
+        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, o.y), 0.0).rgb
+        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, o.y), 0.0).rgb);
+}
+
+/// The march's verdict: the screen cannot say, the ray reached the sky, or it met something.
+const FLOOR_UNKNOWN: u32 = 0u;
+const FLOOR_ESCAPED: u32 = 1u;
+const FLOOR_HIT: u32 = 2u;
+
+/// Where a floor march ended: its verdict, the screen UV and device depth it reached, and how far
+/// along the ray that point is from the origin, yards.
+struct FloorMarch {
+    state: u32,
+    uv: vec2<f32>,
+    z: f32,
+    travelled: f32,
+};
+
+/// Walk the ray `origin + t·dir` through the depth pyramids from level `min_level` up, at most
+/// `max_steps` cells, and say whether the sky above the water is open along it.
+///
+/// The screen-space march's traversal (FFX SSSR's `FFX_SSSR_HierarchicalRaymarch` with the
+/// farthest-depth pass-behind, always on), coarsened and turned from a colour into a verdict:
+/// - the walk never descends below `min_level`, and falling below it is a hit;
+/// - a tile of pure sky is not a hit: the ray crosses it and climbs, remembering it was over sky;
+/// - leaving the frame through its top over sky, or passing the far plane, has escaped; leaving
+///   it anywhere else, or running out of steps, is unknown: the screen cannot say;
+/// - a hit is validated against the slab of the `min_level` texel it stopped in.
+///
+/// `travelled` is the distance from the origin to the point the verdict was reached at: the hit,
+/// where the ray left the frame, or where the budget ran out. The reflected thing is at least that
+/// far behind the water.
+fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32) -> FloorMarch {
+    // The direction as the difference of two projected points; a ray heading back toward the eye
+    // is cut to half the distance to the eye plane, so its second point stays in front of it.
+    let clip_o = view.clip_from_world * vec4<f32>(origin, 1.0);
+    let clip_d = view.clip_from_world * vec4<f32>(dir, 0.0);
+    var reach = clip_o.w;
+    if (clip_d.w < 0.0) {
+        reach = min(reach, 0.5 * clip_o.w / -clip_d.w);
+    }
+    let o = law_world_to_screen(origin);
+    let d = law_world_to_screen(origin + dir * reach) - o;
+    let big = 3.4e38;
+    let inv_d = vec3<f32>(
+        select(big, 1.0 / d.x, d.x != 0.0),
+        select(big, 1.0 / d.y, d.y != 0.0),
+        select(big, 1.0 / d.z, d.z != 0.0),
+    );
+
+    let top = i32(textureNumLevels(hiz_tex)) - 1;
+    let lowest = clamp(min_level, 0, top);
+    let base_res = vec2<f32>(textureDimensions(hiz_tex, 0));
+    let low_res = vec2<f32>(textureDimensions(hiz_tex, lowest));
+    let cross = select(vec2<f32>(LAW_CROSS), vec2<f32>(-LAW_CROSS), d.xy < vec2<f32>(0.0)) / base_res;
+    let wall = select(vec2<f32>(1.0), vec2<f32>(0.0), d.xy < vec2<f32>(0.0));
+
+    // Step off the origin's own cell at the lowest level first, so the walk does not open by
+    // meeting it.
+    var t: f32;
+    {
+        let planes = (floor(o.xy * low_res) + wall) / low_res + cross;
+        let tw = (planes - o.xy) * inv_d.xy;
+        t = min(tw.x, tw.y);
+    }
+    var p = o + t * d;
+    let near_plane = law_near();
+    // Where the ray leaves the frame: the point an off-frame verdict is reached at, exactly rather
+    // than at the cell wall the walk had reached beyond it.
+    let t_out = min(
+        select((1.0 - o.x) * inv_d.x, -o.x * inv_d.x, d.x < 0.0),
+        select((1.0 - o.y) * inv_d.y, -o.y * inv_d.y, d.y < 0.0),
+    );
+
+    var level = lowest;
+    var last_sky = false;
+    var state = FLOOR_UNKNOWN;
+    var decided = false;
+    let steps = min(max_steps, LAW_MAX_STEPS);
+    for (var i = 0; i < steps && level >= lowest; i = i + 1) {
+        if (any(p.xy < vec2<f32>(0.0)) || any(p.xy >= vec2<f32>(1.0))) {
+            // Off the frame: through its top over sky the sky is open; elsewhere nobody knows.
+            state = select(FLOOR_UNKNOWN, FLOOR_ESCAPED, p.y < 0.0 && last_sky);
+            p = o + min(t, t_out) * d;
+            decided = true;
+            break;
+        }
+        if (p.z <= 0.0) {
+            state = FLOOR_ESCAPED; // past the far plane
+            decided = true;
+            break;
+        }
+        let res = vec2<f32>(textureDimensions(hiz_tex, level));
+        let cell = floor(p.xy * res);
+        let surface = textureLoad(hiz_tex, vec2<i32>(cell), level).r;
+        let planes = vec3<f32>((cell + wall) / res + cross, surface);
+        var tp = (planes - o) * inv_d;
+        tp.z = select(big, tp.z, d.z < 0.0);
+        let t_wall = min(tp.x, tp.y);
+        // A tile of pure sky (the pyramid holds the nearest depth, and sky is 0) holds nothing to
+        // meet: cross it and climb.
+        let sky = surface <= 0.0;
+        last_sky = sky;
+        let t_min = min(t_wall, tp.z);
+        // Larger depth is nearer under reverse-Z: the ray is in front of everything in the tile.
+        let in_front = surface < p.z;
+        // Or behind everything in it: behind the slab of the tile's farthest surface for its whole
+        // way across, read only for a ray already past the nearest's slab. At the lowest level a
+        // texel may hold two layers, and a ray between them walks on.
+        var behind = false;
+        if (!in_front && !sky) {
+            let p_exit_z = o.z + t_wall * d.z;
+            let seg_near = max(p.z, p_exit_z);
+            let seg_far = min(p.z, p_exit_z);
+            if (law_behind_slab(seg_near, surface, near_plane)) {
+                let farthest = textureLoad(hiz_far_tex, vec2<i32>(cell), level).r;
+                let behind_all = law_behind_slab(seg_near, farthest, near_plane);
+                let between = level == lowest && seg_far > farthest;
+                behind = behind_all || between;
+            }
+        }
+        let skipped = sky || (t_min != tp.z && in_front) || behind;
+        t = select(select(select(t, t_wall, behind), t_min, in_front), t_wall, sky);
+        p = o + t * d;
+        level = select(level - 1, min(level + 1, top), skipped);
+    }
+    if (!decided && level < lowest) {
+        // Fell below the lowest level: a hit, if the ray stopped inside the slab of the surface
+        // its texel holds (the nearest, or past that slab the farthest).
+        if (all(p.xy >= vec2<f32>(0.0)) && all(p.xy < vec2<f32>(1.0))) {
+            let texel = vec2<i32>(floor(p.xy * low_res));
+            let near0 = textureLoad(hiz_tex, texel, lowest).r;
+            var gap = law_view_z(near0) - law_view_z(p.z);
+            if (gap > LAW_THICKNESS) {
+                let far0 = textureLoad(hiz_far_tex, texel, lowest).r;
+                gap = law_view_z(far0) - law_view_z(p.z);
+            }
+            state = select(FLOOR_UNKNOWN, FLOOR_HIT, abs(gap) <= LAW_THICKNESS);
+        }
+    }
+    // Past the far plane the depth cannot place the point: as far as it reaches.
+    let at = law_ndc_to_world(vec3<f32>(law_uv_to_ndc(p.xy), max(p.z, 1e-6)));
+    return FloorMarch(state, p.xy, p.z, distance(origin, at));
+}
+
+/// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
+/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies as a
+/// share of the eye's distance (0 at a contact, toward 1 far off), `known` 1 where the march
+/// reached a verdict.
+struct FloorOcc {
+    rgb: vec3<f32>,
+    v: f32,
+    rho_c: f32,
+    known: f32,
+};
+
+/// The march's verdict as the floor takes it. `rho_c = D/(d_eye + D)` at the distance `D` the
+/// verdict was reached: a hit at `D`, an escape or an unknown past it, all say the reflected thing
+/// is at least `D` behind the water, so it is continuous from a contact to the far field. The
+/// occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of the lookup
+/// point on screen.
+fn floor_from_march(m: FloorMarch, d_eye: f32, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
+    let rho = m.travelled / max(d_eye + m.travelled, 1e-4);
+    if (m.state == FLOOR_HIT) {
+        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, min_level)), 0.0, rho, 1.0);
+    }
+    if (m.state == FLOOR_ESCAPED) {
+        return FloorOcc(vec3<f32>(0.0), 1.0, rho, 1.0);
+    }
+    return FloorOcc(vec3<f32>(0.0), 1.0, rho, 0.0);
+}
+// ---- floor march law: end ----
+#endif
+
 /// The positive `t` where the ray `o + t*d` (with `o` measured from the capture point) is `dist`
 /// away from that point — one step of the depth correction, in closed form.
 ///
@@ -1944,6 +2195,60 @@ fn glint_lobe_p1(
     return pow(max(dot(n, h), 0.0), p_eff) * (p_eff + 2.0) / (p + 2.0);
 }
 
+// ---- the sky floor's occlusion (REF-7) ----------------------------------------------------------
+//
+// The sky the floor reflects is open only where nothing the frame shows stands above the water
+// along the reflected ray: a canopy, a deck, a bank. Each pixel marches the depth pyramids for it
+// ([`floor_march`]) and replaces the occluded share of the sky with the occluder as the frame
+// shows it.
+
+// The per-pixel march's lowest level and step budget, per tier.
+#ifdef WATER_TIER_HIGH
+const FLOOR_MARCH_LEVEL: i32 = 2;
+const FLOOR_MARCH_STEPS: i32 = 12;
+#else
+#ifdef WATER_TIER_LOW
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 6;
+#else
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 8;
+#endif
+#endif
+
+/// Whether this fragment's floor is occluded: the eye above the surface (the underside is not
+/// this look's), not a WMO interior pool (its floor is unlit and unoccluded), the occlusion lane
+/// on, and the floor's share of the pixel worth a march, or the grading reading `rho_c`.
+fn floor_occlusion_wanted(floor_share: f32, world_pos: vec3<f32>) -> bool {
+    return view.world_position.y > world_pos.y
+        && w.path.x < 1.5
+        && water_reflect.look.quality.y > 0.5
+        && (floor_share > 1.0 / 1024.0 || water_reflect.look.grade.x > 0.0);
+}
+
+/// The sky floor's occlusion at `world_pos`. The VERDICT comes from the unrippled point along the
+/// flat reflection, so a still camera gets a still answer and no silhouette flickers with the
+/// ripple; only the occluder's colour tap follows the rippled lookup point (`n` slides it, as it
+/// slides the mirrors' and the probe's), shifted on screen by as much as the ripple moves it.
+fn floor_occlusion(
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    flat_n: vec3<f32>,
+    to_view: vec3<f32>,
+    d_eye: f32,
+) -> FloorOcc {
+    let p_look = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
+    let uv_look = ndc_to_uv(position_world_to_ndc(p_look).xy);
+    let m = floor_march(
+        world_pos + vec3<f32>(0.0, 0.05, 0.0),
+        reflect(-to_view, flat_n),
+        FLOOR_MARCH_LEVEL,
+        FLOOR_MARCH_STEPS,
+    );
+    let shift = uv_look - ndc_to_uv(position_world_to_ndc(world_pos).xy);
+    return floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift);
+}
+
 #ifdef WATER_VIEW
 // ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
 //
@@ -1962,6 +2267,7 @@ const WV_ROUGHNESS: u32 = 10u;
 const WV_ROUGHNESS_ANISO: u32 = 11u;
 const WV_SLOPE_FULL: u32 = 12u;
 const WV_SLOPE_LO: u32 = 13u;
+const WV_FLOOR_OCC: u32 = 14u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2052,6 +2358,7 @@ fn stylised_water(
     let n_slide = surf.n_lo;
 #endif
     let to_view = normalize(view.world_position.xyz - world_pos);
+    let d_eye = distance(view.world_position.xyz, world_pos);
 
     // Body: the zone's own swatch, deepening with V. sqrt, not linear — absorption in real water is
     // exponential, and the square root keeps the shallows a distinct band instead of a thin gradient.
@@ -2372,8 +2679,26 @@ fn stylised_water(
         );
     }
 
-    // The sky is the FLOOR, not a layer: the answer for a direction no tier has a better one for.
-    let floor_g = sky_lit;
+    // The sky is the FLOOR, not a layer: the answer for a direction no tier has a better one for,
+    // less what the frame shows standing above the water along the reflected ray. Its share of the
+    // pixel decides whether that is worth a march; the occluder replaces the shut share of the sky
+    // in linear light.
+    let w_floor = (1.0 - w_p) * (1.0 - w_m) * (1.0 - w_s);
+    var occ = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    var occ_marched = 0.0;
+    var floor_g = sky_lit;
+    var floor_share = w_floor * fres;
+#ifdef WATER_VIEW
+    // The occlusion view shows what the floor gets wherever a march may run, the tiers over it or not.
+    if (water_view_id() == WV_FLOOR_OCC) {
+        floor_share = 1.0;
+    }
+#endif
+    if (floor_occlusion_wanted(floor_share, world_pos)) {
+        occ = floor_occlusion(world_pos, n_slide, flat_n, to_view, d_eye);
+        occ_marched = 1.0;
+        floor_g = water_enc(occ.rgb + occ.v * water_dec(sky_lit));
+    }
     let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
         * (1.0 - w_s)
         + ssr.rgb * w_s;
@@ -2638,6 +2963,10 @@ fn stylised_water(
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * n.xz, 0.0);
         } else if (view_id == WV_SLOPE_LO) {
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * surf.n_lo.xz, 0.0);
+        } else if (view_id == WV_FLOOR_OCC) {
+            // r the open sky v, g rho_c, b the per-pixel march's share; half bright where the
+            // verdict is unknown.
+            v = vec3<f32>(occ.v, occ.rho_c, occ_marched) * (0.5 + 0.5 * occ.known);
         }
         return vec4<f32>(v, 1.0);
     }

@@ -496,3 +496,14 @@ fn calm_water_reflects_two_percent_head_on_and_fresnel_is_monotone() {
         assert!((water_fresnel(mu, 0.0) - schlick).abs() <= 1e-6, "μ {mu}");
     }
 }
+
+/// The shader's colour transfer is this mirror's: the same gamma and the same luminance weights.
+#[test]
+fn the_shaders_transfer_is_the_mirrors() {
+    let wgsl = include_str!("shaders/liquid.wgsl");
+    let gamma = format!("const WATER_GAMMA: f32 = {WATER_GAMMA:?};");
+    assert!(wgsl.contains(&gamma), "liquid.wgsl lost `{gamma}`");
+    let [r, g, b] = LUMA_709;
+    let luma = format!("const LUMA_709: vec3<f32> = vec3<f32>({r:?}, {g:?}, {b:?});");
+    assert!(wgsl.contains(&luma), "liquid.wgsl lost `{luma}`");
+}
