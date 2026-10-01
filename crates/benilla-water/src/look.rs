@@ -7,12 +7,14 @@
 //! so the render world writes that row itself (`reflect::upload_reflect`). A row whose knob does not
 //! exist yet stays 0.
 
+use std::sync::OnceLock;
+
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
 use benilla_world::liquid::{
-    RippleStats, WaterQuality, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY,
-    LOOK_RIPPLE_MEAN, LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
+    RippleAniso, RippleStats, WaterQuality, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES,
+    LOOK_QUALITY, LOOK_RIPPLE_MEAN, LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
 };
 
 /// The calm surface's GGX roughness α0: √0.003, Cox and Munk's (1954) clean-surface slope
@@ -23,6 +25,32 @@ const ALPHA_CALM: f32 = 0.0548;
 /// footprint along the major axis: below 2 (Nyquist) none resolve, from 4 (a 2x guard for the box
 /// mip's leakage) all do.
 const FEATURE_FADE_PX: (f32, f32) = (2.0, 4.0);
+
+/// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
+const HIGH_RIPPLE_ANISO: u16 = 4;
+
+/// The ripple map's anisotropy clamp for quality tier `tier` (0 Low, 1 Medium, 2 High).
+pub(crate) fn tier_ripple_aniso(tier: u8) -> u16 {
+    if tier >= 2 {
+        HIGH_RIPPLE_ANISO
+    } else {
+        1
+    }
+}
+
+/// [`tier_ripple_aniso`], unless `$WOW_WATER_AF=<1-16>` (read once) sets the clamp for every tier,
+/// to measure its cost.
+pub(crate) fn ripple_aniso(tier: u8) -> u16 {
+    static FORCED: OnceLock<Option<u16>> = OnceLock::new();
+    FORCED
+        .get_or_init(|| {
+            std::env::var("WOW_WATER_AF")
+                .ok()
+                .and_then(|v| v.trim().parse::<u16>().ok())
+                .map(|n| n.clamp(1, 16))
+        })
+        .unwrap_or_else(|| tier_ripple_aniso(tier))
+}
 
 /// The owner's and the developer's knobs for the look rows, at their defaults.
 #[derive(Resource, Clone, Debug, PartialEq)]
@@ -85,15 +113,18 @@ pub(crate) struct LookInputs {
     /// The ripple map's slope statistics; zero without a map, which reads as nothing lost and no
     /// bias, the calm roughness everywhere.
     pub(crate) ripple: RippleStats,
+    /// The ripple sampler's anisotropy clamp ([`RippleAniso`]); 0 reads as 1, none.
+    pub(crate) aniso: u16,
 }
 
-/// What `drive_reflection` writes the look block from: the knobs, the quality tier and the ripple
-/// map's statistics, when the map exists.
+/// What `drive_reflection` writes the look block from: the knobs, the quality tier, the ripple
+/// map's statistics, when the map exists, and its sampler's anisotropy clamp.
 #[derive(SystemParam)]
 pub(crate) struct LookSources<'w> {
     look: Res<'w, WaterLook>,
     quality: Res<'w, WaterQuality>,
     ripple: Option<Res<'w, RippleStats>>,
+    aniso: Res<'w, RippleAniso>,
 }
 
 impl LookSources<'_> {
@@ -102,6 +133,7 @@ impl LookSources<'_> {
         let inputs = LookInputs {
             tier: self.quality.tier(),
             ripple: self.ripple.as_deref().copied().unwrap_or_default(),
+            aniso: self.aniso.0,
         };
         look_lanes(&self.look, &inputs)
     }
@@ -142,10 +174,15 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
             0.0,
         ],
     );
-    // `y` is the ripple sampler's anisotropy clamp: 1, none.
+    // `y` is the ripple sampler's anisotropy clamp, so the shader's minor-axis LOD is the probes'.
     row(
         LOOK_SURF,
-        [ALPHA_CALM, 1.0, FEATURE_FADE_PX.0, FEATURE_FADE_PX.1],
+        [
+            ALPHA_CALM,
+            f32::from(inputs.aniso.max(1)),
+            FEATURE_FADE_PX.0,
+            FEATURE_FADE_PX.1,
+        ],
     );
     row(LOOK_DETAIL, [look.painted_detail, 0.0, 0.0, 0.0]);
     for (i, level) in inputs.ripple.levels.iter().enumerate() {
@@ -223,7 +260,14 @@ mod tests {
             *level = [i as f32, 10.0 + i as f32, 20.0 + i as f32, 30.0 + i as f32];
         }
         ripple.mean = [-0.004, -0.003, 6.5e-4, 17.9];
-        let lanes = look_lanes(&WaterLook::default(), &LookInputs { tier: 1, ripple });
+        let lanes = look_lanes(
+            &WaterLook::default(),
+            &LookInputs {
+                tier: 1,
+                ripple,
+                ..LookInputs::default()
+            },
+        );
         let row =
             |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
         for (i, level) in ripple.levels.iter().enumerate() {
@@ -233,5 +277,26 @@ mod tests {
         let bare = look_lanes(&WaterLook::default(), &LookInputs::default());
         let rows = LOOK_RIPPLE_STATS - LOOK_LANES.start..LOOK_RIPPLE_MEAN + 4 - LOOK_LANES.start;
         assert!(bare[rows].iter().all(|&v| v == 0.0));
+    }
+
+    /// The ripple sampler's clamp lands in `surf.y`, the shader's N; High takes 4, the others none.
+    #[test]
+    fn the_surf_row_carries_the_ripple_anisotropy() {
+        let surf_y = |aniso| {
+            look_lanes(
+                &WaterLook::default(),
+                &LookInputs {
+                    aniso,
+                    ..LookInputs::default()
+                },
+            )[LOOK_SURF + 1 - LOOK_LANES.start]
+        };
+        assert_eq!(surf_y(0), 1.0, "no clamp reads as none");
+        assert_eq!(surf_y(4), 4.0);
+        assert_eq!(
+            [0, 1, 2, 3].map(tier_ripple_aniso),
+            [1, 1, 4, 4],
+            "Low, Medium, High, and a stale tier past High"
+        );
     }
 }

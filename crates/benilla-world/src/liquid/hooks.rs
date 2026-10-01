@@ -279,6 +279,18 @@ impl WaterPipelineCaps {
     }
 }
 
+/// The ripple map's anisotropic filtering clamp, 1 for none. A water plugin sets it from the
+/// quality tier; the liquid plugin puts it on the map's sampler, and the plugin's look rows hand it
+/// to the shader, whose roughness then counts the probes the hardware takes.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RippleAniso(pub u16);
+
+impl Default for RippleAniso {
+    fn default() -> Self {
+        Self(1)
+    }
+}
+
 /// Where a water plugin publishes [`WaterPassImages`]; the liquid materials are built after it.
 #[derive(bevy::ecs::schedule::SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WaterPassSet;

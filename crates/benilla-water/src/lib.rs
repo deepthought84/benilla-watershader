@@ -30,8 +30,8 @@ pub use liquid_planar::PlanarMap;
 
 // The engine items the moved passes name by their old paths.
 use benilla_world::liquid::{
-    WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet, WaterPipelineCaps,
-    WaterQuality, WaterStyle, UNMIRRORED_RENDER_LAYER,
+    RippleAniso, WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet,
+    WaterPipelineCaps, WaterQuality, WaterStyle, UNMIRRORED_RENDER_LAYER,
 };
 use benilla_world::{dev_state, lighting, sky, sun, view, water_fx, world_unit};
 
@@ -81,15 +81,16 @@ impl Plugin for ImprovedWaterPlugin {
     }
 }
 
-/// Ask the stylised liquid pipelines for the variants this plugin's switches need, and the depth
-/// pyramid for the readers they turn on: the quality tier, the debug views while one is chosen, the
-/// screen-space march while its switch is on. A no-op unless the answer changes, so the materials
-/// are touched only then.
+/// Ask the stylised liquid pipelines for the variants this plugin's switches need, the depth
+/// pyramid for the readers they turn on and the ripple map for the tier's anisotropy: the quality
+/// tier, the debug views while one is chosen, the screen-space march while its switch is on. A
+/// no-op unless the answer changes, so the materials are touched only then.
 fn drive_pipeline_caps(
     dev: Res<dev_state::DebugState>,
     quality: Res<WaterQuality>,
     mut caps: ResMut<WaterPipelineCaps>,
     mut consumers: ResMut<hiz::WaterHizConsumers>,
+    mut aniso: ResMut<RippleAniso>,
 ) {
     let next = WaterPipelineCaps {
         view: dev.water.view != 0,
@@ -104,6 +105,7 @@ fn drive_pipeline_caps(
         0
     };
     consumers.set_if_neq(hiz::WaterHizConsumers(readers));
+    aniso.set_if_neq(RippleAniso(look::ripple_aniso(quality.tier())));
 }
 
 /// Hand the engine's liquid materials this plugin's targets; each pass re-points them itself when
@@ -151,6 +153,7 @@ mod tests {
         world.init_resource::<super::dev_state::DebugState>();
         world.init_resource::<super::WaterPipelineCaps>();
         world.init_resource::<super::hiz::WaterHizConsumers>();
+        world.init_resource::<super::RippleAniso>();
         world
             .resource_mut::<super::dev_state::DebugState>()
             .water
@@ -165,6 +168,11 @@ mod tests {
             assert!(
                 key.has(LiquidKey::SSR),
                 "{quality:?}: the march's variant stays"
+            );
+            assert_eq!(
+                world.resource::<super::RippleAniso>().0,
+                super::look::ripple_aniso(quality.tier()),
+                "{quality:?}: the ripple map's anisotropy follows the tier"
             );
         }
     }

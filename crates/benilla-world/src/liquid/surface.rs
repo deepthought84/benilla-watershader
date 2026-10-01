@@ -1126,6 +1126,31 @@ pub(super) fn apply_water_style(
     }
 }
 
+/// Put [`super::RippleAniso`]'s clamp on the ripple map's sampler where it differs, and touch every
+/// liquid material: the modified image is re-extracted from its main-world copy to a new GPU
+/// texture and sampler, and a bind group built on the old one would keep sampling it.
+pub(super) fn apply_ripple_aniso(
+    aniso: Res<super::RippleAniso>,
+    map: Option<Res<RippleMap>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<LiquidMaterial>>,
+) {
+    let Some(map) = map else {
+        return;
+    };
+    let sampler = bevy::image::ImageSampler::Descriptor(ripple::ripple_sampler(aniso.0));
+    if images
+        .get(&map.image)
+        .is_none_or(|image| image.sampler == sampler)
+    {
+        return;
+    }
+    if let Some(image) = images.get_mut(&map.image) {
+        image.sampler = sampler;
+    }
+    for _ in materials.iter_mut() {}
+}
+
 /// Decode frames `1..=count` with their authored mips into one repeating, anisotropic array,
 /// stopping at the first missing, non-square or mis-sized frame; returns it and the count loaded.
 fn load_frame_array(
@@ -1168,6 +1193,50 @@ fn load_frame_array(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tier's clamp lands on the ripple map's sampler, and the same clamp again leaves the image
+    /// alone, so a steady state re-uploads nothing.
+    #[test]
+    fn the_ripple_sampler_takes_the_tiers_anisotropy() {
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::image::ImageSampler;
+        let mut world = World::new();
+        let mut images = Assets::<Image>::default();
+        let (map, _) = ripple::ripple_map(RIPPLE_SEED);
+        let image = images.add(map);
+        world.insert_resource(images);
+        world.insert_resource(Assets::<LiquidMaterial>::default());
+        world.insert_resource(RippleMap {
+            image: image.clone(),
+        });
+        let clamp = |world: &World| match &world
+            .resource::<Assets<Image>>()
+            .get(&image)
+            .unwrap()
+            .sampler
+        {
+            ImageSampler::Descriptor(d) => d.anisotropy_clamp,
+            other => panic!("the ripple map lost its own sampler: {other:?}"),
+        };
+        for n in [4, 1, 8] {
+            world.insert_resource(super::super::RippleAniso(n));
+            world.run_system_once(apply_ripple_aniso).unwrap();
+            assert_eq!(clamp(&world), n);
+        }
+        let changed = |world: &World| {
+            world
+                .get_resource_change_ticks::<Assets<Image>>()
+                .unwrap()
+                .changed
+        };
+        let before = changed(&world);
+        world.run_system_once(apply_ripple_aniso).unwrap();
+        assert_eq!(
+            changed(&world),
+            before,
+            "the same clamp re-uploaded the map"
+        );
+    }
 
     #[test]
     fn only_nibbles_six_and_seven_scroll() {

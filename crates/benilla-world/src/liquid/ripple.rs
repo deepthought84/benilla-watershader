@@ -295,24 +295,44 @@ pub(super) fn ripple_map(seed: u32) -> (Image, RippleStats) {
     );
     image.data = Some(chain);
     image.texture_descriptor.mip_level_count = levels;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+    image.sampler = ImageSampler::Descriptor(ripple_sampler(1));
+    (image, stats)
+}
+
+/// The ripple map's sampler: repeating, trilinear, and `anisotropy` probes at most along a
+/// footprint's major axis (1 for none; the quality tier's `RippleAniso`, wgpu takes 1-16 and
+/// anything above 1 only with every filter linear). The reference's own filter policy is a process
+/// global this map, benilla's own, does not read.
+pub(super) fn ripple_sampler(anisotropy: u16) -> ImageSamplerDescriptor {
+    ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
         mag_filter: ImageFilterMode::Linear,
         min_filter: ImageFilterMode::Linear,
         mipmap_filter: ImageFilterMode::Linear,
-        // No anisotropy, deliberately, and unlike the sheet beside it: the reference's own filter
-        // policy is a process global this map has no business reading, and the measurement that
-        // settled it upstream (the sandbox this look was ported from) was 3 % of the pixels of a
-        // waterside view changed by more than one level for a quarter of the frame rate.
+        anisotropy_clamp: anisotropy.clamp(1, 16),
         ..default()
-    });
-    (image, stats)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clamp reaches the descriptor within wgpu's 1-16, and every filter stays linear, which
+    /// wgpu requires of a clamp above 1.
+    #[test]
+    fn the_sampler_takes_the_anisotropy_clamp() {
+        for (asked, got) in [(0, 1), (1, 1), (4, 4), (8, 8), (40, 16)] {
+            let d = ripple_sampler(asked);
+            assert_eq!(d.anisotropy_clamp, got, "{asked}");
+            assert!([d.mag_filter, d.min_filter, d.mipmap_filter]
+                .iter()
+                .all(|f| *f == ImageFilterMode::Linear),);
+            assert_eq!(d.address_mode_u, ImageAddressMode::Repeat);
+            assert_eq!(d.address_mode_v, ImageAddressMode::Repeat);
+        }
+    }
 
     /// The wrapped lattice is the whole tiling mechanism: one period out has to land on the same
     /// value, or the repeat draws a seam across the water every twelve yards.

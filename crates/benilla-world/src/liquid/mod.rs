@@ -40,7 +40,7 @@ mod spatial;
 mod surface;
 pub(crate) use hooks::world_camera_layers;
 pub use hooks::{
-    mirror_view_shape, ProbeCull, ProbeFace, ProbeMark, ProbeMarks, ReflectionCamera,
+    mirror_view_shape, ProbeCull, ProbeFace, ProbeMark, ProbeMarks, ReflectionCamera, RippleAniso,
     WaterPassImages, WaterPassSet, WaterPipelineCaps, CLOCK_LANES, DOME_LANES, LOOK_BODY,
     LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES, LOOK_QUALITY, LOOK_RIPPLE_MEAN,
     LOOK_RIPPLE_STATS, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF, LOOK_WATER_RECT, MARCH_LANES,
@@ -256,6 +256,7 @@ impl Plugin for LiquidPlugin {
             .init_resource::<WaterStyle>()
             .init_resource::<WaterQuality>()
             .init_resource::<WaterPipelineCaps>()
+            .init_resource::<RippleAniso>()
             .init_resource::<ProbeMarks>()
             // PreUpdate: a surface streamed by last frame's commands is indexed before anyone asks.
             .add_systems(PreUpdate, maintain_water_index)
@@ -294,6 +295,10 @@ impl Plugin for LiquidPlugin {
                     surface::apply_water_style.run_if(
                         resource_changed::<WaterStyle>.or(resource_changed::<WaterPipelineCaps>),
                     ),
+                    // The ripple map's anisotropy: a change re-uploads the map and rebuilds every
+                    // liquid bind group, so it runs on a tier change and once the map exists.
+                    surface::apply_ripple_aniso
+                        .run_if(resource_changed::<RippleAniso>.or(resource_added::<RippleMap>)),
                 ),
             )
             // The `WOW_NO_LIQUID` override: after both per-frame `Visibility` owners of a surface
