@@ -1925,6 +1925,30 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     return s;
 }
 
+/// The slope variance the surface no longer resolves, in GGX α² ([`WaterSurface::alpha`] over the
+/// calm surface's α0, which the glint's own exponent already stands for).
+fn surface_lost2(surf: WaterSurface) -> f32 {
+    let a0 = water_reflect.look.surf.x;
+    return max(surf.alpha * surf.alpha - a0 * a0, 0.0);
+}
+
+/// The glitter lobe: Blinn at exponent `p` on the filtered normal, widened by `lost2`, the slope
+/// variance the surface no longer resolves (Toksvig). Blinn p is Beckmann α² = 2/(p + 2), the
+/// lost variance adds to it, and the weight follows the lobe's normalisation (p' + 2)/(p + 2), so
+/// its integral, the glint's energy, stays.
+fn glint_lobe_p1(
+    n: vec3<f32>,
+    to_light: vec3<f32>,
+    to_view: vec3<f32>,
+    p: f32,
+    lost2: f32,
+) -> f32 {
+    let a2 = 2.0 / (p + 2.0) + lost2;
+    let p_eff = max(2.0 / a2 - 2.0, 1.0);
+    let h = normalize(to_light + to_view);
+    return pow(max(dot(n, h), 0.0), p_eff) * (p_eff + 2.0) / (p + 2.0);
+}
+
 #ifdef WATER_VIEW
 // ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
 //
@@ -2428,9 +2452,10 @@ fn stylised_water(
     // the ridge you are standing under, there is no glitter to have. The scalar is slewed on the
     // CPU, so this fades over about a second rather than switching.
     let sun_reach = water_reflect.sun.w;
-    let half_v = normalize(to_light + to_view);
+    // Widened, at the same energy, by the roughness the surface cannot resolve ([`glint_lobe_p1`]).
+    let lost2 = surface_lost2(surf);
     rgb += wow_light.light_spec.rgb
-        * pow(max(dot(n, half_v), 0.0), SPEC_POWER)
+        * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
         * (SPEC_WEIGHT * sun_reach);
 
     // ...and the moon's, which is the same computation against the other body in the sky. Water
@@ -2442,9 +2467,8 @@ fn stylised_water(
         water_reflect.moon.xyz / moon_len,
         moon_len > 1e-4,
     );
-    let half_m = normalize(to_moon + to_view);
     rgb += MOON_SPEC_COLOR
-        * pow(max(dot(n, half_m), 0.0), MOON_SPEC_POWER)
+        * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
         * (SPEC_WEIGHT * MOON_SPEC_WEIGHT * water_reflect.moon.w);
 
     // The white line where the water meets the land, and the bubbles behind it.
