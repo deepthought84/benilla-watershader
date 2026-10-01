@@ -1227,7 +1227,7 @@ mod tests {
                 .changed
         };
         // Each run on its own tick, so a write shows as a newer change tick.
-        let mut run = |world: &mut World| {
+        let run = |world: &mut World| {
             world.increment_change_tick();
             world.run_system_once(apply_ripple_aniso).unwrap();
         };
