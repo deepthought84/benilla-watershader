@@ -24,3 +24,7 @@ bytemuck = { version = "1", features = ["derive"] }
 # The whole-map dump example: zones and terrain heights beside the classification.
 anyhow.workspace = true
 benilla-adt = { path = "../benilla-adt" }
+# The WGSL tripwire (`tests/water_wgsl_compiles.rs`) composes and validates this crate's shaders
+# as Bevy does, with `benilla-assets`' versions and features of both.
+naga = { version = "27", features = ["wgsl-in"] }
+naga_oil = { version = "0.20", default-features = false, features = ["test_shader"] }

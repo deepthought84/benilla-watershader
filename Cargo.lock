@@ -695,6 +695,8 @@ dependencies = [
  "benilla-world",
  "bevy",
  "bytemuck",
+ "naga",
+ "naga_oil",
 ]
 
 [[package]]
