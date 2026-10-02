@@ -26,9 +26,10 @@
 //! apart ([`BURST_EVERY`]). The clock is held while each shot is saved and released for exactly
 //! that many steps between two, so shot `i` stands `i·every` steps after shot 0 on any machine:
 //! at [`age_frames`] `+ i·every` steps on a scene, and `i·every` steps past the fixture's own age on
-//! a fixture viewer (`fxview`, `waterfx`). The log gives each shot's clock, and the capture fails
-//! unless every shot's file is written. A single shot has no time in it; a rate is measured across
-//! a burst.
+//! a fixture viewer (`fxview`, `waterfx`). The log gives each shot's clock (a fixture's own age),
+//! and the capture fails unless every shot's file is written: a run first removes the files an
+//! earlier capture to the same path left ([`clear_old_shots`]). A single shot has no time in it; a
+//! rate is measured across a burst.
 //!
 //! A scene's burst writes `<stem>.poses.csv` beside its shots, each shot's camera eye and look-at
 //! in raw WoW coords. `$WOW_CAPTURE_PAN=<yaw>[,<pitch>]`, or a scene's own pan
@@ -287,9 +288,11 @@ fn stable_frames(scene: &str) -> u32 {
 const BUILD_CAP_FRAMES: u32 = 1800;
 
 /// The cap on the held build: [`BUILD_CAP_FRAMES`] plus the stable run the shutter waits for, so a
-/// longer `$WOW_CAPTURE_STABLE` does not eat into the frames the scene has to build.
-fn build_cap_frames(scene: &str) -> u32 {
-    BUILD_CAP_FRAMES + stable_frames(scene)
+/// longer `$WOW_CAPTURE_STABLE` does not eat into the frames the scene has to build, plus
+/// `flat_credit`, the stable runs a golden water scene spent on its clear colour
+/// ([`CaptureCtx::flat_credit`]), which are no part of the build.
+fn build_cap_frames(scene: &str, flat_credit: u32) -> u32 {
+    BUILD_CAP_FRAMES + stable_frames(scene) + flat_credit
 }
 
 /// Wall-clock ceiling on a capture run, past which it exits with an error. The other bounds count
@@ -313,7 +316,8 @@ const AGE_FRAMES: u32 = 150;
 
 /// The golden water scenes' age ([`scenarios::water_scene_names`]): the water probe takes its
 /// first cubes 2 s into the age and a slot at a time after that, so a 2.5 s shot races them; at
-/// 1000 steps (16.7 s) every cube is in and the shot repeats byte for byte.
+/// 1000 steps (16.7 s) every cube is in and the shot repeats byte for byte outside the scene's
+/// two-state patches (written on its row in `scenarios.rs`).
 const WATER_AGE_FRAMES: u32 = 1000;
 
 /// The age `scene` runs: `$WOW_CAPTURE_AGE`, else its own.
@@ -411,6 +415,60 @@ fn write_poses(ctx: &CaptureCtx, scenario: &Scenario) -> std::io::Result<()> {
         ));
     }
     std::fs::write(Path::new(&ctx.out).with_extension("poses.csv"), csv)
+}
+
+/// Whether `name` is a burst shot of `stem`: `<stem>-NNN.<ext>`, three digits or more.
+fn is_burst_shot(name: &str, stem: &str, ext: &str) -> bool {
+    name.strip_prefix(stem)
+        .and_then(|r| r.strip_prefix('-'))
+        .and_then(|r| r.strip_suffix(ext))
+        .and_then(|r| r.strip_suffix('.'))
+        .is_some_and(|n| n.len() >= 3 && n.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Remove what an earlier capture to `out` left, so the exit's check that every shot was written
+/// and a reader of the series see this run's files alone: the shot at `out`, or for a burst every
+/// `<stem>-NNN` shot beside it, however long that burst was, and its poses. A still leaves a burst
+/// of the same stem in place, and a burst a still.
+fn clear_old_shots(out: &str, burst: u32) -> std::io::Result<()> {
+    let gone = |p: &Path| match std::fs::remove_file(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    };
+    let path = Path::new(out);
+    if burst == 0 {
+        return gone(path);
+    }
+    gone(&path.with_extension("poses.csv"))?;
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let ext = path
+        .extension()
+        .unwrap_or(std::ffi::OsStr::new("png"))
+        .to_string_lossy();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| is_burst_shot(n, &stem, &ext))
+        {
+            gone(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// A shot's clock for the log: a fixture's age, the virtual clock past the moment its visuals
+/// attached, which is the same on every run; else the virtual clock, which the frozen build makes
+/// the scene's age.
+fn shot_clock(game_time: &Time, fx: Option<&FxViewState>) -> f64 {
+    let now = game_time.elapsed_secs_f64();
+    fx.and_then(|s| s.attached_at)
+        .map_or(now, |t0| now - f64::from(t0))
 }
 
 /// Burst shot `shot`'s file: `<stem>-NNN.<ext>` beside `out`.
@@ -521,6 +579,9 @@ struct CaptureCtx {
     pan: Option<[f32; 2]>,
     /// A golden water scene's settle met a one-colour frame and built on (logged once).
     waited_flat: bool,
+    /// The frames of the stable runs a golden water scene spent on its clear colour, which extend
+    /// its build cap ([`build_cap_frames`]), up to [`BUILD_CAP_FRAMES`] of them.
+    flat_credit: u32,
     /// The burst shot being taken, `0..burst`.
     shot: u32,
     phase: Phase,
@@ -870,6 +931,13 @@ impl Plugin for CapturePlugin {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
+        // A perf probe writes no image, so it leaves the files at `out` alone.
+        if probe_frames == 0 {
+            if let Err(e) = clear_old_shots(&out, burst_shots()) {
+                eprintln!("capture: cannot remove an earlier capture's shots at {out}: {e}");
+                std::process::exit(2);
+            }
+        }
         // The frozen clock for every run; a probe switches back to `Automatic` before its first
         // sample, or it would measure a constant 16.67 ms ([`CaptureCtx::frozen_clock`]).
         app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_FRAME_DT))
@@ -884,6 +952,7 @@ impl Plugin for CapturePlugin {
                 burst_every: burst_every(),
                 pan: burst_pan(shot_name).filter(|_| burst_shots() > 1),
                 waited_flat: false,
+                flat_credit: 0,
                 shot: 0,
                 phase: Phase::Building(0),
                 ui_seeded: false,
@@ -1144,7 +1213,7 @@ fn drive_capture(
                     .observe(watch_frame);
             }
             let stable = stable_frames(ctx.name);
-            let capped = n + 1 >= build_cap_frames(ctx.name);
+            let capped = n + 1 >= build_cap_frames(ctx.name, ctx.flat_credit);
             if capped {
                 warn!(
                     "capture: the image never settled in {} frames ({} stable); the shot is not \
@@ -1176,13 +1245,27 @@ fn drive_capture(
                                 &first[..3],
                             );
                         }
+                        // The clear colour is no part of the build: its run extends the cap.
+                        ctx.flat_credit = (ctx.flat_credit + watch.stable).min(BUILD_CAP_FRAMES);
                         watch.stable = 0;
-                    } else if flat {
+                    } else if flat && fixture_age.is_none() {
+                        // A fixture viewer settles before it arms its subject, so its settle frame
+                        // may be the clear colour and its shot is not.
                         error!(
                             "capture: settled image is FLAT — every pixel is {:?} in the \
                              readback's channel order; the scene rendered nothing",
                             &first[..3],
                         );
+                        if waits {
+                            error!(
+                                "capture: FAILED — {} never left its clear colour; exiting \
+                                 nonzero",
+                                ctx.name
+                            );
+                            ctx.bailed = true;
+                            exit.write(AppExit::error());
+                            return;
+                        }
                     }
                 }
             }
@@ -1247,7 +1330,7 @@ fn drive_capture(
                          s, writing {path}",
                         ctx.burst,
                         ctx.burst_every,
-                        game_time.elapsed_secs_f64(),
+                        shot_clock(&game_time, fx_state.as_deref()),
                     );
                 } else {
                     info!("capture: effect aged, writing {path}");
@@ -1336,7 +1419,7 @@ fn drive_capture(
                 info!(
                     "capture: burst shot {} at {:.6} s, writing {path}",
                     ctx.shot,
-                    game_time.elapsed_secs_f64(),
+                    shot_clock(&game_time, fx_state.as_deref()),
                 );
                 Phase::Saving {
                     frames: 0,
@@ -1762,6 +1845,78 @@ mod tests {
         // A quarter of the way along: a quarter of the sweep, −20° to −10°.
         let q = pan_pose(eye, look, pan, 2, 9);
         assert!((heading(q) + 10.0).abs() < 1e-3, "{}", heading(q));
+    }
+
+    /// A run removes the files an earlier capture to its path left: a still its own shot, a burst
+    /// every numbered shot of its stem, a longer burst's included, and its poses. Neither touches
+    /// the other's files nor another stem's.
+    #[test]
+    fn a_capture_starts_without_an_earlier_runs_shots() {
+        let dir =
+            std::env::temp_dir().join(format!("benilla-capture-clear-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let files = [
+            "s.png",
+            "s-000.png",
+            "s-059.png",
+            "s-1200.png",
+            "s.poses.csv",
+            "s-ref.png",
+            "s@fresnel-000.png",
+            "s-00.png",
+            "s-000.txt",
+            "t-000.png",
+        ];
+        let fill = || {
+            for f in files {
+                std::fs::write(dir.join(f), b"x").unwrap();
+            }
+        };
+        let left = || {
+            let mut v: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            v.sort();
+            v
+        };
+        let out = dir.join("s.png").to_string_lossy().into_owned();
+        fill();
+        clear_old_shots(&out, 3).unwrap();
+        assert_eq!(
+            left(),
+            [
+                "s-00.png",
+                "s-000.txt",
+                "s-ref.png",
+                "s.png",
+                "s@fresnel-000.png",
+                "t-000.png"
+            ]
+        );
+        fill();
+        clear_old_shots(&out, 0).unwrap();
+        assert!(!dir.join("s.png").exists());
+        assert_eq!(
+            left().len(),
+            files.len() - 1,
+            "a still removes its shot alone"
+        );
+        clear_old_shots(&out, 0).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The clear colour's stable runs extend a golden water scene's build cap, not its build.
+    #[test]
+    fn the_clear_colours_wait_does_not_count_against_the_build() {
+        use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
+        let _l = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _s = EnvGuard::unset("WOW_CAPTURE_STABLE");
+        let base = build_cap_frames("water-loch-modan", 0);
+        assert_eq!(base, BUILD_CAP_FRAMES + WATER_STABLE_FRAMES);
+        assert_eq!(build_cap_frames("water-loch-modan", 600), base + 600);
     }
 
     /// Burst shots sit beside the single shot's path, numbered from 000, keeping its extension.

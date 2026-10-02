@@ -1383,7 +1383,9 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
 ];
 
 /// The golden water scenes, the [`ON_DEMAND`] rows named `water-*`, for `scripts/water-shots.sh`.
-/// The baseline's `water-noon` and `water-night` are in [`SCENARIOS`] and not among them.
+/// The baseline's `water-noon` and `water-night` are in [`SCENARIOS`] and not among them. The name
+/// is the membership: a row without the prefix gets neither the scenes' settle and age nor a place
+/// in the sweep.
 pub(super) fn water_scene_names() -> impl Iterator<Item = &'static str> {
     ON_DEMAND
         .iter()

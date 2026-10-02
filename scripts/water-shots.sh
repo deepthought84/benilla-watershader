@@ -25,10 +25,12 @@
 # The render state is pinned: 1600x900, render scale 2, far clip 777, MSAA off, water quality
 # Medium ($WATER_QUALITY=0|1|2 picks another `waterQuality` tier; each log's `water:` line says
 # which tier drew the shot). Each scene carries its own settle (300 still frames) and age (1000
-# steps) (`capture`'s WATER_STABLE_FRAMES, WATER_AGE_FRAMES). Every shot also writes the perf
+# steps) (`capture`'s WATER_STABLE_FRAMES, WATER_AGE_FRAMES), so the script drops a
+# $WOW_CAPTURE_STABLE or $WOW_CAPTURE_AGE the caller exported. Every shot also writes the perf
 # journal of its run, <shot>.fps.csv (the GPU columns per pass group, `gpu_water` the water's own
 # passes), and its log carries the per-pass GPU_PASSES lines.
 set -euo pipefail
+unset WOW_CAPTURE_STABLE WOW_CAPTURE_AGE
 root="$(cd "$(dirname "$0")/.." && pwd -P)"
 
 dir="${1:-$root/target/visual/water}"
@@ -40,15 +42,21 @@ if [ "$perf" -gt 0 ] && { [ "$burst" -gt 0 ] || [ -n "${WATER_VIEW:-}" ]; }; the
   echo "water-shots.sh: \$WATER_PERF measures the stills' render state, not a burst or a view" >&2
   exit 2
 fi
-# Resolved against the caller's directory, before the script moves to the repo root.
-fresh=0
-[ -d "$dir" ] || fresh=1
+# Resolved against the caller's directory, before the script moves to the repo root. $made is the
+# outermost directory mkdir creates, so a refusal removes every level it made.
+made=""
+d="$dir"
+while [ ! -e "$d" ]; do made="$d"; d="$(dirname "$d")"; done
 mkdir -p "$dir"
 dir="$(cd "$dir" && pwd -P)"
+[ -z "$made" ] || made="$(cd "$made" && pwd -P)"
 case "$dir/" in
   "$root/target/"*) ;;
   "$root/"*)
-    [ "$fresh" = 0 ] || rmdir "$dir"
+    if [ -n "$made" ]; then
+      d="$dir"
+      while rmdir "$d" && [ "$d" != "$made" ]; do d="$(dirname "$d")"; done
+    fi
     echo "water-shots.sh: $dir is in the repo outside target/; captures stay out of git" >&2
     exit 2 ;;
 esac
