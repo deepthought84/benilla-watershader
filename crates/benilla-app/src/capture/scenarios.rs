@@ -996,7 +996,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // Boxes below are 1600x900 frame pixels; a diff inside a row's flake box is run variance.
     //
     // A big lake: Loch Modan from the shore by (-5240.0, -3117.0, 299.6), facing 270 across it.
-    // Flake: a lake-bed patch at x815-837 y705-719 lands in one of two states, on both lanes.
+    // Flake: a lake-bed patch at x815-837 y701-720 lands in one of two states, on both lanes.
     Scenario {
         name: "water-loch-modan",
         map: Some(MAP_AZEROTH),
@@ -1060,7 +1060,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // The sea at night: the Savage Coast beach at (-12727.1, -2.1, 0.4), 115 yd from the teleport
     // spot, whose 45° bearing runs out over open sea, at 22:44, facing the white moon at +14.9° on
     // that bearing (`daynight::moon_direction`; the capture log prints it). Flake: sea-bed plants
-    // at x505-769 y520-634, above the moon's path (y650 on), appear in some runs only.
+    // at x505-769 y520-635, above the moon's path (y650 on), appear in some runs only.
     Scenario {
         name: "water-savage-night",
         map: Some(MAP_AZEROTH),
@@ -1112,6 +1112,7 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         ui: None,
     },
     // A murky lake: `.tele JademirLake`, Feralas (-3057.92, 1837.42, 29.45, orientation 3.5°).
+    // Flake: lake-bed plants at x1237-1599 y483-608 land in three or more states.
     Scenario {
         name: "water-felwood-jademir",
         map: Some(MAP_KALIMDOR),
@@ -1129,7 +1130,8 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
-    // Darrowmere Lake from the shore at (1293.0, -2428.0, 55.2), facing 90.
+    // Darrowmere Lake from the shore at (1293.0, -2428.0, 55.2), facing 90. Flake: a speck of
+    // terrain at x463-488 y797-822 lands in one of two states.
     Scenario {
         name: "water-darrowmere",
         map: Some(MAP_AZEROTH),

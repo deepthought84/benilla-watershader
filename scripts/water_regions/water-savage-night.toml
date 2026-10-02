@@ -1,5 +1,5 @@
 # wg-savage-night: the Savage Coast's sea at 22:44 facing the white moon (+14.9° on the 45°
-# bearing), its path on the water below it. Flake: sea-bed plants at x505-769 y520-634.
+# bearing), its path on the water below it. Flake: sea-bed plants at x505-769 y520-635.
 scene = "water-savage-night"
 [box]
 moon_path = [550, 640, 1000, 880]

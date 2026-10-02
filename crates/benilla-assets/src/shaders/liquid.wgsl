@@ -77,7 +77,8 @@ const PROBE_TAPS_MAX: i32 = 3;
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var floor_occ: texture_2d<f32>;
 #ifdef WATER_SCENE_DEPTH
 // The opaque world's linear depth behind each pixel (`liquid::hiz`): view Z in yards, written after
-// the opaque pass inside the water's screen rectangle, 0 where nothing was drawn.
+// the opaque pass inside the water's screen rectangle, 0 where nothing was drawn. A texel outside
+// the rectangle holds what an earlier frame wrote there.
 @group(#{MATERIAL_BIND_GROUP}) @binding(116) var scene_depth_tex: texture_2d<f32>;
 #endif
 
@@ -218,7 +219,7 @@ struct WaterBody {
 };
 
 // The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect`: one
-// writer per row, 0 where nothing writes it yet.
+// writer per row, and a row no writer fills reads 0.
 struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
     // occlusion (1 on), zw spare.
@@ -294,9 +295,9 @@ struct WaterReflect {
     // probe tier's Fresnel boost, y = the tap count, z = the deepest mip, w spare.
     probe_box_min: vec4<f32>,
     probe_box_max: vec4<f32>,
-    // x = how much of the water's ripple the CUBE lookup sees; y = the slot the lat-long debug
-    // unwraps; z = march the cube's stored distances (2) or run the fixed point (1); w = the fixed
-    // point's steps.
+    // x = how much of the water's ripple the CUBE lookup sees, which nothing here reads; y = the
+    // slot the lat-long debug unwraps; z = march the cube's stored distances (2) or run the fixed
+    // point (1); w = the fixed point's steps.
     probe_extra: vec4<f32>,
     // One entry per probe slot — see `liquid::probe::probe_slot_lanes`. Fixed at PROBE_SLOT_MAX
     // rather than at the live count, because a WGSL array length is a compile-time constant; the
@@ -1020,7 +1021,8 @@ struct SsrHit {
 // ---- what is behind the water -------------------------------------------------------------------
 
 /// The opaque world's view Z behind pixel `px` in yards, from the linear depth; 0 where it is not
-/// known (nothing drawn, or outside the image).
+/// known (nothing drawn, or outside the image). Valid inside the water's screen rectangle: a pixel
+/// outside it reads what an earlier frame wrote there.
 fn scene_view_z(px: vec2<i32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(scene_depth_tex));
     if (any(px < vec2<i32>(0)) || any(px >= dims)) {

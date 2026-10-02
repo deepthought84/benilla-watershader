@@ -7,8 +7,10 @@
 //! The GPU columns read bevy's per-pass render diagnostics, which exist only where the device
 //! has `TIMESTAMP_QUERY_INSIDE_PASSES` (Vulkan and DX12, never an Apple GPU); elsewhere the cells
 //! stay empty, not zero. `gpu_ms` is the sum of every pass, and an unnamed pass lands in
-//! `gpu_other`. `gpu_water` is the Improved Water passes outside the transparent pass (`water_*`:
-//! the depth pyramid and the colour snapshot); the water's own shading is in `gpu_transp`.
+//! `gpu_other`. `gpu_water` is the Improved Water spans (`water_*`): the depth pyramid's seed and
+//! reduce, the colour snapshot and the water's compute pass (the sky cube and the floor
+//! occlusion). The probe cubes' face blits and filter passes carry no span and land in no column,
+//! `gpu_ms` included; the water's own shading is in `gpu_transp`.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -104,8 +106,8 @@ enum GpuBucket {
     Ui,
     /// Every span this file does not name, counted, never dropped.
     Other,
-    /// Improved Water's own passes (`water_*`): the depth pyramid's seed and reduce, the colour
-    /// snapshot.
+    /// Improved Water's own spans (`water_*`): the depth pyramid's seed and reduce, the colour
+    /// snapshot, the water's compute pass.
     Water,
 }
 

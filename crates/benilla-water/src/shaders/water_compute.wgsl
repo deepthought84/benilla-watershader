@@ -28,7 +28,7 @@ struct OcclParams {
     // The texels of the dispatch: the quarter-resolution tiles covering the water's rectangle.
     tile_origin: vec2<u32>,
     tile_end: vec2<u32>,
-    // The lighting sun's travel direction; unread until the body's sun visibility is traced.
+    // The lighting sun's travel direction; written 0 and read by no entry point.
     sun_travel: vec4<f32>,
 };
 @group(0) @binding(9) var<uniform> params: OcclParams;

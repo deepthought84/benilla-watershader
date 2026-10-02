@@ -9,7 +9,7 @@
 //! **No depth prepass.** Nothing reads one, and at render scale 2 the frame is faster without it:
 //! the opaque pass's early-Z buys back less than the depth-only passes over the static world and the
 //! entity path cost. Without one the world camera's view key is the same on both lanes, so a style
-//! flip re-specialises the liquid pipelines alone, and the terrain's far-clip wall (`terrain.wgsl`
+//! flip changes no world pipeline's view key, and the terrain's far-clip wall (`terrain.wgsl`
 //! discards past it, where Bevy's stock prepass would have written depth) stands on both.
 
 use bevy::prelude::*;

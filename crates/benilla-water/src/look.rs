@@ -4,8 +4,8 @@
 //!
 //! Each row has one writer. [`look_lanes`] writes every row but `water_rect`, which leaves it 0: the
 //! water's screen rectangle is known only after visibility, which runs after the mirror's system,
-//! so the render world writes that row itself (`reflect::upload_reflect`). A row whose knob does not
-//! exist yet stays 0.
+//! so the render world writes that row itself (`reflect::upload_reflect`). A row no knob fills
+//! (the body) stays 0.
 
 use std::sync::OnceLock;
 
@@ -100,8 +100,8 @@ pub(crate) fn ripple_aniso(tier: u8) -> u16 {
 /// The owner's and the developer's knobs for the look rows, at their defaults.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub(crate) struct WaterLook {
-    /// The reflection weight's transitional ceiling at grazing angles, 1 for none: 0.45, today's
-    /// `mix(0.02, 0.45, …)` ceiling.
+    /// The reflection weight's ceiling at grazing angles, 1 for none: 0.45, the ceiling of
+    /// `liquid.wgsl`'s fixed `mix(0.02, 0.45, fresnel)`, which does not read this row.
     pub(crate) grazing_limit: f32,
     /// The glint lobes' weight in linear light: the gamma weight 0.22 raised to 2.2, so the peak
     /// over black is unchanged.
@@ -265,7 +265,7 @@ fn ripple_loss_at(stats: &RippleStats, bias: f32, fade: (f32, f32), lod: f32) ->
 }
 
 /// The look block as `WaterLook` lays it out. `water_rect` is left 0 for the render world, and
-/// the rows no knob fills yet (the body) stay 0.
+/// the rows no knob fills (the body) stay 0.
 pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FLOATS] {
     let mut lanes = [0.0; LOOK_FLOATS];
     let mut row = |at: usize, v: [f32; 4]| {

@@ -1,5 +1,5 @@
 # wg-loch-fp-noon: Loch Modan from the shore, the fir island across the water (waterline y 458).
-# Flake: a lake-bed patch at x815-837 y705-719 lands in one of two states.
+# Flake: a lake-bed patch at x815-837 y701-720 lands in one of two states.
 scene = "water-loch-modan"
 [box]
 crown = [545, 320, 595, 370]         # the central fir's crown

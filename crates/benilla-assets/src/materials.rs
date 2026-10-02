@@ -397,14 +397,17 @@ impl LiquidKey {
     pub const TIER_SHIFT: u16 = 3;
     /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3.
     pub const SSR: u16 = 1 << 5;
-    /// The linear composite while it is a variant (`path.w` bit 4); no def reads it yet.
+    /// The linear composite as a variant (`path.w` bit 4): a pipeline of its own, for which
+    /// [`Self::frag_defs`] pushes no def.
     pub const COMPOSITE: u16 = 1 << 6;
-    /// The highlight excess stored for the glow (`path.w` bit 5); no def reads it yet.
+    /// The highlight excess stored for the glow (`path.w` bit 5): a pipeline of its own, for which
+    /// [`Self::frag_defs`] pushes no def.
     pub const GLOW: u16 = 1 << 7;
-    /// Per-channel transmittance through dual-source blending (`path.w` bit 6); no def reads it
-    /// yet.
+    /// Per-channel transmittance through dual-source blending (`path.w` bit 6): a pipeline of its
+    /// own, for which [`Self::frag_defs`] pushes no def.
     pub const DUAL_SOURCE: u16 = 1 << 8;
-    /// The authored sheet as painted detail (`path.w` bit 7); no def reads it yet.
+    /// The authored sheet as painted detail (`path.w` bit 7): a pipeline of its own, for which
+    /// [`Self::frag_defs`] pushes no def.
     pub const PAINTED: u16 = 1 << 9;
     /// `path.w` holds the key's cap bits shifted down by this.
     pub const CAPS_SHIFT: u16 = 2;
@@ -651,8 +654,9 @@ pub struct LiquidExt {
     #[texture(117, sample_type = "float", filterable = false, visibility(fragment))]
     pub hiz_far: Handle<Image>,
     /// The opaque world's linear depth behind each pixel (`benilla_water`'s `hiz`), view Z in yards,
-    /// 0 where nothing was drawn: what the stylised lane measures its water column against. Read by
-    /// `textureLoad`, and only under `WATER_SCENE_DEPTH`.
+    /// 0 where nothing was drawn: what the stylised lane measures its water column against. Written
+    /// inside the water's screen rectangle alone; a texel outside it holds what an earlier frame
+    /// wrote there. Read by `textureLoad`, and only under `WATER_SCENE_DEPTH`.
     #[texture(116, sample_type = "float", filterable = false, visibility(fragment))]
     pub scene_depth: Handle<Image>,
     /// The sky floor's occlusion over the mirror planes (`benilla_water`'s `water_compute`), a
@@ -2055,8 +2059,8 @@ mod tests {
                 "{key:?} lost the magma grade"
             );
         }
-        // The debug views with the march (`path.w` bits 0 and 3) carry every def the region's own
-        // guards name today.
+        // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
+        // `WATER_SSR`, the region's guards that declare names; the tier's branches declare none.
         let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
         let text = liquid_under(&water.frag_defs());
         let seen = identifiers(&text);
@@ -2067,8 +2071,9 @@ mod tests {
         assert!(missing.is_empty(), "{water:?} lacks {missing:?}");
         assert!(
             !include_str!("shaders/liquid.wgsl").contains("DEPTH_PREPASS"),
-            "a liquid pipeline reads the depth prepass again: it misses the static world and \
-             every entity-path model, which the linear depth holds"
+            "a liquid pipeline reads the depth prepass again: the world camera carries none \
+             (`benilla_water::depth`), and the water measures its column against the linear \
+             depth"
         );
     }
 }

@@ -230,7 +230,8 @@ pub struct WaterPassImages {
     pub hiz_far: Handle<Image>,
     /// The opaque world's linear depth behind each pixel: view Z in yards, `R32Float` at the view's
     /// size, 0 where nothing was drawn; what the stylised lane measures its water column against.
-    /// The placeholder is one texel, which the shader reads as unknown.
+    /// Written inside the water's screen rectangle alone; a texel outside it holds what an earlier
+    /// frame wrote there. The placeholder is one texel, which the shader reads as unknown.
     pub scene_depth: Handle<Image>,
     /// The sky floor's occlusion over the mirror planes and the occluder's colour, a quarter of the
     /// view's resolution. The placeholders read as the sky open, the verdict unknown and no

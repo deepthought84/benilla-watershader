@@ -101,9 +101,8 @@ fn cs_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
     var far = 1.0;
     if (hi.x - lo.x <= 2u && hi.y - lo.y <= 2u) {
         // **Nine independent loads, not a loop**: a loop with data-dependent bounds serialises its
-        // loads (+0.17 ms of GPU at Mirror Lake, measured on the fragment seed). A clamped 3x3
-        // covers the footprint; a texel read twice is harmless to a max, a min, or a store of the
-        // same value.
+        // loads. A clamped 3x3 covers the footprint; a texel read twice is harmless to a max, a
+        // min, or a store of the same value.
         let x1 = min(lo.x + 1u, hi.x);
         let x2 = min(lo.x + 2u, hi.x);
         let y1 = min(lo.y + 1u, hi.y);

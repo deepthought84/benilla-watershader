@@ -509,7 +509,9 @@ impl PlanarMap {
         })
     }
 
-    /// The cell holding WoW `(x, y)`, if the map holds water there.
+    /// The record for the cell holding WoW `(x, y)`: its own, or in a uniform chunk the chunk's,
+    /// dry cells included (the bank inside a watery chunk answers the water's record). `None`
+    /// where the map holds no water anywhere in the cell's 8x8 chunk.
     pub fn cell(&self, x: f32, y: f32) -> Option<CellWater> {
         let (ck, slot) = chunk_of(key_of([x, y], self.cell));
         match self.chunks.get(&ck)? {

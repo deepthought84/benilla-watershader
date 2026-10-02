@@ -111,10 +111,10 @@ impl WaterHizConsumers {
     pub(crate) const SSR: u32 = 1 << 0;
     /// The sky floor's occlusion march (`liquid.wgsl`'s `floor_march`).
     pub(crate) const FLOOR_OCCLUSION: u32 = 1 << 1;
-    /// The sun's and moon's per-pixel visibility for the glint; no reader sets it yet.
+    /// The sun's and moon's per-pixel visibility for the glint; no system sets it.
     #[allow(dead_code)]
     pub(crate) const SUN_VISIBILITY: u32 = 1 << 2;
-    /// The body's sky-visibility rays; no reader sets it yet.
+    /// The body's sky-visibility rays; no system sets it.
     #[allow(dead_code)]
     pub(crate) const BODY_VISIBILITY: u32 = 1 << 3;
 
@@ -380,8 +380,8 @@ impl HizPipelines {
 }
 
 /// Render world: the views and bind groups the pyramid's passes bind, built for the textures and
-/// the buffer they bind and kept until one of them changes (a resize, an MSAA switch, a new
-/// parameters buffer), so a steady frame creates none.
+/// the buffer they bind and kept until one of them changes (a resize, a new parameters buffer), so
+/// a steady frame creates none.
 #[derive(Resource, Default)]
 struct HizBindings {
     /// The two pyramids' textures [`Self::levels`] and [`Self::reduce`] were built for.
@@ -1012,13 +1012,12 @@ mod tests {
         }
     }
 
-    /// The integer footprint is the one the fragment seed it replaced computed, `seed_rect`, in
-    /// exact arithmetic: `lo = floor(d·src/dst)`, `hi = ceil((d+1)·src/dst) − 1`, clamped to the
-    /// view. That seed took its texel size from the derivative of an interpolated UV, and a UV an
-    /// ulp off flipped a boundary that falls exactly on a view texel edge; those texels are counted
-    /// here, and they are where a pyramid built by the two seeds can differ.
+    /// The integer footprint is the exact one, checked in `f64`, exact at these sizes:
+    /// `lo = floor(d·src/dst)` and `hi = ceil((d+1)·src/dst) − 1`, clamped to the view. The texels
+    /// whose footprint edge falls exactly on a view texel edge are counted: there a footprint
+    /// derived in floats could round either way.
     #[test]
-    fn the_seed_footprint_is_the_fragment_seeds() {
+    fn the_seed_footprint_is_exact() {
         let mut on_edge = 0u64;
         let mut texels = 0u64;
         for (src, dst) in sizes() {
@@ -1039,7 +1038,7 @@ mod tests {
         }
         eprintln!(
             "{on_edge} of {texels} pyramid texels have a footprint edge exactly on a view texel \
-             edge, where the fragment seed's interpolated UV could round either way"
+             edge, where a footprint derived in floats could round either way"
         );
     }
 

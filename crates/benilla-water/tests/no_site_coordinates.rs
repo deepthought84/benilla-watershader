@@ -3,6 +3,12 @@
 //! a literal position into the crate's `src/` or into `liquid.wgsl`, the water's shader in
 //! `benilla-assets`: three numbers, or a horizontal pair. Test modules may name places and are not
 //! scanned. A lone number, such as a site's height, cannot be told from a constant and passes.
+//!
+//! The rule reads shape, not meaning. Any pair of place-sized floats in a vector or an array reads
+//! as a position, a size or a fade range packed as `vec2(100.0, 400.0)` or `[512.0, 512.0]` too:
+//! pass such a range as a function's two arguments. A pair returned as a tuple or built with
+//! `array<f32, 2>(…)`, a pair with an expression in it, and a triple with fewer than two
+//! place-sized literals are not read as positions.
 
 use std::path::{Path, PathBuf};
 

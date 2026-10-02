@@ -1158,7 +1158,7 @@ pub(super) fn drive_reflection(
     data.0[36..40].copy_from_slice(&box_min);
     data.0[40..44].copy_from_slice(&box_max);
     let eye_at = world_cam.single().map(|(eye, _, _)| eye.translation()).ok();
-    // x = how much ripple the CUBE lookup sees.
+    // x = how much ripple the CUBE lookup sees, which `liquid.wgsl` does not read.
     data.0[44..48].copy_from_slice(&[
         super::probe::probe_normal(),
         // y = which slot the lat-long debug unwraps.

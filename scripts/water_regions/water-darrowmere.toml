@@ -1,6 +1,6 @@
 # wg-darrowmere: Darrowmere Lake under the Plaguelands' red fog; a near doodad crosses the left
 # third. The far water fades into the fog over y 462-480 (steepest between rows 474 and 475,
-# x 800-1200).
+# x 800-1200). Flake: a speck of terrain at x463-488 y797-822 lands in one of two states.
 scene = "water-darrowmere"
 [box]
 water = [800, 600, 1600, 900]

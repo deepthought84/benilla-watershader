@@ -12,8 +12,10 @@
 //! other frame none.
 //!
 //! [`WaterScreenRect`] is the world view's rectangle around every visible water surface, grown by
-//! a margin: what only the water reads (the linear depth) is written inside it alone, and a frame
-//! with no water on screen runs none of the water's passes.
+//! a margin: what only the water reads (the linear depth) is written inside it alone, and the
+//! passes over the world view's frame (the depth pyramid, the snapshot, the sky cube and the floor
+//! occlusion) skip a frame with no water on screen. The mirror cameras and the probe's faces are
+//! views of their own and render whether or not it is visible.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -222,7 +224,8 @@ fn water_screen_rect(
     let found = cameras.single().ok().and_then(|(camera, eye)| {
         let size = camera.physical_target_size()?;
         let clip_from_view = camera.clip_from_view();
-        // Bevy's infinite reverse-Z keeps the near plane in `w_axis.z`, whatever built the matrix.
+        // Bevy's infinite reverse-Z perspective, the world camera's, keeps the near plane in
+        // `w_axis.z`.
         let near = clip_from_view.w_axis.z;
         let clip_from_world = clip_from_view * eye.to_matrix().inverse();
         let water: Vec<_> = surfaces

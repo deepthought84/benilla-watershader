@@ -164,7 +164,7 @@ struct OcclParams {
     /// The first texel of the dispatch and the end of its range (exclusive).
     tile_origin: UVec2,
     tile_end: UVec2,
-    /// The lighting sun's travel direction; unread until the body's sun visibility is traced.
+    /// The lighting sun's travel direction; written 0 and read by no entry point.
     sun_travel: Vec4,
 }
 

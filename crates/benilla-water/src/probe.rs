@@ -83,7 +83,8 @@ use benilla_world::liquid::{ProbeCull, ProbeFace, ProbeMark, ProbeMarks};
 /// what the capture point cannot see, and the higher it stands, the more the two views differ.
 const PROBE_LIFT: f32 = 4.0;
 
-/// How much of the ripple the cube lookup sees.
+/// How much of the ripple the cube lookup sees: `probe_extra.x`, which `liquid.wgsl` does not
+/// read.
 pub(crate) fn probe_normal() -> f32 {
     0.15
 }
@@ -1649,8 +1650,9 @@ pub(crate) fn probe_taps() -> f32 {
     3.0
 }
 
-/// Which slot the lat-long debug view (`$WOW_PROBE_CUBE`) unwraps: the captured slot nearest the
-/// eye, so it shows the cube of the spot being looked at; 0 while no slot holds a cube.
+/// Which slot the lat-long debug view (`$WOW_PROBE_CUBE`) unwraps: the captured slot whose capture
+/// point is nearest the eye, which need not be a probe the water under the eye reads (the overlay
+/// shows those, [`blend_shares`]); 0 while no slot holds a cube.
 pub(crate) fn probe_debug_slot(probe: Option<&WaterProbe>, eye: Option<Vec3>) -> f32 {
     let (Some(probe), Some(eye)) = (probe, eye) else {
         return 0.0;

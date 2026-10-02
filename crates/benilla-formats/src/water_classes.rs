@@ -46,7 +46,9 @@ pub trait WaterClasses: Send + Sync + 'static {
     /// Per cell of `lq`, its answer; [`CellWater::DRY`] where there is none.
     fn cells(&self, lq: &LiquidMesh) -> Vec<CellWater>;
 
-    /// The answer for the cell holding WoW `(x, y)`, `None` where the classification has no water.
+    /// The answer for the cell holding WoW `(x, y)`, `None` where the classification holds no
+    /// record for it. A dry cell can answer a wet record: a chunk classified whole gives every
+    /// cell in it that chunk's answer.
     fn cell(&self, x: f32, y: f32) -> Option<CellWater>;
 
     /// The mirrors' weight at a lattice corner, 1 with no water there.

@@ -954,7 +954,7 @@ pub(super) const RIPPLE_SEED: u32 = 0xB0A7_5EA5;
 
 /// The stylised look's one ripple map, shared by every liquid material: the handle a change to
 /// the image after setup goes through (its sampler; [`ripple::ripple_map`] keeps the CPU copy that
-/// needs). Its [`ripple::RippleStats`] are a resource beside it.
+/// a re-upload requires). Its [`ripple::RippleStats`] are a resource beside it.
 #[derive(Resource, Clone)]
 pub struct RippleMap {
     pub image: Handle<Image>,

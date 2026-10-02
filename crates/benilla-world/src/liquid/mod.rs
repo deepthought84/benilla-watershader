@@ -59,11 +59,11 @@ pub use hooks::{
 /// keeps the zone's colours, depth and lighting and changes only what is done with them, so it
 /// follows the world's day/night and its zones exactly as the faithful path does.
 ///
-/// The switch is a **uniform write**, not a rebuild: [`surface::apply_water_style`] rewrites
-/// `path.y` (and `path.w`, [`WaterPipelineCaps::bits`]) on the handful of shared liquid materials
-/// when this resource changes, so a player flipping the checkbox pays one uniform upload and no
-/// reload. The lanes are the materials' pipeline key (`LiquidKey`), so the flip also moves them onto
-/// the other lane's pipelines.
+/// The switch rewrites lanes and reloads nothing: [`surface::apply_water_style`] rewrites `path.y`
+/// (and `path.w`, [`WaterPipelineCaps::bits`]) on the handful of shared liquid materials when this
+/// resource changes. The lanes are the materials' pipeline key (`LiquidKey`), so a flip moves every
+/// liquid onto the other lane's pipelines; the world camera's view key stays the same on both
+/// lanes (`benilla_water::depth`).
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaterStyle {
     /// The 1.12 client's water, which is what the rest of this subsystem implements.
@@ -127,8 +127,9 @@ impl WaterStyle {
 
 /// **How much Improved Water spends** — the `waterQuality` CVar's knob, benilla's own like
 /// [`WaterStyle`]: the reference has one water and no quality dial for it. It reaches the stylised
-/// pipelines as their key's tier (`LiquidKey::tier`, one `WATER_TIER_*` def each), so a switch moves
-/// the materials onto another warmed pipeline; the reference lane, magma and slime never read it.
+/// pipelines as their key's tier (`LiquidKey::tier`, one `WATER_TIER_*` def each), so a switch
+/// moves the materials onto that tier's pipeline, one of the keys the pipeline warm pass compiles
+/// (`LiquidKey::shipped`); the reference lane, magma and slime never read it.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WaterQuality {
     Low,
@@ -288,8 +289,8 @@ impl Plugin for LiquidPlugin {
                         .after(crate::wmo_portal::WmoPvsSet)
                         .in_set(SubmersionVerdict),
                     // The look toggle and the pipeline variants: change-gated, so the steady state
-                    // schedules nothing and a flip touches the shared materials once. It runs on the
-                    // frame the CVar lands and on the first frame after startup, which is what
+                    // schedules nothing and a flip touches the shared materials once. It runs on
+                    // the frame the CVar lands and on the first frame after startup, which is what
                     // carries a persisted `waterStyle` from `config.toml` onto materials built
                     // before it was read.
                     surface::apply_water_style.run_if(

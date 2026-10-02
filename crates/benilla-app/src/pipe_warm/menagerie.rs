@@ -650,7 +650,7 @@ fn far_twins_of(
 }
 
 /// A sky/water lane rig on the world camera and on the warm mirror, which disagree on
-/// `DEPTH_PREPASS` and so need a pipeline each.
+/// `MULTISAMPLED` with MSAA on and so need a pipeline each; with MSAA off their keys are one.
 fn spawn_lane_rig_both<M: Material>(
     commands: &mut Commands,
     cam: Entity,
@@ -681,8 +681,8 @@ fn lane_handles<M: Material>(assets: &mut Assets<M>) -> Vec<Handle<M>> {
 }
 
 /// The warm mirror: a camera with the stylised water's mirrored view key
-/// (`benilla_world::liquid::mirror_view_shape`, no `DepthPrepass`), so the mirror's pipelines compile
-/// under the entry cover. The target size keys no pipeline; its format does.
+/// (`benilla_world::liquid::mirror_view_shape`, never multisampled), so the mirror's pipelines
+/// compile under the entry cover. The target size keys no pipeline; its format does.
 pub(super) fn spawn_warm_mirror(
     commands: &mut Commands,
     images: &mut Assets<Image>,
@@ -995,8 +995,9 @@ mod tests {
         // Lanes that never need the menagerie:
         // - TerrainMaterial / WdlMaterial: always drawn under the entry cover, no variant axis.
         // - AddUiMaterial: glue screens only, and every pre-world frame counts as covered.
-        //   The mirror's terrain and horizon twins (no `DEPTH_PREPASS`) are not warmed: that
-        //   needs a real terrain mesh and splat material, not a stand-in on another layout.
+        //   With MSAA on, the mirror's terrain and horizon twins (not `MULTISAMPLED`) are not
+        //   warmed: that needs a real terrain mesh and splat material, not a stand-in on another
+        //   layout.
         let families: [(&str, &[&str]); 3] = [
             ("MaterialPlugin::<", &["TerrainMaterial", "WdlMaterial"]),
             ("Material2dPlugin::<", &[]),
