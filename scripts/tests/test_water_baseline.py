@@ -29,6 +29,10 @@ box = "water"
 [[row]]
 metric = "shimmer"
 box = "water"
+[[row]]
+metric = "pop"
+box = "water"
+gate = false
 """
 
 
@@ -144,6 +148,8 @@ class Table(unittest.TestCase):
             self.assertEqual((perf["vram_mib"], perf["gtt_mib"]), (2.0, 1.0))
             md = (d / "out" / "table.md").read_text()
             self.assertIn("| shimmer | shimmer |", md)
+            self.assertIn("| lum_vs_ref | lum_vs_ref | 2 | min 1 pass |", md)
+            self.assertRegex(md, r"\| pop \| pop \| \S+ \|  info \|")
             self.assertIn("(burst) |", md)
             self.assertIn("| stills/wg-t | 7.5 |", md)
 

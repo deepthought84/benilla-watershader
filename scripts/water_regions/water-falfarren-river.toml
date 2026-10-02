@@ -18,16 +18,21 @@ box = "water"
 metric = "lum_vs_ref"
 box = "water"
 [[row]]
-metric = "view_std"
-label = "water_std"
+metric = "frame_std"
+label = "water_frame_std"
 box = "water_wide"
 [[row]]
-metric = "view_std"
-label = "bank_edge_std"
+metric = "frame_std"
+label = "bank_edge_frame_std"
 box = "bank_edge"
 [[row]]
 metric = "shimmer"
 box = "water_wide"
+# The shipped frame's shimmer along the far bank, under the canopy's edge.
+[[row]]
+metric = "shimmer"
+label = "bank_edge_shimmer"
+box = "bank_edge"
 [[row]]
 metric = "pulse"
 box = "water_wide"

@@ -36,9 +36,11 @@ never install data. Its first comment names what the scene shows and its flake b
     ...                          # the row's other parameters; max/min/near override its gate
 
 A row passes against an absolute gate (the catalogue's, or the region row's `max`, `min`, or
-`near = [target, tolerance]`) and, with --baseline, against the same row of the baseline run in the
+`near = [target, tolerance]`; `require = { <number> = { min = v } }` gates a supporting number the
+row reports the same way) and, with --baseline, against the same row of the baseline run in the
 row's better direction (captures are hermetic, so no tolerance unless the row names one: `slack`
-in value units, `factor` as a fraction of the baseline).
+in value units, `factor` as a fraction of the baseline). A region row with `gate = false` is
+informational: it reports its number with no absolute gate and no verdict against a baseline.
 """
 
 from __future__ import annotations
@@ -557,16 +559,19 @@ def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0):
     return {"value": float(leak.mean()), "strip": int(strip.sum())}
 
 
-def roughness_profile(view, box, channel=0):
+def roughness_profile(view, box, channel=0, rising=None):
     """A WATER_VIEW channel's row-mean profile from near (bottom) to far (top): its largest
-    adjacent step in codes, and the share of steps that follow the profile's overall direction."""
+    adjacent step in codes; `monotone`, the share of the steps over half a code that go the
+    profile's way (up toward the far rows with `rising`, down with `rising = false`, else its
+    overall direction); `back`, the largest step against that way, in codes."""
     c = crop(view, box)[..., channel].astype(np.float64)
     p = c.mean(axis=1)[::-1]
     d = np.diff(p)
-    sign = np.sign(p[-1] - p[0]) or 1.0
+    sign = (np.sign(p[-1] - p[0]) or 1.0) if rising is None else (1.0 if rising else -1.0)
     moving = np.abs(d) > 0.5
     mono = float((np.sign(d[moving]) == sign).mean()) if moving.any() else 1.0
-    return {"value": float(np.abs(d).max()) if len(d) else 0.0, "monotone": mono}
+    back = float(max(0.0, (-sign * d).max())) if len(d) else 0.0
+    return {"value": float(np.abs(d).max()) if len(d) else 0.0, "monotone": mono, "back": back}
 
 
 def floor_ncc(img, other, box, r=8):
@@ -727,13 +732,21 @@ def luma_p5(img, box):
     return {"value": float(np.percentile(crop(luma(img), box), 5))}
 
 
-def view_std(frames, channel=None):
-    """Per-pixel temporal std over a static burst, in 8-bit codes, box mean (and p99): of a
-    WATER_VIEW channel, or of luma when `channel` is None. A still scene scores 0."""
-    a = np.stack([luma(f) if channel is None else f[..., channel] for f in frames])
-    a = a.astype(np.float64)
-    sd = a.std(axis=0)
-    return {"value": float(sd.mean()), "p99": float(np.percentile(sd, 99))}
+def frame_std(frames):
+    """Per-pixel temporal std of the shipped frame's luma over a static burst, in 8-bit codes, box
+    mean (and p99). A still scene scores 0."""
+    sd = np.stack([luma(f) for f in frames]).astype(np.float64).std(axis=0)
+    return {"value": float(sd.mean()), "p99": float(np.percentile(sd, 99)), "basis": "frame luma"}
+
+
+def view_std(frames, view, channel=0):
+    """Per-pixel temporal std of a WATER_VIEW channel (0-2, r-b) over a static burst of that view,
+    in 8-bit codes, box mean (and p99); `basis` names the view and the channel, so against a
+    baseline row of another view or of the shipped frame it reads not comparable. A still view
+    scores 0."""
+    sd = np.stack([f[..., channel] for f in frames]).astype(np.float64).std(axis=0)
+    return {"value": float(sd.mean()), "p99": float(np.percentile(sd, 99)),
+            "basis": f"view {view} {'rgb'[channel]}"}
 
 
 def project(point, eye, look, size, fovy_deg=CAM_FOVY_DEG):
@@ -789,8 +802,9 @@ def halo_count(img, box, thr=12.0):
 #   ("still", arg[, required])     the lane's still; optional (False) is skipped when absent or
 #                                  when the region row sets `arg = false`
 #   ("ref", "ref")                 the Reference twin
-#   ("burst", mode)                the lane's burst, or a view's (row parameter `view`), cropped
-#                                  to `box` as luma ("luma") or RGB ("rgb"), or whole ("full")
+#   ("burst", mode[, "view"])      the lane's burst, or a view's (row parameter `view`), cropped
+#                                  to `box` as luma ("luma") or RGB ("rgb"), or whole ("full");
+#                                  with "view" the row must name its view, passed as `view`
 #   ("times",) / ("poses",)        the burst's clock (the log, else `every` steps of 1/60 s) / poses
 #   ("view", arg, view, required)  a WATER_VIEW capture; a row parameter `arg` names another view
 #   ("variant", arg, variant)      an A/B capture <scene>~<variant>.png
@@ -879,14 +893,17 @@ ROWS: dict[str, Row] = {
     "horizon_step": Row(horizon_step, STILL, "lower", {"max": 3.0}),
     "luma_sd": Row(luma_sd, STILL, "higher"),
     "luma_p5": Row(luma_p5, STILL, None),
-    "view_std": Row(view_std, [("burst", "rgb")], "lower"),
+    "frame_std": Row(frame_std, [("burst", "rgb")], "lower"),
+    "view_std": Row(view_std, [("burst", "rgb", "view")], "lower"),
     "pan_luma_std": Row(pan_luma_std, [("burst", "full"), ("poses",)], "lower"),
     "halo_count": Row(halo_count, STILL, "lower"),
 }
 
 
-def judge(value, gate: dict | None) -> bool | None:
-    """An absolute gate: {"max": v}, {"min": v} or {"near": [target, tol]}; None without one."""
+def judge(value, gate: dict | None, numbers: dict | None = None) -> bool | None:
+    """An absolute gate: {"max": v}, {"min": v} or {"near": [target, tol]} on the value, and
+    {"<number>": {...}} the same on a supporting number of the row (`numbers`), which fails when
+    the row does not report it; None without a gate or a value."""
     if not gate or value is None:
         return None
     if "max" in gate and not value <= gate["max"]:
@@ -895,7 +912,19 @@ def judge(value, gate: dict | None) -> bool | None:
         return False
     if "near" in gate and not abs(value - gate["near"][0]) <= gate["near"][1]:
         return False
+    for key, sub in gate.items():
+        if isinstance(sub, dict):
+            v = (numbers or {}).get(key)
+            if v is None or judge(v, sub) is False:
+                return False
     return True
+
+
+def gate_text(gate: dict) -> str:
+    """A gate as the report prints it: "max 10.8 monotone min 1"."""
+    return " ".join(
+        f"{k} {gate_text(v)}" if isinstance(v, dict) else f"{k} {fmt(v)}" for k, v in gate.items()
+    )
 
 
 def against(value, base, row: Row, slack=None, factor=None) -> bool | None:
@@ -967,7 +996,8 @@ class Scene:
 BOX_PARAMS = {"box", "object", "sky", "object_refl", "sky_refl", "water", "bank", "deck", "band",
               "water_shade", "water_lit", "bank_shade", "bank_lit", "num", "den"}
 # Region-row keys that are not the function's parameters.
-META = {"metric", "label", "max", "min", "near", "slack", "factor", "lane", "gate", "every"}
+META = {"metric", "label", "max", "min", "near", "require", "slack", "factor", "lane", "gate",
+        "every"}
 
 
 def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
@@ -1002,6 +1032,10 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
                 missing.append(f"{scene.name}-ref.png")
         elif kind == "burst":
             view = params.pop("view", None)
+            if need[2:] == ("view",):
+                if view is None:
+                    raise ValueError(f"{name} reads a WATER_VIEW burst: the row names its `view`")
+                args["view"] = view
             sfx = f"{base}@{view}" if view else base
             shots = scene.burst_paths(sfx)
             if len(shots) < 2:
@@ -1089,11 +1123,12 @@ def measure(directory: pathlib.Path, regions_dir: pathlib.Path, scenes: list[str
             gate = {k: spec[k] for k in ("max", "min", "near") if k in spec}
             if spec.get("gate") is False or res.get("gated") is False:
                 gate = {}
-            elif not gate:
-                gate = ROWS[spec["metric"]].gate or {}
+                res["gated"] = False
+            else:
+                gate = (gate or dict(ROWS[spec["metric"]].gate or {})) | spec.get("require", {})
             res.update(metric=spec["metric"], gate=gate)
             res.update(slack=spec.get("slack"), factor=spec.get("factor"))
-            res["pass"] = judge(res.get("value"), gate)
+            res["pass"] = judge(res.get("value"), gate, res)
             rows[label] = res
         results[f"{scene.name}{lane}"] = rows
     return results
@@ -1136,7 +1171,9 @@ def report(results: dict, baseline: dict | None) -> int:
                 f"{k} {fmt(v)}" for k, v in r.items() if k not in SHOWN and v is not None
             )
             verdict = {True: "PASS", False: "FAIL", None: "-"}[r["pass"]]
-            gate = " ".join(f"{k} {fmt(v)}" for k, v in r["gate"].items())
+            if r.get("gated") is False:
+                verdict = "info"
+            gate = gate_text(r["gate"])
             base = ""
             if baseline is not None:
                 br = baseline.get(scene, {}).get(label, {})

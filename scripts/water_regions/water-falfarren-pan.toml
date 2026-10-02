@@ -1,11 +1,15 @@
-# The yaw and pitch pan at wg-falfarren (20° and 10° either side over the burst); pan_luma_std
-# reads the in-scatter view's world-anchored box once that view exists.
+# The yaw and pitch pan at wg-falfarren (20° and 10° either side over the burst).
+# Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
+# rows measure the image's motion as much as the water's; pan_luma_std, a world-anchored box
+# reprojected per shot, gates a pan once the in-scatter view exists.
 scene = "water-falfarren-pan"
 [box]
 water = [600, 650, 1500, 880]
 [[row]]
 metric = "shimmer"
 box = "water"
+gate = false
 [[row]]
 metric = "pop"
 box = "water"
+gate = false

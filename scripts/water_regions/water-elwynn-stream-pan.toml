@@ -1,10 +1,15 @@
 # The pan burst at wg-elwynn-stream: water-noon's camera swept 20° either side over the burst.
+# Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
+# rows measure the image's motion as much as the water's; pan_luma_std, a world-anchored box
+# reprojected per shot, gates a pan once the in-scatter view exists.
 scene = "water-elwynn-stream-pan"
 [box]
 water = [300, 520, 1300, 850]
 [[row]]
 metric = "shimmer"
 box = "water"
+gate = false
 [[row]]
 metric = "pop"
 box = "water"
+gate = false

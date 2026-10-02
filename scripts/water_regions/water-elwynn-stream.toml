@@ -11,16 +11,21 @@ box = "water"
 metric = "lum_vs_ref"
 box = "water"
 [[row]]
-metric = "view_std"
-label = "water_std"
+metric = "frame_std"
+label = "water_frame_std"
 box = "water"
 [[row]]
-metric = "view_std"
-label = "canopy_edge_std"
+metric = "frame_std"
+label = "canopy_edge_frame_std"
 box = "far_edge"
 [[row]]
 metric = "shimmer"
 box = "water"
+# The shipped frame's shimmer at the canopy's edge, over the far water the floor occlusion covers.
+[[row]]
+metric = "shimmer"
+label = "canopy_edge_shimmer"
+box = "far_edge"
 [[row]]
 metric = "pop"
 box = "water"

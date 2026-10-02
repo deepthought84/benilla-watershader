@@ -50,12 +50,12 @@ box = "water"
 metric = "far_band_std"
 box = "far_band"
 [[row]]
-metric = "view_std"
-label = "far_std"
+metric = "frame_std"
+label = "far_frame_std"
 box = "far_band"
 [[row]]
-metric = "view_std"
-label = "water_std"
+metric = "frame_std"
+label = "water_frame_std"
 box = "water"
 [[row]]
 metric = "shimmer"
@@ -67,23 +67,30 @@ box = "water"
 metric = "luma_sd"
 label = "far_detail"
 box = "far_band"
-# The roughness rises toward the far shore with no step over 2% of the unresolved surface's alpha
-# (0.02 * 0.1037 / (0.1037 - 0.0548) of the view's 255 codes).
+# The roughness rises toward the far shore, no step against the rise over half a code (phase1.md
+# P1-17: non-decreasing toward the horizon), with no step over 2% of the unresolved surface's
+# alpha (0.02 * 0.1037 / (0.1037 - 0.0548) of the view's 255 codes).
 [[row]]
 metric = "roughness_profile"
 label = "rough_a"
 box = "rough_a"
 max = 10.8
+rising = true
+require = { monotone = { min = 1.0 } }
 [[row]]
 metric = "roughness_profile"
 label = "rough_b"
 box = "rough_b"
 max = 10.8
+rising = true
+require = { monotone = { min = 1.0 } }
 [[row]]
 metric = "roughness_profile"
 label = "rough_c"
 box = "rough_c"
 max = 10.8
+rising = true
+require = { monotone = { min = 1.0 } }
 # Still water: the roughness is the footprint's alone, so a static burst holds it exactly.
 [[row]]
 metric = "view_std"

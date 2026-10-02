@@ -32,7 +32,8 @@ box = "wall"
 [[row]]
 metric = "lum_vs_ref"
 box = "water"
-# The roughness rises to the far clip with no step over 2% of the unresolved surface's alpha.
+# The roughness rises to the far clip with no step over 2% of the unresolved surface's alpha. The
+# rise itself (monotone, back) is reported, not gated: phase1.md gates it at Baradin only.
 [[row]]
 metric = "roughness_profile"
 label = "rough_a"

@@ -281,7 +281,7 @@ def ins4(directory: pathlib.Path) -> dict:
 
 
 def fmt(v) -> str:
-    return "n/a" if v is None else (f"{v:.4g}" if isinstance(v, float) else str(v))
+    return "n/a" if v is None else (f"{v:.4g}" if isinstance(v, (float, np.floating)) else str(v))
 
 
 def markdown(directory: pathlib.Path, merged: dict, perf: dict) -> str:
@@ -296,8 +296,10 @@ def markdown(directory: pathlib.Path, merged: dict, perf: dict) -> str:
                 if k not in wm.SHOWN | {"source"} and v is not None
             )
             why = r.get("error") or ("needs " + ", ".join(r["missing"]) if r.get("missing") else "")
-            gate = " ".join(f"{k} {v}" for k, v in (r.get("gate") or {}).items())
+            gate = wm.gate_text(r.get("gate") or {})
             verdict = {True: "pass", False: "FAIL", None: "-"}[r.get("pass")]
+            if r.get("gated") is False:
+                verdict = "info"
             burst = " (burst)" if r.get("source") == "bursts" else ""
             md.append(f"| {label} | {r.get('metric')} | {fmt(r.get('value'))} | {gate} {verdict} | "
                       f"{extra}{why}{burst} |")

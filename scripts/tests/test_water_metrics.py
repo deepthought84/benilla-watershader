@@ -336,10 +336,31 @@ class Bursts(unittest.TestCase):
     def test_a_static_burst_scores_view_std_zero(self):
         f = noisy([70, 100, 120])
         frames = [f.copy() for _ in range(8)]
-        self.assertEqual(wm.view_std(frames)["value"], 0.0)
-        self.assertEqual(wm.view_std(frames, channel=1)["value"], 0.0)
+        self.assertEqual(wm.frame_std(frames)["value"], 0.0)
+        self.assertEqual(wm.view_std(frames, "foam", channel=1)["value"], 0.0)
         moving = [noisy([70, 100, 120], seed=i) for i in range(8)]
-        self.assertGreater(wm.view_std(moving)["value"], 1.0)
+        self.assertGreater(wm.frame_std(moving)["value"], 1.0)
+        self.assertGreater(wm.view_std(moving, "foam", channel=1)["value"], 1.0)
+
+    def test_view_std_names_its_view_and_frame_std_the_shipped_frame(self):
+        frames = [noisy([70, 100, 120], seed=i) for i in range(4)]
+        self.assertEqual(wm.frame_std(frames)["basis"], "frame luma")
+        self.assertEqual(wm.view_std(frames, "floor_occ", channel=1)["basis"], "view floor_occ g")
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-std.toml").write_text(
+                '[[row]]\nmetric = "view_std"\nbox = [0, 0, 40, 40]\n'
+                '[[row]]\nmetric = "view_std"\nlabel = "occ"\nbox = [0, 0, 40, 40]\n'
+                'view = "floor_occ"\nchannel = 1\n'
+            )
+            for i, f in enumerate(frames):
+                save(f, d / f"wg-std-{i:03d}.png")
+                save(f, d / f"wg-std@floor_occ-{i:03d}.png")
+            res = wm.measure(d, d, ["wg-std"])["wg-std"]
+            self.assertIsNone(res["view_std"]["value"])  # no view named: not the shipped frame
+            self.assertIn("names its `view`", res["view_std"]["error"])
+            self.assertGreater(res["occ"]["value"], 1.0)
+            self.assertEqual(res["occ"]["basis"], "view floor_occ g")
 
     def test_far_band_std_is_normalised_by_the_fog(self):
         L = [np.full((10, 10), v, dtype=np.float32) for v in (10.0, 12.0)]
@@ -435,6 +456,68 @@ class Baselines(unittest.TestCase):
             self.assertIn(" ok", out)
 
 
+    def test_an_informational_row_has_no_gate_and_no_baseline_verdict(self):
+        # A fixed box over a sweeping camera: the region row says gate = false.
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-pan.toml").write_text(
+                '[[row]]\nmetric = "shimmer"\n' + self.box + "gate = false\n"
+                '[[row]]\nmetric = "pop"\n' + self.box
+            )
+            for i in range(4):
+                save(noisy([90, 110, 120], seed=i), d / f"wg-pan-{i:03d}.png")
+            self.assertEqual(self.metrics(d)[0], 0)
+            base = json.loads((d / "base.json").read_text())["wg-pan"]
+            self.assertIs(base["shimmer"]["gated"], False)
+            self.assertNotIn("gated", base["pop"])
+            for i in range(4):  # louder: worse on both rows
+                save(noisy([90, 110, 120], sd=12.0, seed=i), d / f"wg-pan-{i:03d}.png")
+            rc, out = self.metrics(d, baseline=True)
+            self.assertEqual(rc, 1, out)
+            self.assertRegex(out, r"shimmer +\S+ +info .* -  ")
+            self.assertRegex(out, r"pop +\S+ +- .* WORSE")
+
+
+class Profiles(unittest.TestCase):
+    def test_roughness_rising_toward_the_far_rows_is_monotone(self):
+        view = np.zeros((100, 4, 3), dtype=np.float32)
+        view[..., 0] = np.linspace(250, 10, 100)[:, None]  # far (top) rough, near (bottom) calm
+        r = wm.roughness_profile(view, [0, 0, 4, 100], rising=True)
+        self.assertEqual((r["monotone"], r["back"]), (1.0, 0.0))
+        self.assertTrue(wm.judge(r["value"], {"max": 10.8, "monotone": {"min": 1.0}}, r))
+        view[40:45, :, 0] -= 6  # a dip: a step back toward the camera
+        r = wm.roughness_profile(view, [0, 0, 4, 100], rising=True)
+        self.assertLess(r["monotone"], 1.0)
+        self.assertAlmostEqual(r["back"], 6.0 - 240 / 99, places=4)
+        self.assertTrue(wm.judge(r["value"], {"max": 10.8}, r))  # the step gate alone passes it
+        self.assertFalse(wm.judge(r["value"], {"max": 10.8, "monotone": {"min": 1.0}}, r))
+        # A profile falling toward the far rows is monotone its own way, not the required one.
+        view[..., 0] = np.linspace(10, 250, 100)[:, None]
+        self.assertEqual(wm.roughness_profile(view, [0, 0, 4, 100])["monotone"], 1.0)
+        self.assertEqual(wm.roughness_profile(view, [0, 0, 4, 100], rising=True)["monotone"], 0.0)
+
+    def test_a_required_number_gates_the_row_from_its_region_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-r.toml").write_text(
+                '[[row]]\nmetric = "roughness_profile"\nbox = [0, 0, 4, 100]\nmax = 10.8\n'
+                "rising = true\nrequire = { monotone = { min = 1.0 } }\n"
+                '[[row]]\nmetric = "roughness_profile"\nlabel = "free"\nbox = [0, 0, 4, 100]\n'
+                "max = 10.8\n"
+            )
+            view = np.zeros((100, 4, 3), dtype=np.float32)
+            view[..., 0] = np.linspace(250, 10, 100)[:, None]
+            view[40:45, :, 0] -= 6
+            save(view, d / "wg-r@roughness.png")
+            save(view, d / "wg-r.png")
+            res = wm.measure(d, d, ["wg-r"])["wg-r"]
+            gate = res["roughness_profile"]["gate"]
+            self.assertEqual(gate, {"max": 10.8, "monotone": {"min": 1.0}})
+            self.assertFalse(res["roughness_profile"]["pass"])
+            self.assertTrue(res["free"]["pass"])
+            self.assertEqual(wm.gate_text(gate), "max 10.8 monotone min 1")
+
+
 class Scenes(unittest.TestCase):
     """The file naming and the region file, end to end through main()."""
 
@@ -453,7 +536,7 @@ metric = "horizon_ratio"
 water = "water"
 sky = "sky"
 [[row]]
-metric = "view_std"
+metric = "frame_std"
 box = "water"
 [[row]]
 metric = "lum_vs_ref"
@@ -484,7 +567,7 @@ max = 1.0
             self.assertEqual(rc, 0)
             res = json.loads(out.read_text())["wg-test"]
             self.assertAlmostEqual(res["horizon_ratio"]["value"], 0.5)
-            self.assertEqual(res["view_std"]["value"], 0.0)
+            self.assertEqual(res["frame_std"]["value"], 0.0)
             self.assertAlmostEqual(res["lum_vs_ref"]["value"], 2.0, delta=0.02)
             self.assertIsNone(res["band_step"]["value"])
             self.assertIn("wg-test@albedo.png", res["band_step"]["missing"])

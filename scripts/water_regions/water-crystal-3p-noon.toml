@@ -26,8 +26,8 @@ metric = "contact_cov"
 label = "collar_cov"
 box = "near_bank"
 [[row]]
-metric = "view_std"
-label = "water_std"
+metric = "frame_std"
+label = "water_frame_std"
 box = "water"
 [[row]]
 metric = "shimmer"
