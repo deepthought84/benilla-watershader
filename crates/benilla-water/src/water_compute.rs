@@ -464,7 +464,9 @@ pub(super) fn register(app: &mut App) {
             .chain()
             .before(bevy::transform::TransformSystems::Propagate)
             .before(bevy::camera::CameraUpdateSystems)
-            .after(super::probe::drive_probe),
+            .after(super::probe::drive_probe)
+            // Both restamps write the published pass images; one declared order between them.
+            .after(super::hiz::restamp_hiz),
     );
 
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {

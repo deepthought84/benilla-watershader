@@ -252,7 +252,7 @@ fn drive_hiz(
 /// Re-point every liquid material and the published pass images at the pyramid and the linear
 /// depth after a rebuild — change-gated on the handles, so it is a no-op on every frame that is not
 /// a resize.
-fn restamp_hiz(
+pub(super) fn restamp_hiz(
     hiz: Res<WaterHiz>,
     mut materials: ResMut<Assets<benilla_assets::materials::LiquidMaterial>>,
     pass: Option<ResMut<WaterPassImages>>,
