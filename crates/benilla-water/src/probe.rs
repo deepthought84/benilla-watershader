@@ -1937,6 +1937,54 @@ mod tests {
             assert!((got - want).abs() < 1e-6, "shares {shares:?}");
         }
 
+        // A crossfade and a ramp weigh in: a slot's share is its reach times its mix times the
+        // share the cell gives its spot. Spot 0 at reach 1 (0.75), spot 1 at reach 0.5 (0.125).
+        let mut ramping = slots;
+        ramping[1].reach = 0.5;
+        let shares = blend_shares(&ramping, Some(between));
+        for (got, want) in shares.iter().zip([0.75 / 0.875, 0.125 / 0.875, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-6, "reach: shares {shares:?}");
+        }
+        // Spot 0 crossfading between two slots, mix 0.3 and 0.7, the cell all spot 0.
+        let mut fading = [
+            holding(0, Vec3::ZERO),
+            holding(0, Vec3::X),
+            ProbeSlot::default(),
+            ProbeSlot::default(),
+        ];
+        fading[0].mix = 0.3;
+        fading[1].mix = 0.7;
+        let all_0 = CellWater {
+            spots: [0, NO_SPOT],
+            ..CellWater::DRY
+        };
+        let shares = blend_shares(&fading, Some(all_0));
+        for (got, want) in shares.iter().zip([0.3, 0.7, 0.0, 0.0]) {
+            assert!((got - want).abs() < 1e-6, "mix: shares {shares:?}");
+        }
+
+        // Four candidates for three taps: the heaviest left out is the cut each kept slot is
+        // weighed above. Spot 0 at mix 0.6 and 0.4, spot 1 at 0.7 and 0.3, the cell half each:
+        // 0.30, 0.20, 0.35, 0.15, so the cut is 0.15 and the kept excesses 0.15, 0.05, 0.20.
+        let mut four = [
+            holding(0, Vec3::ZERO),
+            holding(0, Vec3::X),
+            holding(1, Vec3::Y),
+            holding(1, Vec3::Z),
+        ];
+        for (s, mix) in four.iter_mut().zip([0.6, 0.4, 0.7, 0.3]) {
+            s.mix = mix;
+        }
+        let half = CellWater {
+            spots: [0, 1],
+            mix: 0.5,
+            ..CellWater::DRY
+        };
+        let shares = blend_shares(&four, Some(half));
+        for (got, want) in shares.iter().zip([0.375, 0.125, 0.5, 0.0]) {
+            assert!((got - want).abs() < 1e-6, "cut: shares {shares:?}");
+        }
+
         // One spot: its probe carries the blend alone, and a slot not captured yet adds nothing.
         let mut pending = slots;
         pending[1].captured = false;

@@ -77,17 +77,22 @@ impl Plugin for ImprovedWaterPlugin {
             publish_pass_images
                 .in_set(WaterPassSet)
                 .after(benilla_assets::AssetSet::Open),
-        )
-        // PreUpdate, so the materials take a changed variant in the same frame's `Update`.
-        .add_systems(
-            PreUpdate,
-            drive_pipeline_caps.run_if(
-                resource_changed::<dev_state::DebugState>
-                    .or(resource_changed::<WaterQuality>)
-                    .or(resource_changed::<look::WaterLook>),
-            ),
         );
+        register_caps(app);
     }
+}
+
+/// [`drive_pipeline_caps`] in `PreUpdate`, so the materials take a changed variant in the same
+/// frame's `Update`, on the frames a switch it reads changed.
+fn register_caps(app: &mut App) {
+    app.add_systems(
+        PreUpdate,
+        drive_pipeline_caps.run_if(
+            resource_changed::<dev_state::DebugState>
+                .or(resource_changed::<WaterQuality>)
+                .or(resource_changed::<look::WaterLook>),
+        ),
+    );
 }
 
 /// Ask the stylised liquid pipelines for the variants this plugin's switches need, the depth
@@ -202,6 +207,44 @@ mod tests {
                 "{quality:?}: the ripple map's anisotropy follows the tier"
             );
         }
+    }
+
+    /// **A `waterQuality` change reaches the key on its frame**, through the plugin's own schedule
+    /// and run condition, which `run_system_once` skips; a frame on which no switch changed leaves
+    /// the caps alone.
+    #[test]
+    fn a_quality_change_reaches_the_caps_through_the_schedule() {
+        use super::WaterQuality::{High, Low, Medium};
+        let mut app = App::new();
+        app.init_resource::<super::dev_state::DebugState>()
+            .init_resource::<super::WaterPipelineCaps>()
+            .init_resource::<super::hiz::WaterHizConsumers>()
+            .init_resource::<super::RippleAniso>()
+            .insert_resource(super::look::WaterLook::default())
+            .insert_resource(Low);
+        super::register_caps(&mut app);
+        let tier = |app: &App| app.world().resource::<super::WaterPipelineCaps>().tier;
+        // Each condition counts changes since it was last evaluated, and `or` evaluates one only
+        // when those before it are false: three frames let each of the three see the state once.
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(tier(&app), Low.tier(), "the boot tier");
+        let set = |app: &mut App, t: u8| {
+            app.world_mut()
+                .resource_mut::<super::WaterPipelineCaps>()
+                .tier = t;
+        };
+        set(&mut app, High.tier());
+        app.update();
+        assert_eq!(
+            tier(&app),
+            High.tier(),
+            "no switch changed, so the caps stand"
+        );
+        app.insert_resource(Medium);
+        app.update();
+        assert_eq!(tier(&app), Medium.tier(), "a new tier reaches the caps");
     }
 
     /// The sky floor's occlusion walks the depth pyramids, so its lane asks for them, beside the

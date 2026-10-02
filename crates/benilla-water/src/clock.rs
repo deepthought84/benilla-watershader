@@ -202,14 +202,19 @@ mod tests {
         );
     }
 
-    /// `liquid.wgsl`'s function `name`, from its `fn` to its closing brace, with every `//`
-    /// comment blanked.
-    fn wgsl_fn(name: &str) -> String {
-        let wgsl: String = include_str!("../../benilla-assets/src/shaders/liquid.wgsl")
+    /// `liquid.wgsl` with every `//` comment blanked, line for line.
+    fn wgsl_code() -> String {
+        include_str!("../../benilla-assets/src/shaders/liquid.wgsl")
             .lines()
             .map(|l| l.find("//").map_or(l, |c| &l[..c]))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+    }
+
+    /// `liquid.wgsl`'s function `name`, from its `fn` to its closing brace, with every `//`
+    /// comment blanked.
+    fn wgsl_fn(name: &str) -> String {
+        let wgsl = wgsl_code();
         let at = wgsl
             .find(&format!("fn {name}("))
             .unwrap_or_else(|| panic!("liquid.wgsl has no `fn {name}`"));
@@ -228,6 +233,21 @@ mod tests {
         panic!("`fn {name}` is not closed");
     }
 
+    /// Each read of `needle` in `code`, as the function it sits in and its line. WGSL functions do
+    /// not nest and every one starts a line, so a read belongs to the last `fn` before it.
+    fn reads<'a>(code: &'a str, needle: &str) -> Vec<(&'a str, &'a str)> {
+        code.match_indices(needle)
+            .filter(|&(at, _)| !code[..at].ends_with("fn "))
+            .map(|(at, _)| {
+                let start = code[..at].rfind("\nfn ").map_or(0, |f| f + 4);
+                let name = &code[start..start + code[start..].find('(').expect("a signature")];
+                let line_start = code[..at].rfind('\n').map_or(0, |n| n + 1);
+                let line_end = at + code[at..].find('\n').unwrap_or(code.len() - at);
+                (name, &code[line_start..line_end])
+            })
+            .collect()
+    }
+
     /// Every `water_reflect.drift[k]` index `body` reads, in order.
     fn drift_reads(body: &str) -> Vec<usize> {
         body.split("water_reflect.drift[")
@@ -240,28 +260,34 @@ mod tests {
             .collect()
     }
 
-    /// **The stylised surface animates on this clock alone.** Its ripple, flow and shore foam read
-    /// the published lanes and never `globals.time`, which wraps at the hour, and each map offset
-    /// is its own drift's lane: the five octaves longest first in `water_surface`, then
-    /// `foam_noise`'s three; the flow restart is `cycle.x` and the swell `cycle.y`.
+    /// **Only the authored sheet runs on the clock that wraps.** In the whole of `liquid.wgsl`,
+    /// `globals.time`, which wraps at 3600 s, is read by `anim_time` alone, and `anim_time` by the
+    /// sheet's flip and scroll and by the magma grade's one line in `fragment`. No other function,
+    /// the stylised lane's included, reads either.
     #[test]
-    fn the_stylised_surface_reads_its_phases_off_this_clock() {
-        for name in [
-            "stylised_water",
-            "water_surface",
-            "ripple_octave",
-            "ripple_octave_flowing",
-            "octave_uv",
-            "foam_noise",
-        ] {
-            let body = wgsl_fn(name);
-            for wrapped in ["anim_time()", "globals.time"] {
-                assert!(
-                    !body.contains(wrapped),
-                    "`{name}` reads `{wrapped}`, which wraps at 3600 s"
-                );
+    fn only_the_authored_sheet_reads_the_wrapped_clock() {
+        let code = wgsl_code();
+        let time: Vec<&str> = reads(&code, "globals.time").iter().map(|r| r.0).collect();
+        assert_eq!(time, ["anim_time"], "`globals.time` readers");
+        let anim = reads(&code, "anim_time()");
+        assert!(!anim.is_empty(), "the sheet no longer reads `anim_time`");
+        for (name, line) in anim {
+            match name {
+                "frame_layer" | "apply_scroll" => {}
+                "fragment" => assert!(
+                    line.contains("stylised_lava("),
+                    "`fragment` reads `anim_time()` outside the magma grade: {line}"
+                ),
+                _ => panic!("`{name}` reads `anim_time()`, which wraps at 3600 s: {line}"),
             }
         }
+    }
+
+    /// **The stylised surface's phases are this clock's lanes**: each map offset is its own
+    /// drift's lane, the five octaves longest first in `water_surface`, then `foam_noise`'s
+    /// three; the flow restart is `cycle.x` and the swell `cycle.y`.
+    #[test]
+    fn the_stylised_surface_reads_its_phases_off_this_clock() {
         let ripples = RIPPLE_DRIFT.len();
         assert_eq!(
             drift_reads(&wgsl_fn("water_surface")),
