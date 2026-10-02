@@ -19,6 +19,8 @@ if [ "${WOW_CAPTURE:-}" = list ]; then echo water-a; exit 0; fi
 [ -z "${WOW_CAPTURE_STABLE+x}" ] || echo "WOW_CAPTURE_STABLE is set: $WOW_CAPTURE_STABLE"
 [ -z "${WOW_CAPTURE_AGE+x}" ] || echo "WOW_CAPTURE_AGE is set: $WOW_CAPTURE_AGE"
 echo "WOW_CAPTURE_PAN=${WOW_CAPTURE_PAN:-}"
+echo "WOW_MSAA=${WOW_MSAA:-}"
+if [ -n "${STUB_ABORT:-}" ]; then echo "wgpu error: Validation Error"; exit 134; fi
 if [ "${WOW_CAPTURE_BURST:-0}" -gt 0 ]; then
   for i in $(seq 0 $((WOW_CAPTURE_BURST - 1))); do
     : > "${WOW_CAPTURE_OUT%.png}-$(printf %03d "$i").png"
@@ -115,6 +117,33 @@ class Shots(unittest.TestCase):
         self.assertNotIn("WOW_CAPTURE_STABLE", log)
         self.assertNotIn("WOW_CAPTURE_AGE", log)
         self.assertIn("WOW_CAPTURE_PAN=20,10", log)
+
+    def test_msaa_is_off_whatever_the_caller_exported(self):
+        r = self.shots(self.caller, self.tmp / "msaa", WOW_MSAA="4")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for stem in ("water-a", "water-a-ref"):
+            log = (self.tmp / "msaa" / f"{stem}.log").read_text()
+            self.assertIn("WOW_MSAA=off\n", log)
+
+    def test_water_msaa_multisamples_both_lanes(self):
+        r = self.shots(self.caller, self.tmp / "msaa", WATER_MSAA="4", WOW_MSAA="off")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for stem in ("water-a", "water-a-ref"):
+            log = (self.tmp / "msaa" / f"{stem}.log").read_text()
+            self.assertIn("WOW_MSAA=4\n", log)
+
+    def test_an_msaa_level_wgpu_does_not_express_is_refused(self):
+        r = self.shots(self.caller, self.tmp / "msaa", WATER_MSAA="3")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("not 3", r.stderr)
+        self.assertFalse((self.tmp / "msaa").exists())
+
+    def test_a_client_that_aborts_fails_the_run(self):
+        r = self.shots(self.caller, self.tmp / "abort", WATER_MSAA="4", STUB_ABORT="1")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("capture water-a FAILED", r.stderr)
+        self.assertIn("Validation Error", (self.tmp / "abort" / "water-a.log").read_text())
+        self.assertFalse((self.tmp / "abort" / "water-a-ref.log").exists())
 
     def test_a_perf_run_takes_no_burst(self):
         r = self.shots(self.caller, self.tmp / "perf", 3, WATER_PERF="1200")
