@@ -14,8 +14,9 @@
 //! [`WaterScreenRect`] is the world view's rectangle around every visible water surface, grown by
 //! a margin: what only the water reads (the linear depth) is written inside it alone, and the
 //! passes over the world view's frame (the depth pyramid, the snapshot, the sky cube and the floor
-//! occlusion) skip a frame with no water on screen. The mirror cameras and the probe's faces are
-//! views of their own and render whether or not it is visible.
+//! occlusion) skip a frame with no water on screen, and the mirror cameras go idle a second after
+//! it leaves (`reflect`'s `idle_mirrors_off_screen`). The probe's faces are views of their own and
+//! capture whether or not it is visible.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -207,7 +208,7 @@ fn world_corners(aabb: &Aabb, transform: &GlobalTransform) -> [Vec3; 8] {
 /// that camera's verdict. A visible surface without a box (no frustum culling) takes the whole
 /// target.
 #[allow(clippy::type_complexity)]
-fn water_screen_rect(
+pub(crate) fn water_screen_rect(
     mut rect: ResMut<WaterScreenRect>,
     cameras: Query<(&Camera, &GlobalTransform), With<WorldCamera>>,
     surfaces: Query<

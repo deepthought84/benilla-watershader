@@ -318,6 +318,10 @@ pub(super) fn register(app: &mut App) {
             )
                 .chain(),
         );
+    app.add_systems(
+        PostUpdate,
+        idle_mirrors_off_screen.after(super::world_view::water_screen_rect),
+    );
     let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
         return;
     };
@@ -325,6 +329,49 @@ pub(super) fn register(app: &mut App) {
         Render,
         upload_reflect.in_set(RenderSystems::PrepareResources),
     );
+}
+
+/// Whether the mirrors render this frame: water is on the world view's screen, or was within
+/// [`MIRROR_HOLD_S`]. `idle` counts the seconds since the last frame with water and is advanced by
+/// `dt` here.
+fn mirrors_wanted(visible: bool, idle: &mut f32, dt: f32) -> bool {
+    if visible {
+        *idle = 0.0;
+    } else {
+        *idle += dt;
+    }
+    *idle < MIRROR_HOLD_S
+}
+
+/// **The mirrors render only for water on the screen.** [`drive_reflection`] elects a plane from
+/// the liquid near the eye and in its view, before visibility has run, so it keeps a camera on
+/// for water that no pixel shows: behind the eye within [`REFLECT_RADIUS`], or culled (a canal
+/// behind Stormwind's walls). Once the water's rectangle is known, a frame with none on screen,
+/// held past [`MIRROR_HOLD_S`], switches both cameras off before they are extracted; their lanes
+/// stay as written, and no water reads them. `drive_reflection` switches them on again the next
+/// frame it elects a plane, and this leaves them on whenever water is on screen.
+#[allow(clippy::type_complexity)]
+fn idle_mirrors_off_screen(
+    rect: Res<super::world_view::WaterScreenRect>,
+    time: Res<Time>,
+    mut idle: Local<f32>,
+    mut mirrors: Query<
+        &mut Camera,
+        (
+            With<ReflectionCamera>,
+            Without<WorldCamera>,
+            Without<benilla_world::liquid::ProbeFace>,
+        ),
+    >,
+) {
+    if mirrors_wanted(rect.visible, &mut idle, time.delta_secs()) {
+        return;
+    }
+    for mut camera in &mut mirrors {
+        if camera.is_active {
+            camera.is_active = false;
+        }
+    }
 }
 
 fn setup_reflection(
@@ -690,6 +737,11 @@ const SECOND_SHARE_MIN: f32 = 0.005;
 
 /// How long the second mirror keeps rendering after its body leaves the wider view, in seconds.
 const SECOND_HOLD_S: f32 = 1.0;
+
+/// How long both mirrors keep rendering after the last frame with water on the world view's
+/// screen, in seconds: a surface flickering at the frame's edge, or a glance away and back, leaves
+/// the cameras running, and a camera just switched on draws incompletely for its first frames.
+const MIRROR_HOLD_S: f32 = 1.0;
 
 /// How much wider than the screen, in field of view, the view the second mirror is elected from
 /// is — the lead that lets it render before its body turns into sight.
@@ -1995,5 +2047,45 @@ mod tests {
             let back = WaterStyle::from_cvar(style.cvar().parse::<f32>().unwrap());
             assert_eq!(back, style, "{style:?} did not survive its own CVar string");
         }
+    }
+
+    /// **No water on screen, no mirror pass**, once the hold has run out: a mirror camera that
+    /// `drive_reflection` switched on stays on while water is in the rectangle and for
+    /// [`MIRROR_HOLD_S`] after, then goes idle, and the world camera is never touched.
+    #[test]
+    fn the_mirrors_idle_without_water_on_screen() {
+        use crate::world_view::WaterScreenRect;
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(WaterScreenRect {
+            visible: true,
+            ..default()
+        });
+        let mirror = world.spawn((Camera::default(), ReflectionCamera(0))).id();
+        let eye = world.spawn((Camera::default(), WorldCamera)).id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(idle_mirrors_off_screen);
+        let mut frame = |world: &mut World, visible: bool| {
+            world
+                .resource_mut::<Time>()
+                .advance_by(std::time::Duration::from_millis(400));
+            world.resource_mut::<WaterScreenRect>().visible = visible;
+            // `drive_reflection` elects a plane every frame and switches the camera on.
+            world.get_mut::<Camera>(mirror).unwrap().is_active = true;
+            schedule.run(world);
+            world.get::<Camera>(mirror).unwrap().is_active
+        };
+        assert!(frame(&mut world, true), "water on screen");
+        assert!(frame(&mut world, false), "0.4 s without water: held");
+        assert!(frame(&mut world, false), "0.8 s: held");
+        assert!(!frame(&mut world, false), "1.2 s: idle");
+        assert!(!frame(&mut world, false), "still none: idle");
+        assert!(frame(&mut world, true), "water back: on that frame");
+        assert!(frame(&mut world, false), "the hold starts over");
+        assert!(world.get::<Camera>(eye).unwrap().is_active);
+        let mut idle = 0.0;
+        assert!(mirrors_wanted(false, &mut idle, MIRROR_HOLD_S - 0.01));
+        assert!(!mirrors_wanted(false, &mut idle, 0.02));
+        assert!(mirrors_wanted(true, &mut idle, 5.0) && idle == 0.0);
     }
 }
