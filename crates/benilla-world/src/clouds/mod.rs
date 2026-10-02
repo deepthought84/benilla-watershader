@@ -13,7 +13,7 @@ use benilla_assets::AssetSet;
 mod kernel;
 mod layer;
 
-pub use layer::CloudMaterial;
+pub use layer::{CloudMaterial, SkyCloudLayer};
 mod tables;
 
 pub use kernel::{occ1_moon, occ1_sun};

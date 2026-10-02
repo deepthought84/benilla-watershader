@@ -3,7 +3,7 @@
 //! mirrors serve and where the fixed cube probes stand (`liquid_planar`, cached by `water_map`),
 //! the two planar mirrors (`reflect`), the probes (`probe`), the depth pyramid and scene colour
 //! the screen-space march reads (`depth`, `hiz`, `scene_color`), the sky floor's occlusion over the
-//! mirror planes (`water_compute`), the wave simulation
+//! mirror planes and the sky floor's cube (`water_compute`, `sky_lut`), the wave simulation
 //! (`ripple_sim`), the surface's clock (`clock`) and the look's knobs (`look`). The surface shading
 //! is `liquid.wgsl`'s stylised lane, in the engine.
 //!
@@ -24,6 +24,7 @@ mod probe;
 mod reflect;
 mod ripple_sim;
 mod scene_color;
+mod sky_lut;
 mod water_compute;
 mod water_map;
 mod world_view;
@@ -57,6 +58,7 @@ impl Plugin for ImprovedWaterPlugin {
         bevy::asset::embedded_asset!(app, "shaders/hiz_reduce.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/hiz_seed.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/water_compute.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/sky_lut.wgsl");
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
@@ -66,6 +68,7 @@ impl Plugin for ImprovedWaterPlugin {
         world_view::register(app);
         hiz::register(app);
         scene_color::register(app);
+        sky_lut::register(app);
         water_compute::register(app);
         depth::register(app);
         probe::register(app);
@@ -128,6 +131,7 @@ fn publish_pass_images(
     probe: Option<Res<probe::WaterProbe>>,
     hiz: Option<Res<hiz::WaterHiz>>,
     occ: Option<Res<water_compute::FloorOcc>>,
+    lut: Option<Res<sky_lut::SkyLut>>,
     sim: Option<Res<ripple_sim::RippleSim>>,
 ) {
     let (
@@ -137,8 +141,9 @@ fn publish_pass_images(
         Some(probe),
         Some(hiz),
         Some(occ),
+        Some(lut),
         Some(sim),
-    ) = (reflect, reflect_buf, scene_color, probe, hiz, occ, sim)
+    ) = (reflect, reflect_buf, scene_color, probe, hiz, occ, lut, sim)
     else {
         return;
     };
@@ -152,6 +157,7 @@ fn publish_pass_images(
         scene_depth: hiz.lin.clone(),
         water_occl: occ.occl.clone(),
         floor_occ: occ.col.clone(),
+        sky_lut: lut.image.clone(),
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
     });

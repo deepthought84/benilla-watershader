@@ -322,10 +322,16 @@ mod tests {
     fn the_dome_law_is_shared_verbatim() {
         let sky = include_str!("shaders/sky.wgsl");
         let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        let lut = include_str!("../../benilla-water/src/shaders/sky_lut.wgsl");
         assert_eq!(
             dome_law(sky),
             dome_law(liquid),
             "sky.wgsl and liquid.wgsl carry different dome laws — copy the edited one across"
+        );
+        assert_eq!(
+            dome_law(sky),
+            dome_law(lut),
+            "sky.wgsl and sky_lut.wgsl carry different dome laws — copy the edited one across"
         );
         assert!(dome_law(sky).contains("fn dome_color(c: DomeColors, dir: vec3<f32>)"));
     }

@@ -237,6 +237,8 @@ pub struct WaterPassImages {
     /// occluder.
     pub water_occl: Handle<Image>,
     pub floor_occ: Handle<Image>,
+    /// The sky floor's cube; the placeholder is black.
+    pub sky_lut: Handle<Image>,
     /// The wave simulation's field.
     pub wake: Handle<Image>,
     /// The reflection block, [`REFLECT_FLOATS`] floats, written once a frame in the render world.
@@ -352,6 +354,11 @@ pub(super) fn placeholder_pass_images(
         6,
         Some(TextureViewDimension::CubeArray),
     ));
+    let sky_cube = images.add(placeholder(
+        TextureFormat::Rgba16Float,
+        6,
+        Some(TextureViewDimension::Cube),
+    ));
     // The sky open (r, g, b) and the verdict unknown (a).
     let occl = images.add(placeholder_filled(
         TextureFormat::Rgba8Unorm,
@@ -375,6 +382,7 @@ pub(super) fn placeholder_pass_images(
         scene_depth: depth,
         water_occl: occl,
         floor_occ: flat.clone(),
+        sky_lut: sky_cube,
         wake: flat,
         reflect_buf,
     });

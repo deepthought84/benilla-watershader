@@ -2,7 +2,9 @@
 //! ([`super::hiz`]) and the scene snapshot ([`super::scene_color`]), before the water draws.
 //! Its shader is `shaders/water_compute.wgsl`.
 //!
-//! `occl_plane` is the sky floor's occlusion for the water on an active mirror plane. The water's
+//! First the sky floor's cube ([`super::sky_lut`]), on every frame the stylised water is on screen.
+//!
+//! Then `occl_plane`, the sky floor's occlusion for the water on an active mirror plane. The water's
 //! fragment marches the depth pyramids per pixel to find what stands above it along the reflected
 //! ray; on a mirror plane every pixel's unrippled point lies on the plane, so the same march runs
 //! here once per quarter-resolution texel (an eighth on Low) over the water's rectangle, and the
@@ -227,9 +229,11 @@ fn init_compute_pipelines(
     commands.insert_resource(ComputePipelines { layout, occl });
 }
 
-/// Render world: this frame's dispatch, written by [`prepare_water_compute`].
+/// Render world: this frame's dispatches, written by [`prepare_water_compute`].
 #[derive(Resource, Default)]
-struct ComputeFrame {
+pub(crate) struct ComputeFrame {
+    /// The sky floor's cube is rebuilt this frame: the stylised look, water on screen.
+    pub(crate) lut: bool,
     params: UniformBuffer<OcclParams>,
     /// The occlusion dispatch runs this frame: armed, water on screen, a mirror plane active.
     occl: bool,
@@ -239,10 +243,12 @@ struct ComputeFrame {
     tier: u8,
 }
 
-/// Render world, before the graph: whether the occlusion runs this frame and over which texels.
-/// It runs while the look is armed, water is on screen and a mirror plane is active: off the
-/// planes the water marches per pixel and never reads the images.
+/// Render world, before the graph: which dispatches run this frame. The sky floor's cube runs
+/// while the stylised look is on and water is on screen. The occlusion runs while it is armed too
+/// and a mirror plane is active, over the rectangle's texels: off the planes the water marches per
+/// pixel and never reads the images.
 fn prepare_water_compute(
+    hiz: Option<Res<WaterHiz>>,
     occ: Option<Res<FloorOcc>>,
     rect: Option<Res<WaterScreenRect>>,
     data: Option<Res<WaterReflectData>>,
@@ -251,9 +257,11 @@ fn prepare_water_compute(
     queue: Res<RenderQueue>,
 ) {
     frame.occl = false;
+    frame.lut = false;
     let (Some(occ), Some(rect), Some(data)) = (occ, rect, data) else {
         return;
     };
+    frame.lut = hiz.is_some_and(|h| h.armed) && rect.visible;
     let plane = |row: u32| data.0[row as usize * 4 + 1] > 0.0;
     if !(occ.armed && rect.visible && (plane(PARAMS_ROW) || plane(MIRROR2_ROW))) {
         return;
@@ -402,16 +410,14 @@ impl Node for WaterComputeNode {
         ) else {
             return Ok(());
         };
-        if !frame.occl {
+        if !(frame.lut || frame.occl) {
             return Ok(());
         }
-        let (Some(offset), Some(group), Some(pipeline)) = (
+        let occl = (
             world.get::<ViewUniformOffset>(view),
             bindings.group.as_ref(),
             cache.get_compute_pipeline(pipes.occl[usize::from(frame.tier)]),
-        ) else {
-            return Ok(()); // compiling, or the bind group is not built yet
-        };
+        );
         // `render/water_compute` on Vulkan and DX12: the perf journal's `gpu_water`.
         let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
@@ -422,9 +428,16 @@ impl Node for WaterComputeNode {
                     timestamp_writes: None,
                 });
         let timed = diagnostics.pass_span(&mut pass, "water_compute");
-        pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, group, &[offset.offset]);
-        pass.dispatch_workgroups(frame.groups.x, frame.groups.y, 1);
+        // The cube first: nothing in this pass reads it, the water after it does.
+        if frame.lut {
+            super::sky_lut::dispatch_lut(&mut pass, world);
+        }
+        // Compiling, or the bind group not built yet: the images keep their last answer.
+        if let (true, (Some(offset), Some(group), Some(pipeline))) = (frame.occl, occl) {
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[offset.offset]);
+            pass.dispatch_workgroups(frame.groups.x, frame.groups.y, 1);
+        }
         timed.end(&mut pass);
         Ok(())
     }

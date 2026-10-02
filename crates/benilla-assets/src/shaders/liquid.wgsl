@@ -70,6 +70,9 @@ const PROBE_TAPS_MAX: i32 = 3;
 // The sky floor's occlusion over the mirror planes (`benilla_water::water_compute`), a quarter of the
 // view's resolution: r the open sky, g and b the body's sky and sun visibility, a 1 where the march
 // reached a verdict; then the occluder's radiance times (1 − r) in linear light, and rho_c in a.
+// The sky floor (`benilla_water::sky_lut`): the dome and its clouds, linear and unlit, a 64² cube
+// whose mip k is blurred to 2^k of its level-0 texel.
+@group(#{MATERIAL_BIND_GROUP}) @binding(119) var sky_lut: texture_cube<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(120) var water_occl: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var floor_occ: texture_2d<f32>;
 #ifdef WATER_SCENE_DEPTH
@@ -106,11 +109,11 @@ struct ProbeSlot {
     bind: vec4<f32>,
 };
 
-// ---- dome law: begin (shared verbatim by `sky.wgsl` and `liquid.wgsl`) ----------------------
+// ---- dome law: begin (shared verbatim by `sky.wgsl`, `liquid.wgsl` and `sky_lut.wgsl`) ------
 //
-// The whole gradient as ONE function of the colours and a direction, so the water's march can ask
-// what the sky looks like along a reflected ray without reading the colour buffer. Kept textually
-// identical in both shaders — `sky.rs`'s `the_dome_law_is_shared_verbatim` fails on any drift.
+// The whole gradient as ONE function of the colours and a direction, so the water can ask what the
+// sky looks like along a reflected ray without reading the colour buffer. Kept textually identical
+// in every copy — `sky.rs`'s `the_dome_law_is_shared_verbatim` fails on any drift.
 
 struct DomeColors {
     sky0: vec4<f32>, // zenith (90°)
@@ -919,28 +922,6 @@ const SSR_EDGE_FADE: f32 = 0.14;
 struct SsrHit {
     rgb: vec3<f32>,
     conf: f32,
-}
-
-/// The sky a surface facing `dir` reflects, off the dome's own zenith→horizon gradient.
-///
-/// **This is what makes a wave visible when the sun is not behind it.** Mixing the reflection
-/// toward one flat colour — which is what the scene fog was standing in for — cannot show a ripple:
-/// at the grazing angles you look at water from, a tilted facet and a flat one both have Fresnel
-/// near 1, so both come back the same colour and the whole surface reads as a sheet of glass except
-/// along the sun's own glitter path. Reflecting the view ray and reading the sky at the reflected
-/// ray's ELEVATION gives every facet a different colour instead: a wave's near face looks at the
-/// horizon and its far face at the zenith, and those two are as far apart as the sky is.
-///
-/// It is also what carries the distance. Out toward the horizon the fine ripples have mipped away
-/// by design (they would otherwise moiré) and only the long swell is left — and a long swell tilts
-/// the surface by very little, which is invisible under a flat sky mix and plainly visible under a
-/// gradient.
-///
-/// `sqrt` on the blend because the dome's own gradient is weighted toward its horizon stop, and a
-/// linear ramp put the horizon colour only in the last few degrees above it.
-fn sky_reflection(dir: vec3<f32>) -> vec3<f32> {
-    let t = sqrt(saturate(dir.y));
-    return mix(water_reflect.sky_horizon.rgb, water_reflect.sky_zenith.rgb, t);
 }
 
 /// Foam noise that does not repeat.
@@ -2208,6 +2189,20 @@ fn glint_lobe_p1(
 // ([`floor_march`]) and replaces the occluded share of the sky with the occluder as the frame
 // shows it.
 
+/// The sky floor cube's level-0 texel angle at a face centre (2/64 in tangent units), radians.
+const SKY_LUT_TEXEL0: f32 = 0.03125;
+/// Its last mip: 64² down to 2².
+const SKY_LUT_TOP: f32 = 5.0;
+
+/// The sky a surface of roughness `alpha` reflects along `dir`: the dome and its drawn clouds,
+/// unlit and in linear light, blurred by a Gaussian of the reflected lobe's width. Slopes per axis
+/// spread as N(0, α²/2), and a reflection doubles the normal's deviation, so σ ≈ √2·α.
+fn sky_floor(dir: vec3<f32>, alpha: f32) -> vec3<f32> {
+    let sigma = max(1.41421356 * alpha, SKY_LUT_TEXEL0);
+    let lod = clamp(log2(sigma / SKY_LUT_TEXEL0), 0.0, SKY_LUT_TOP);
+    return textureSampleLevel(sky_lut, scene_samp, dir, lod).rgb;
+}
+
 // The per-pixel march's lowest level and step budget, per tier.
 #ifdef WATER_TIER_HIGH
 const FLOOR_MARCH_LEVEL: i32 = 2;
@@ -2308,6 +2303,7 @@ const WV_ROUGHNESS_ANISO: u32 = 11u;
 const WV_SLOPE_FULL: u32 = 12u;
 const WV_SLOPE_LO: u32 = 13u;
 const WV_FLOOR_OCC: u32 = 14u;
+const WV_SKY_FLOOR: u32 = 15u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2450,11 +2446,12 @@ fn stylised_water(
 
     // Fresnel toward the horizon. Schlick's 5th power, floored at the 2 % water reflects head-on.
     let fresnel = pow(1.0 - saturate(dot(n, to_view)), 5.0);
-    // What the surface reflects when the mirrored pass has nothing for it: the sky, read at the
-    // reflected view ray's own elevation rather than as one flat colour — see [`sky_reflection`],
-    // which is the answer to "waves are only visible in the line of the sun".
-    let sky = sky_reflection(reflect(-to_view, n));
-    let sky_lit = sky * lit;
+    // What the surface reflects where no tier has a better answer: the sky along the rippled
+    // reflected ray, the dome and its clouds as drawn, unlit and linear, blurred by the roughness
+    // the surface cannot resolve ([`sky_floor`]). A wave's near face looks at the horizon and its
+    // far face higher up, so ripples show under any sky, not only along the sun's glitter path.
+    let r_rip = reflect(-to_view, n);
+    let sky = sky_floor(r_rip, surf.alpha);
     // **A surface has one reflection, and Fresnel is how big its share of the fragment is.** This
     // is that share, and the tiers below spend it: the sky, the capture and the march are three
     // answers to *what* is reflected, never three separate reflections to be layered one over the
@@ -2467,7 +2464,7 @@ fn stylised_water(
     // while a coast, where the tier is looking at the sky anyway, read as correct.
     let fres = mix(0.02, 0.45, fresnel);
     let layered = water_reflect.flags.w > 0.5;
-    var rgb = mix(body, sky_lit, fres);
+    var rgb = mix(body, water_enc(sky), fres);
 
     // ---- the cubemap probe, tier four ---------------------------------------------------------
     //
@@ -2726,7 +2723,6 @@ fn stylised_water(
     let w_floor = (1.0 - w_p) * (1.0 - w_m) * (1.0 - w_s);
     var occ = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
     var occ_marched = 0.0;
-    var floor_g = sky_lit;
     var floor_share = w_floor * fres;
 #ifdef WATER_VIEW
     // The occlusion view shows what the floor gets wherever a march may run, the tiers over it or not.
@@ -2737,8 +2733,8 @@ fn stylised_water(
     if (floor_occlusion_wanted(floor_share, world_pos)) {
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view, d_eye);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
-        floor_g = water_enc(occ.rgb + occ.v * water_dec(sky_lit));
     }
+    let floor_g = water_enc(occ.rgb + occ.v * sky);
     let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
         * (1.0 - w_s)
         + ssr.rgb * w_s;
@@ -3003,6 +2999,8 @@ fn stylised_water(
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * n.xz, 0.0);
         } else if (view_id == WV_SLOPE_LO) {
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * surf.n_lo.xz, 0.0);
+        } else if (view_id == WV_SKY_FLOOR) {
+            v = water_enc(sky);
         } else if (view_id == WV_FLOOR_OCC) {
             // r the open sky v, g rho_c, b the per-pixel march's share (1 off the planes, 0 on
             // them, between in the crossfade band); half bright where the verdict is unknown.

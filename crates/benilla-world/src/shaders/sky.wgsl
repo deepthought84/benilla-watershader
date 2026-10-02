@@ -6,11 +6,11 @@
     mesh_view_bindings::view,
 }
 
-// ---- dome law: begin (shared verbatim by `sky.wgsl` and `liquid.wgsl`) ----------------------
+// ---- dome law: begin (shared verbatim by `sky.wgsl`, `liquid.wgsl` and `sky_lut.wgsl`) ------
 //
-// The whole gradient as ONE function of the colours and a direction, so the water's march can ask
-// what the sky looks like along a reflected ray without reading the colour buffer. Kept textually
-// identical in both shaders — `sky.rs`'s `the_dome_law_is_shared_verbatim` fails on any drift.
+// The whole gradient as ONE function of the colours and a direction, so the water can ask what the
+// sky looks like along a reflected ray without reading the colour buffer. Kept textually identical
+// in every copy — `sky.rs`'s `the_dome_law_is_shared_verbatim` fails on any drift.
 
 struct DomeColors {
     sky0: vec4<f32>, // zenith (90°)

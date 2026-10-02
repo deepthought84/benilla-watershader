@@ -660,6 +660,11 @@ pub struct LiquidExt {
     /// whether the march reached a verdict. Read bilinearly through [`Self::scene_color`]'s sampler.
     #[texture(120, visibility(fragment))]
     pub water_occl: Handle<Image>,
+    /// The sky floor (`benilla_water`'s `sky_lut`): the dome and its clouds, linear and unlit, a
+    /// 64² cube whose mips are blurred for rougher water. Read through [`Self::scene_color`]'s
+    /// sampler.
+    #[texture(119, dimension = "cube", visibility(fragment))]
+    pub sky_lut: Handle<Image>,
     /// The occluder's radiance times the shut share of the sky, linear, and `rho_c` in alpha; the
     /// size of [`Self::water_occl`].
     #[texture(121, visibility(fragment))]

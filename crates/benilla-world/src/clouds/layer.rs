@@ -11,6 +11,7 @@ use bevy::pbr::{
     ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
 };
 use bevy::prelude::*;
+use bevy::render::extract_resource::ExtractResource;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, RenderPipelineDescriptor, SpecializedMeshPipelineError,
     TextureDimension, TextureFormat,
@@ -66,6 +67,16 @@ pub(super) struct CloudDome;
 pub(super) struct CloudLayer {
     pub(crate) image: Handle<Image>,
     pub(crate) material: Handle<CloudMaterial>,
+}
+
+/// The drawn cloud layer as other passes read it (the water's sky floor): the colored tile the
+/// dome samples, and whether the dome is drawn. Extracted by its readers.
+#[derive(Resource, Clone, PartialEq, ExtractResource)]
+pub struct SkyCloudLayer {
+    /// The colored tile, raw gamma, alpha the coverage; a new texture on every upload.
+    pub image: Handle<Image>,
+    /// The dome is drawn: false under a WMO skybox past weight 0.99 and while submerged.
+    pub visible: bool,
 }
 
 /// Ring co-latitudes in units of π (`0x811570`), from the pole to the 45° rim.
@@ -158,6 +169,10 @@ pub(super) fn setup_cloud_layer(
             texels: image.clone(),
         },
     });
+    commands.insert_resource(SkyCloudLayer {
+        image: image.clone(),
+        visible: true,
+    });
     commands.spawn((
         Mesh3d(meshes.add(cloud_dome_mesh())),
         MeshMaterial3d(material.clone()),
@@ -175,16 +190,48 @@ pub(super) fn apply_cloud_visibility(
     skybox: Res<crate::skybox::SkyboxWeight>,
     underwater: Res<crate::liquid::Underwater>,
     mut dome: Query<&mut Visibility, With<CloudDome>>,
+    layer: Option<ResMut<SkyCloudLayer>>,
 ) {
+    let hidden =
+        debug.lighting.disable_sky_dome || skybox.replaces_celestial() || underwater.0.any();
     if let Ok(mut vis) = dome.single_mut() {
-        *vis =
-            if debug.lighting.disable_sky_dome || skybox.replaces_celestial() || underwater.0.any()
-            {
-                Visibility::Hidden
-            } else {
-                Visibility::Inherited
-            };
+        *vis = if hidden {
+            Visibility::Hidden
+        } else {
+            Visibility::Inherited
+        };
     }
+    if let Some(mut layer) = layer {
+        let visible = !hidden;
+        if layer.visible != visible {
+            layer.visible = visible;
+        }
+    }
+}
+
+/// The cloud tile UV and the ring alpha the dome shows along `dir` (unit, from the eye): the
+/// mesh's mapping inverted, as `benilla_water`'s `sky_lut.wgsl` computes it. The ray's far
+/// intersection with the recentred sphere is the sphere point the vertex along `dir` was pushed
+/// out from; its co-latitude finds the ring, and its azimuth the polar UV.
+#[cfg(test)]
+fn cloud_dome_uv(dir: Vec3) -> (Vec2, f32) {
+    let shift = std::f32::consts::FRAC_PI_4.cos();
+    let b = shift * dir.y;
+    let t = -b + (b * b - (shift * shift - 1.0)).max(0.0).sqrt();
+    let q = dir * t + Vec3::Y * shift;
+    let colat = q.y.clamp(-1.0, 1.0).acos() / std::f32::consts::PI;
+    let (mut ring, mut alpha) = (11.0, 0.0);
+    for i in 0..11 {
+        if colat < RING_COLAT[i + 1] {
+            let f = (colat - RING_COLAT[i]) / (RING_COLAT[i + 1] - RING_COLAT[i]);
+            ring = i as f32 + f;
+            alpha = RING_ALPHA[i] + (RING_ALPHA[i + 1] - RING_ALPHA[i]) * f;
+            break;
+        }
+    }
+    let h = q.xz().length();
+    let sc = if h > 1e-6 { q.xz() / h } else { Vec2::ZERO };
+    (sc * (ring / 24.0) + 0.5, alpha)
 }
 
 /// Centres the dome on the camera at `far·0.87`, inside the sky dome. The radius only sizes it on
@@ -238,5 +285,77 @@ mod tests {
         assert!((pos[0][1] - 1.0).abs() < 1e-6);
         let rim = pos[11 * AZ_STEPS][1];
         assert!(rim.abs() < 1e-6, "rim y {rim}");
+    }
+
+    /// The cloud law inverts the mesh: every vertex's direction maps back to its own UV and ring
+    /// alpha.
+    #[test]
+    fn the_cloud_law_inverts_the_dome() {
+        let mesh = cloud_dome_mesh();
+        let pos = mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let Some(bevy::mesh::VertexAttributeValues::Float32x2(uvs)) =
+            mesh.attribute(Mesh::ATTRIBUTE_UV_0)
+        else {
+            panic!("uv0");
+        };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x4(colors)) =
+            mesh.attribute(Mesh::ATTRIBUTE_COLOR)
+        else {
+            panic!("colors");
+        };
+        for ((p, uv), c) in pos.iter().zip(uvs).zip(colors) {
+            let (got, alpha) = cloud_dome_uv(Vec3::from(*p).normalize());
+            assert!(
+                (got - Vec2::from(*uv)).abs().max_element() < 1e-4,
+                "vertex {p:?}: uv {got} against {uv:?}"
+            );
+            assert!(
+                (alpha - c[3]).abs() < 1e-4,
+                "vertex {p:?}: alpha {alpha} against {}",
+                c[3]
+            );
+        }
+    }
+
+    /// The numbers of a WGSL `const <name> = array<f32, N>(...)`.
+    fn wgsl_array(wgsl: &str, name: &str) -> Vec<f32> {
+        let at = wgsl
+            .find(&format!("const {name} = array<f32, "))
+            .unwrap_or_else(|| panic!("`{name}` is gone"));
+        let body = &wgsl[at..];
+        let body = &body[body.find('(').unwrap() + 1..body.find(')').unwrap()];
+        body.split(',').map(|v| v.trim().parse().unwrap()).collect()
+    }
+
+    /// The water's sky floor draws the clouds where the dome does: `sky_lut.wgsl`'s cloud law
+    /// carries this mesh's rings, alphas and recentring.
+    #[test]
+    fn the_sky_floor_carries_the_domes_rings() {
+        let wgsl = include_str!("../../../benilla-water/src/shaders/sky_lut.wgsl");
+        for (name, want) in [
+            ("CLOUD_RING_COLAT", RING_COLAT),
+            ("CLOUD_RING_ALPHA", RING_ALPHA),
+        ] {
+            let got = wgsl_array(wgsl, name);
+            assert_eq!(got.len(), want.len(), "{name}");
+            for (g, w) in got.iter().zip(want) {
+                assert!((g - w).abs() < 1e-7, "{name}: {g} against {w}");
+            }
+        }
+        let at = wgsl
+            .find("const CLOUD_SHIFT: f32 = ")
+            .expect("`CLOUD_SHIFT` is gone")
+            + 25;
+        let shift: f32 = wgsl[at..at + wgsl[at..].find(';').unwrap()]
+            .parse()
+            .unwrap();
+        assert!(
+            (shift - std::f32::consts::FRAC_PI_4.cos()).abs() < 1e-7,
+            "CLOUD_SHIFT {shift}"
+        );
     }
 }
