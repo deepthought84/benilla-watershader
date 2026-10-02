@@ -26,7 +26,7 @@ use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::view::{
-    ExtractedView, Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
+    Msaa, ViewDepthTexture, ViewTarget, ViewUniform, ViewUniformOffset, ViewUniforms,
 };
 use bevy::render::{Render, RenderSystems};
 use bevy::shader::ShaderDefVal;
@@ -177,19 +177,36 @@ struct GxGpuCache {
     props: HashMap<Entity, GxCellGpu>,
 }
 
+/// What a view decides about a pipeline: its sample count and its main texture's format. The world
+/// camera multisamples at `gxMultisample`; the mirrors and probe faces never do
+/// ([`crate::liquid::mirror_view_shape`]), so with MSAA on the pass draws under two keys a frame.
+type GxPipeKey = (u32, TextureFormat);
+
+/// The key of the view a pass draws into: the sample count its colour and depth attachments carry
+/// and the format of its colour target.
+fn pipe_key(msaa: &Msaa, target: &ViewTarget) -> GxPipeKey {
+    (msaa.samples(), target.main_texture_format())
+}
+
+/// The pass's pipelines for one view key.
+struct GxPipelineSet<Id = CachedRenderPipelineId> {
+    /// Keyed `(cutout, two_sided)`.
+    colour: HashMap<(bool, bool), Id>,
+    /// The same four, depth-only, for the depth prepass — see [`StaticGxPrepassNode`]. Separate
+    /// rather than a flag on the above because they differ in the two things a pipeline cannot
+    /// branch on: no colour target, and a fragment that only discards.
+    depth: HashMap<(bool, bool), Id>,
+}
+
 #[derive(Resource)]
 struct GxPipelines {
     view_layout: BindGroupLayoutDescriptor,
     cell_layout: BindGroupLayoutDescriptor,
     sampler: Sampler,
     sampler_clamp: Sampler,
-    /// Keyed `(cutout, two_sided)`, re-specialized if the world view's (samples, format) changes.
-    pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
-    /// The same four, depth-only, for the depth prepass — see [`StaticGxPrepassNode`]. Separate
-    /// rather than a flag on the above because they differ in the two things a pipeline cannot
-    /// branch on: no colour target, and a fragment that only discards.
-    depth_pipelines: HashMap<(bool, bool), CachedRenderPipelineId>,
-    specialized_for: Option<(u32, TextureFormat)>,
+    /// One set per key among the views the pass has drawn into. A set stays while its views are
+    /// inactive: a probe face renders only while a capture runs.
+    sets: HashMap<GxPipeKey, GxPipelineSet>,
 }
 
 fn init_pipelines(mut commands: Commands, render_device: Res<RenderDevice>) {
@@ -241,19 +258,12 @@ fn init_pipelines(mut commands: Commands, render_device: Res<RenderDevice>) {
         cell_layout,
         sampler: make("static_gx_repeat", AddressMode::Repeat),
         sampler_clamp: make("static_gx_clamp", AddressMode::ClampToEdge),
-        pipelines: HashMap::default(),
-        depth_pipelines: HashMap::default(),
-        specialized_for: None,
+        sets: HashMap::default(),
     });
 }
 
-/// The world view's pipeline-key inputs.
-type GxViewKey = (
-    &'static ExtractedView,
-    &'static Msaa,
-    &'static ViewTarget,
-    &'static StaticGxView,
-);
+/// A pass view's pipeline-key inputs.
+type GxViewKey = (&'static Msaa, &'static ViewTarget, &'static StaticGxView);
 
 /// The bake's interleaved vertex layout, in the attribute-id order Bevy interleaves by: position,
 /// normal, uv, colour, then the word and anchor (988_101, 988_102). Keep in sync with `bake_cell`
@@ -297,7 +307,103 @@ fn vertex_layout() -> VertexBufferLayout {
     }
 }
 
-/// Specialize the four pipelines for the world view, and assemble visible regions' GPU state.
+/// One pipeline of a set, specialised for `key`: the colour pass's, or with `depth_only` its
+/// depth-only twin for the prepass. The twin has the same vertex stage, buffers and layout, so it
+/// writes exactly the depth the colour pass then tests `GreaterEqual` against; only the fragment
+/// and the (absent) target differ.
+fn gx_pipeline_descriptor(
+    shader: &Handle<Shader>,
+    layout: &[BindGroupLayoutDescriptor],
+    key: GxPipeKey,
+    cutout: bool,
+    two_sided: bool,
+    depth_only: bool,
+) -> RenderPipelineDescriptor {
+    let (samples, format) = key;
+    let defs = if cutout {
+        vec![ShaderDefVal::from("GX_CUTOUT")]
+    } else {
+        vec![]
+    };
+    let (label, entry_point, targets) = if depth_only {
+        ("static_gx_prepass", "fragment_prepass", vec![])
+    } else {
+        (
+            "static_gx",
+            "fragment",
+            vec![Some(ColorTargetState {
+                format,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            })],
+        )
+    };
+    RenderPipelineDescriptor {
+        label: Some(format!("{label} c{} t{}", u8::from(cutout), u8::from(two_sided)).into()),
+        layout: layout.to_vec(),
+        vertex: VertexState {
+            shader: shader.clone(),
+            shader_defs: defs.clone(),
+            entry_point: Some("vertex".into()),
+            buffers: vec![vertex_layout()],
+        },
+        fragment: Some(FragmentState {
+            shader: shader.clone(),
+            shader_defs: defs,
+            entry_point: Some(entry_point.into()),
+            targets,
+        }),
+        primitive: PrimitiveState {
+            cull_mode: (!two_sided).then_some(Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(DepthStencilState {
+            format: CORE_3D_DEPTH_FORMAT,
+            depth_write_enabled: true,
+            depth_compare: CompareFunction::GreaterEqual,
+            stencil: StencilState::default(),
+            bias: DepthBiasState::default(),
+        }),
+        multisample: MultisampleState {
+            count: samples,
+            ..Default::default()
+        },
+        ..default()
+    }
+}
+
+/// Give every key in `keys` a set, queueing through `queue` the four colour pipelines
+/// `(cutout, two_sided)` and their depth-only twins of each key that has none.
+fn serve_view_keys<Id>(
+    sets: &mut HashMap<GxPipeKey, GxPipelineSet<Id>>,
+    keys: impl IntoIterator<Item = GxPipeKey>,
+    shader: &Handle<Shader>,
+    layout: &[BindGroupLayoutDescriptor],
+    mut queue: impl FnMut(RenderPipelineDescriptor) -> Id,
+) {
+    for key in keys {
+        if sets.contains_key(&key) {
+            continue;
+        }
+        let mut set = GxPipelineSet {
+            colour: HashMap::default(),
+            depth: HashMap::default(),
+        };
+        for cutout in [false, true] {
+            for two_sided in [false, true] {
+                let at = (cutout, two_sided);
+                let colour = gx_pipeline_descriptor(shader, layout, key, cutout, two_sided, false);
+                set.colour.insert(at, queue(colour));
+                let depth = gx_pipeline_descriptor(shader, layout, key, cutout, two_sided, true);
+                set.depth.insert(at, queue(depth));
+            }
+        }
+        sets.insert(key, set);
+    }
+}
+
+/// Specialize a pipeline set for every view key the pass draws into, and assemble visible regions'
+/// GPU state.
 fn prepare_static_gx(
     gx: Res<GxWorld>,
     mut cache: ResMut<GxGpuCache>,
@@ -311,112 +417,17 @@ fn prepare_static_gx(
     views: Query<GxViewKey>,
 ) {
     let _t = super::gx_perf_guard(3);
-    let Some((view, msaa, _, _)) = views.iter().next() else {
+    if views.is_empty() {
         return;
-    };
-    let format = if view.hdr {
-        ViewTarget::TEXTURE_FORMAT_HDR
-    } else {
-        TextureFormat::bevy_default()
-    };
-    let key = (msaa.samples(), format);
-    if pipes.specialized_for != Some(key) {
+    }
+    let keys = || views.iter().map(|(msaa, target, _)| pipe_key(msaa, target));
+    if keys().any(|key| !pipes.sets.contains_key(&key)) {
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
-        pipes.pipelines.clear();
-        pipes.depth_pipelines.clear();
-        for cutout in [false, true] {
-            for two_sided in [false, true] {
-                let mut defs = vec![];
-                if cutout {
-                    defs.push(ShaderDefVal::from("GX_CUTOUT"));
-                }
-                let depth_defs = defs.clone();
-                let id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-                    label: Some(
-                        format!("static_gx c{} t{}", u8::from(cutout), u8::from(two_sided)).into(),
-                    ),
-                    layout: vec![pipes.view_layout.clone(), pipes.cell_layout.clone()],
-                    vertex: VertexState {
-                        shader: shader.clone(),
-                        shader_defs: defs.clone(),
-                        entry_point: Some("vertex".into()),
-                        buffers: vec![vertex_layout()],
-                    },
-                    fragment: Some(FragmentState {
-                        shader: shader.clone(),
-                        shader_defs: defs,
-                        entry_point: Some("fragment".into()),
-                        targets: vec![Some(ColorTargetState {
-                            format,
-                            blend: None,
-                            write_mask: ColorWrites::ALL,
-                        })],
-                    }),
-                    primitive: PrimitiveState {
-                        cull_mode: (!two_sided).then_some(Face::Back),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(DepthStencilState {
-                        format: CORE_3D_DEPTH_FORMAT,
-                        depth_write_enabled: true,
-                        depth_compare: CompareFunction::GreaterEqual,
-                        stencil: StencilState::default(),
-                        bias: DepthBiasState::default(),
-                    }),
-                    multisample: MultisampleState {
-                        count: msaa.samples(),
-                        ..Default::default()
-                    },
-                    ..default()
-                });
-                pipes.pipelines.insert((cutout, two_sided), id);
-                // The depth-only twin: same vertex stage, same buffers, same layout, so it
-                // writes exactly the depth the colour pass above will test `GreaterEqual`
-                // against. Only the fragment and the (absent) target differ.
-                let depth_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-                    label: Some(
-                        format!(
-                            "static_gx_prepass c{} t{}",
-                            u8::from(cutout),
-                            u8::from(two_sided)
-                        )
-                        .into(),
-                    ),
-                    layout: vec![pipes.view_layout.clone(), pipes.cell_layout.clone()],
-                    vertex: VertexState {
-                        shader: shader.clone(),
-                        shader_defs: depth_defs.clone(),
-                        entry_point: Some("vertex".into()),
-                        buffers: vec![vertex_layout()],
-                    },
-                    fragment: Some(FragmentState {
-                        shader: shader.clone(),
-                        shader_defs: depth_defs,
-                        entry_point: Some("fragment_prepass".into()),
-                        targets: vec![],
-                    }),
-                    primitive: PrimitiveState {
-                        cull_mode: (!two_sided).then_some(Face::Back),
-                        ..Default::default()
-                    },
-                    depth_stencil: Some(DepthStencilState {
-                        format: CORE_3D_DEPTH_FORMAT,
-                        depth_write_enabled: true,
-                        depth_compare: CompareFunction::GreaterEqual,
-                        stencil: StencilState::default(),
-                        bias: DepthBiasState::default(),
-                    }),
-                    multisample: MultisampleState {
-                        count: msaa.samples(),
-                        ..Default::default()
-                    },
-                    ..default()
-                });
-                pipes.depth_pipelines.insert((cutout, two_sided), depth_id);
-            }
-        }
-        pipes.specialized_for = Some(key);
+        let layout = [pipes.view_layout.clone(), pipes.cell_layout.clone()];
+        serve_view_keys(&mut pipes.sets, keys(), &shader, &layout, |descriptor| {
+            pipeline_cache.queue_render_pipeline(descriptor)
+        });
     }
 
     // Every published map empty is a map change (`StaticGx::clear`): reset the pool and cache.
@@ -832,13 +843,15 @@ impl ViewNode for StaticGxPrepassNode {
         // Only when a depth prepass is actually attached: drawing depth nobody asked for is a pass
         // for nothing.
         &'static bevy::core_pipeline::prepass::ViewPrepassTextures,
+        &'static Msaa,
+        &'static ViewTarget,
     );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (depth, view_offset, _marker, prepass): QueryItem<'w, '_, Self::ViewQuery>,
+        (depth, view_offset, _marker, prepass, msaa, target): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         if prepass.depth.is_none() || !gx_prepass_on() {
@@ -860,10 +873,13 @@ impl ViewNode for StaticGxPrepassNode {
         if resolved.is_empty() {
             return Ok(());
         }
+        let Some(set) = pipes.sets.get(&pipe_key(msaa, target)) else {
+            return Ok(());
+        };
         // All-or-none, exactly as the colour pass requires it: a half-compiled set would write a
         // partial silhouette into the depth every other consumer trusts.
         let mut ready: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
-        for (k, id) in &pipes.depth_pipelines {
+        for (k, id) in &set.depth {
             match pipeline_cache.get_render_pipeline(*id) {
                 Some(p) => {
                     ready.insert(*k, p);
@@ -907,13 +923,14 @@ impl ViewNode for StaticGxNode {
         &'static ViewDepthTexture,
         &'static ViewUniformOffset,
         &'static StaticGxView,
+        &'static Msaa,
     );
 
     fn run<'w>(
         &self,
         _graph: &mut RenderGraphContext,
         render_context: &mut RenderContext<'w>,
-        (target, depth, view_offset, _marker): QueryItem<'w, '_, Self::ViewQuery>,
+        (target, depth, view_offset, _marker, msaa): QueryItem<'w, '_, Self::ViewQuery>,
         world: &'w World,
     ) -> Result<(), NodeRunError> {
         let _t = super::gx_perf_guard(4);
@@ -935,10 +952,14 @@ impl ViewNode for StaticGxNode {
         if resolved.is_empty() {
             return Ok(());
         }
+        // The set of this view's own key: the world camera may multisample, its mirrors never do.
+        let Some(set) = pipes.sets.get(&pipe_key(msaa, target)) else {
+            return Ok(());
+        };
         // All four pipelines or none: a region drawing only its opaque half would flash its
         // cutout content off for a frame.
         let mut ready: HashMap<(bool, bool), &RenderPipeline> = HashMap::default();
-        for (k, id) in &pipes.pipelines {
+        for (k, id) in &set.colour {
             match pipeline_cache.get_render_pipeline(*id) {
                 Some(p) => {
                     ready.insert(*k, p);
@@ -1090,5 +1111,69 @@ mod tests {
         assert_eq!(runs[1].index_range, 6..9);
         // Kill everything: nothing is submitted.
         assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
+    }
+
+    /// Each view the pass draws into gets the pipelines of its own key: with `gxMultisample` 4 the
+    /// world camera multisamples and its mirrors and probe faces do not, and a pipeline whose
+    /// sample count is not its pass's is a validation error that aborts the client.
+    #[test]
+    fn every_pass_view_draws_with_pipelines_of_its_own_sample_count() {
+        let mut world = World::new();
+        let mirror = world.spawn(crate::liquid::mirror_view_shape()).id();
+        let hdr = ViewTarget::TEXTURE_FORMAT_HDR;
+        let mirror_key = (world.get::<Msaa>(mirror).unwrap().samples(), hdr);
+        let world_key = |samples| (crate::view::MsaaSetting { samples }.level().samples(), hdr);
+        assert_ne!(
+            world_key(4),
+            mirror_key,
+            "MSAA 4 draws the pass under two keys a frame"
+        );
+        assert_eq!(world_key(1), mirror_key, "MSAA off draws it under one");
+
+        let layout = [
+            BindGroupLayoutDescriptor::new("view", &[]),
+            BindGroupLayoutDescriptor::new("cell", &[]),
+        ];
+        let shader = Handle::<Shader>::default();
+        let views_4x = [
+            // The query's order is the render world's: either view may come first.
+            [world_key(4), mirror_key, mirror_key],
+            [mirror_key, mirror_key, world_key(4)],
+        ];
+        for (views, distinct) in views_4x
+            .into_iter()
+            .map(|v| (v, 2))
+            .chain([([world_key(1), mirror_key, mirror_key], 1)])
+        {
+            let mut sets = HashMap::default();
+            let mut queued = 0;
+            serve_view_keys(&mut sets, views, &shader, &layout, |d| {
+                queued += 1;
+                d
+            });
+            assert_eq!(queued, 8 * distinct, "eight pipelines per distinct key");
+            for (samples, format) in views {
+                let set = &sets[&(samples, format)];
+                assert_eq!((set.colour.len(), set.depth.len()), (4, 4));
+                for d in set.colour.values().chain(set.depth.values()) {
+                    assert_eq!(d.multisample.count, samples, "{:?}", d.label);
+                }
+                for d in set.colour.values() {
+                    let targets = &d.fragment.as_ref().unwrap().targets;
+                    assert_eq!(targets.len(), 1, "{:?}", d.label);
+                    assert_eq!(targets[0].as_ref().unwrap().format, format, "{:?}", d.label);
+                }
+                for d in set.depth.values() {
+                    assert!(d.fragment.as_ref().unwrap().targets.is_empty());
+                }
+            }
+            // A view that comes back, a probe face between captures, queues nothing.
+            let mut again = 0;
+            serve_view_keys(&mut sets, views, &shader, &layout, |d| {
+                again += 1;
+                d
+            });
+            assert_eq!(again, 0);
+        }
     }
 }
