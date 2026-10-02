@@ -212,12 +212,10 @@ pub(crate) struct WaterReflect {
 ///   distortion, `w` = the plane tolerance.
 /// - `4..8` — **the sun the player can actually see**: `xyz` = the to-sun direction
 ///   ([`crate::lighting::WowLighting::celestial_dir`]) and `w` = [`crate::sun::SunVisibility`].
-/// - `8..12` / `12..16` — **the sky the surface reflects**: the zenith and horizon stops of the
+/// - `8..12` / `12..16` — **the sky the underside reflects**: the zenith and horizon stops of the
 ///   dome's own gradient (`WowLighting::sky` rows 0 and 4 — the same colours the dome is drawn
-///   with, so the water agrees with the sky above it at every hour and in every zone). The water
-///   reads them at the reflected view ray's elevation, which is what makes a wave visible when the
-///   sun is behind you; a single flat sky colour cannot, because at a grazing angle a tilted facet
-///   and a flat one both return it.
+///   with). The water seen from below reads them at the reflected view ray's elevation; from above
+///   it reflects the sky floor (`super::sky_lut`).
 /// - `20..24` — **the moon**, the same pair as the sun: `xyz` = the to-moon direction and `w` =
 ///   [`crate::sun::MoonVisibility`]. A separate body rather than a switch on the sun's, because on
 ///   the nights both are up they are up together and in different parts of the sky.
@@ -1186,7 +1184,7 @@ pub(super) fn drive_reflection(
         data.0[DOME_LANES.start + 4 * row..DOME_LANES.start + 4 * row + 4]
             .copy_from_slice(&v.to_array());
     }
-    // The sky gradient every tier falls back on; `w` lanes are debug views, off.
+    // The sky gradient the underside reflects; `w` lanes are debug views, off.
     let (zenith, horizon) = (light.sky[0], light.sky[4]);
     data.0[8..12].copy_from_slice(&[zenith[0], zenith[1], zenith[2], 0.0]);
     data.0[12..16].copy_from_slice(&[horizon[0], horizon[1], horizon[2], 0.0]);

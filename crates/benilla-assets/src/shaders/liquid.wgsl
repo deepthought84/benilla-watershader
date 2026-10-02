@@ -261,8 +261,8 @@ struct WaterReflect {
     // the frames the mirror above is off.
     sun: vec4<f32>,
     // The sky dome's own gradient stops, zenith and horizon (`WowLighting.sky` rows 0 and 4) — the
-    // colours the dome overhead is actually drawn with, so the water agrees with the sky above it
-    // at every hour and in every zone. `w` unused on both.
+    // colours the dome overhead is actually drawn with. The underside's reflection reads them
+    // ([`underside_sky`]). `w` unused on both.
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,
     // The wave simulation's window: xy = its lower corner in world XZ yards, z = one over its side
@@ -2203,6 +2203,14 @@ fn sky_floor(dir: vec3<f32>, alpha: f32) -> vec3<f32> {
     return textureSampleLevel(sky_lut, scene_samp, dir, lod).rgb;
 }
 
+/// The sky the surface's underside reflects, in gamma: the dome's zenith and horizon stops
+/// (`WowLighting::sky` rows 0 and 4) at the reflected ray's elevation, `sqrt` on the blend because
+/// the dome's gradient is weighted toward its horizon stop. The sky floor is the look from above.
+fn underside_sky(dir: vec3<f32>) -> vec3<f32> {
+    let t = sqrt(saturate(dir.y));
+    return mix(water_reflect.sky_horizon.rgb, water_reflect.sky_zenith.rgb, t);
+}
+
 // The per-pixel march's lowest level and step budget, per tier.
 #ifdef WATER_TIER_HIGH
 const FLOOR_MARCH_LEVEL: i32 = 2;
@@ -2452,6 +2460,10 @@ fn stylised_water(
     // far face higher up, so ripples show under any sky, not only along the sun's glitter path.
     let r_rip = reflect(-to_view, n);
     let sky = sky_floor(r_rip, surf.alpha);
+    // Seen from below, the surface reflects the dome's two stops along the same ray, lit as the
+    // terrain is ([`underside_sky`]); the floor in gamma either way.
+    let eye_above = view.world_position.y > world_pos.y;
+    let sky_g = select(underside_sky(r_rip) * lit, water_enc(sky), eye_above);
     // **A surface has one reflection, and Fresnel is how big its share of the fragment is.** This
     // is that share, and the tiers below spend it: the sky, the capture and the march are three
     // answers to *what* is reflected, never three separate reflections to be layered one over the
@@ -2464,7 +2476,7 @@ fn stylised_water(
     // while a coast, where the tier is looking at the sky anyway, read as correct.
     let fres = mix(0.02, 0.45, fresnel);
     let layered = water_reflect.flags.w > 0.5;
-    var rgb = mix(body, water_enc(sky), fres);
+    var rgb = mix(body, sky_g, fres);
 
     // ---- the cubemap probe, tier four ---------------------------------------------------------
     //
@@ -2734,7 +2746,7 @@ fn stylised_water(
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view, d_eye);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
-    let floor_g = water_enc(occ.rgb + occ.v * sky);
+    let floor_g = select(sky_g, water_enc(occ.rgb + occ.v * sky), eye_above);
     let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
         * (1.0 - w_s)
         + ssr.rgb * w_s;
