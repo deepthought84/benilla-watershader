@@ -7,8 +7,9 @@
 //! The rule reads shape, not meaning. Any pair of place-sized floats in a vector or an array reads
 //! as a position, a size or a fade range packed as `vec2(100.0, 400.0)` or `[512.0, 512.0]` too:
 //! pass such a range as a function's two arguments. A pair returned as a tuple or built with
-//! `array<f32, 2>(…)`, a pair with an expression in it, and a triple with fewer than two
-//! place-sized literals are not read as positions.
+//! `array<f32, 2>(…)`, a pair with an expression in it, and a triple with an expression in it and
+//! fewer than two place-sized literals are not read as positions. A triple of literals is one when
+//! a literal is place-sized and two are not 0: `vec3(0.0, 10000.0, 0.0)`, on an axis, passes.
 
 use std::path::{Path, PathBuf};
 

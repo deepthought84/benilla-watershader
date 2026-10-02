@@ -656,7 +656,8 @@ pub struct LiquidExt {
     /// The opaque world's linear depth behind each pixel (`benilla_water`'s `hiz`), view Z in yards,
     /// 0 where nothing was drawn: what the stylised lane measures its water column against. Written
     /// inside the water's screen rectangle alone; a texel outside it holds what an earlier frame
-    /// wrote there. Read by `textureLoad`, and only under `WATER_SCENE_DEPTH`.
+    /// wrote there, or 0 where none has since the image was made (at boot or a resize). Read by
+    /// `textureLoad`, and only under `WATER_SCENE_DEPTH`.
     #[texture(116, sample_type = "float", filterable = false, visibility(fragment))]
     pub scene_depth: Handle<Image>,
     /// The sky floor's occlusion over the mirror planes (`benilla_water`'s `water_compute`), a
@@ -2060,7 +2061,9 @@ mod tests {
             );
         }
         // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
-        // `WATER_SSR`, the region's guards that declare names; the tier's branches declare none.
+        // `WATER_SSR`, the region's guards whose names only they declare. The tier's branches
+        // declare module-scope names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`), the same ones
+        // in every branch, so this key's tier declares them all.
         let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
         let text = liquid_under(&water.frag_defs());
         let seen = identifiers(&text);

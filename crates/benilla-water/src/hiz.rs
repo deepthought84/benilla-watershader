@@ -10,7 +10,8 @@
 //! ([`super::world_view::WaterScreenRect`]), the **linear depth**: view Z in yards behind every
 //! pixel, full resolution, 0 where nothing was drawn. That is what the water measures its column
 //! against; it is published as `WaterPassImages::scene_depth`. Texels outside this frame's
-//! rectangle keep whatever an earlier frame wrote there.
+//! rectangle keep whatever an earlier frame wrote there, or 0 where none has since the image was
+//! made (at boot or a resize).
 //!
 //! **Only while stylised water is on screen.** The seed runs on the frames the rectangle is
 //! visible. With no pyramid reader it covers only the rectangle's texels and writes the linear

@@ -993,7 +993,9 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
     // glint or moon scene faces the sun's and moon's 45° bearing instead. The canal, the night
     // beach and the underwater eye are a vista's feet + 2 yd, heading and pitch. They stream in
     // slowly, so each settles on 300 still frames, not 30 (`capture`'s `WATER_STABLE_FRAMES`).
-    // Boxes below are 1600x900 frame pixels; a diff inside a row's flake box is run variance.
+    // Boxes below are 1600x900 frame pixels; a diff inside a flake box is run variance. Every
+    // scene's flake boxes are in the first comment of its region file,
+    // `scripts/water_regions/<scene>.toml`; some rows below repeat theirs.
     //
     // A big lake: Loch Modan from the shore by (-5240.0, -3117.0, 299.6), facing 270 across it.
     // Flake: a lake-bed patch at x815-837 y701-720 lands in one of two states, on both lanes.

@@ -237,7 +237,10 @@ pub(crate) struct WaterReflect {
 /// fixed at compile time and the unused tail simply carries a zero validity flag.
 pub(crate) struct WaterReflectData(pub(crate) [f32; REFLECT_FLOATS]);
 
-/// How far the ripple shifts the reflected ray's origin, in yards.
+/// The ripple's slide of the point a reflection is read for, in yards per unit of the normal's
+/// horizontal tilt (`water_reflect.march.y`): the planar mirror, the floor occlusion, the probes
+/// and the march read the reflection at `world_pos + n.xz · this`, the ray's direction unchanged,
+/// so neighbouring pixels stay coherent and every sample reflects a real point.
 fn ripple_origin() -> f32 {
     3.0
 }

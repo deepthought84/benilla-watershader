@@ -78,7 +78,8 @@ const PROBE_TAPS_MAX: i32 = 3;
 #ifdef WATER_SCENE_DEPTH
 // The opaque world's linear depth behind each pixel (`liquid::hiz`): view Z in yards, written after
 // the opaque pass inside the water's screen rectangle, 0 where nothing was drawn. A texel outside
-// the rectangle holds what an earlier frame wrote there.
+// the rectangle holds what an earlier frame wrote there, or 0 where none has since the image was
+// made (at boot or a resize).
 @group(#{MATERIAL_BIND_GROUP}) @binding(116) var scene_depth_tex: texture_2d<f32>;
 #endif
 
@@ -980,37 +981,6 @@ fn stylised_lava(sheet: vec3<f32>, world_xz: vec2<f32>, t: f32) -> vec3<f32> {
 // (`LiquidKey::composite`, the `WATER_STYLISED` def): the reference and magma pipelines never see it,
 // so nothing in it can drop their draws by naming a symbol their defs leave out.
 
-/// How far the ripple slides a reflection's LOOKUP POINT across the surface, in yards —
-/// shared by all three tiers, because the mistake it fixes was shared by all three.
-///
-/// **The ripple belongs to the surface, not to the ray and not to the read.** All three were
-/// tried against a reproduction of the artefact Stefan reported — a reflected trunk broken into
-/// repeated rungs — and the difference between them is not a matter of degree:
-///
-/// * **In the READ** (what this replaces): the hit's UV was displaced in ORIGINAL screen space,
-///   which is not a reflection of anywhere. Shoving that image around samples unrelated geometry,
-///   and on a vertical feature it walks up and down the trunk and shows the same bark repeatedly.
-///   The planar tier can displace its read because its capture genuinely IS a reflected image; the
-///   march has no such buffer, and borrowing the technique from the tier that does was the error.
-/// * **In the RAY**: geometrically honest and unusable. Neighbouring pixels get meaningfully
-///   different directions, and at a grazing angle a slight tilt swings the ray a long way
-///   vertically, so hits scatter into vertical confetti — measured at a 2.10 vertical-to-horizontal
-///   ratio against 1.32 for the read displacement, i.e. twice as bad as the bug. (Its hit rate is
-///   fine now, 39.3% where the note that abandoned this approach recorded 11.8% — that measurement
-///   predates the thickness-rejection reordering and no longer stands. The approach fails for a
-///   different reason than the one on record.)
-/// * **In the ORIGIN**, which is this: neighbours keep the SAME ray direction, so the march stays
-///   coherent and the picture stays smooth, while every sample remains a true reflection of a real
-///   point on the water — just a point a few inches away from the one under the pixel. Nothing can
-///   repeat, because nothing is being shifted; the surface is simply being read where the wave has
-///   moved it. Ratio 0.98 against a waves-off floor of 0.85, with the hit rate at 37.0%.
-///
-/// A wave displaces the water by a distance, so this is in yards and needs no conversion. Raising
-/// it deepens the wobble without any risk of the repeats coming back — the failure mode it
-/// replaces is not on this axis at all.
-// Default 3, carried in `water_reflect.march.y`
-const RIPPLE_ORIGIN_YD: f32 = 3.0;
-
 /// A screen-space reflection hit: what was there, and how much to believe it.
 struct SsrHit {
     rgb: vec3<f32>,
@@ -1022,7 +992,8 @@ struct SsrHit {
 
 /// The opaque world's view Z behind pixel `px` in yards, from the linear depth; 0 where it is not
 /// known (nothing drawn, or outside the image). Valid inside the water's screen rectangle: a pixel
-/// outside it reads what an earlier frame wrote there.
+/// outside it reads what an earlier frame wrote there, or 0 where none has since the image was made
+/// (at boot or a resize).
 fn scene_view_z(px: vec2<i32>) -> f32 {
     let dims = vec2<i32>(textureDimensions(scene_depth_tex));
     if (any(px < vec2<i32>(0)) || any(px >= dims)) {
@@ -1492,24 +1463,11 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
 //
 // Nothing outside this block names anything in it, so the shipped pipelines compile none of it.
 
-/// How far the march's READ is blurred, in **main-view texels** — the march's answer to the
-/// downscale-and-blur the planar capture already gets.
-///
-/// **The march's hits are hard-edged, and that is information rather than texture.** Where the
-/// planar capture is half resolution and then 4-tap blurred ([`sample_mirror`]), the snapshot is
-/// full resolution and unfiltered, so the march's own discontinuities — the boundary between a
-/// pixel that found something and one that did not, the quantisation of the refined crossing, the
-/// edge-fade ramp — arrive at full contrast. Displaced per-pixel by the ripple, they read as crisp
-/// striations across the surface, which is easy to mistake for wave detail and is nothing of the
-/// kind: it is the shape of what the march does not know.
-///
-/// Two taps' worth of radius covers the same ~6 main-view texels the planar tier's kernel does (one
-/// capture texel at [`REFLECT_DOWNSCALE`](benilla_world::liquid) 2, tented over 3x3), which is the
-/// point — the two tiers should not be distinguishable by their grain. This is the cheap half of
-/// "trace into a downscaled buffer and blur it": the *colour* is filtered here, for four fetches on
-/// a path that was already about to make one. The march's hit-finding is untouched and stays exact,
-/// because it walks the depth pyramid and never reads the snapshot to find a crossing — only to
-/// colour one.
+/// How far the march's read is blurred, in main-view texels: four bilinear taps on the diagonals
+/// this far out cover about the 6 texels the planar capture's kernel does ([`sample_mirror`], one
+/// capture texel at [`REFLECT_DOWNSCALE`](benilla_world::liquid) 2, tented over 3x3), so the march's
+/// hard-edged hits read with the planar tier's grain. Only the colour is filtered: the hit is found
+/// on the depth pyramid, which this does not touch.
 const SSR_READ_BLUR: f32 = 2.0;
 
 /// How far from the edge of the frame the march's confidence starts falling, in UV.
@@ -1521,40 +1479,11 @@ const SSR_READ_BLUR: f32 = 2.0;
 /// underneath it are still there to take over.
 const SSR_EDGE_FADE: f32 = 0.14;
 
-/// Read the scene snapshot where the ray landed, and score how much to believe it.
-///
-/// The ripple lands on the ray's ORIGIN, not here and not on the ray — see [`RIPPLE_ORIGIN_YD`].
-/// Clamped inside the frame
-/// because the snapshot has nothing outside it, and the confidence is measured on the DISPLACED UV
-/// so a wobble that walks off the edge fades out with everything else rather than clamping to a
-/// smeared border pixel.
-///
-/// The ripple's displacement of the march's read, in UV — a fixed distance in YARDS, converted per
-/// fragment.
-///
-/// **A constant UV offset is the wrong shape and it is why the far water smeared.** The reflection
-/// is read by displacing the hit's UV, and at a grazing angle the water is compressed hard into the
-/// frame: near the horizon a fifth of a screen-width of UV spans hundreds of yards of surface, so a
-/// fixed `0.055` there does not crinkle the reflection, it tears it and samples something
-/// unrelated. Close to the camera the same number is a gentle wobble. That difference is the
-/// artefact — long stretched bands of repeated foliage where the compression is worst, reported as
-/// "ssr has repetetive patterns in the reflection like a longstretched repeated texture tree crown"
-/// — and it is made worse by the ripple being a TILING pattern, so the tearing repeats with it.
-///
-/// A wave displaces what you see by some distance across the water, not by some fraction of the
-/// screen, so the amplitude is authored in yards and converted here. `fwidth(world_pos.xz)` is how
-/// much world a pixel covers at this fragment, which is exactly the conversion factor and costs two
-/// derivatives. Near water keeps its wobble, far water stops tearing, and neither needed a distance
-/// threshold to be chosen.
-///
-/// **This deliberately diverges from `REFLECT_DISTORT`**, which the constant above was matched to so
-/// the two tiers would wobble alike. They still do where it can be seen — the yard figure is set to
-/// match what `0.055` meant at close range — but the planar tier carries the same compression bug
-/// untouched here, because it was not what was reported and its capture is a coherent mirror that
-/// tears far less visibly when over-displaced.
-
-/// Shared by both of the march's terminations — opaque geometry and sky — because the two differ
-/// only in how the UV was arrived at, never in what is done with it.
+/// Read the scene snapshot where the ray landed, and score how much to believe it: the UV is
+/// clamped inside the frame, which the snapshot does not reach past, and the confidence falls off
+/// toward the frame's border ([`ssr_edge_conf`]). Both of the march's terminations, opaque geometry
+/// and sky, read through it. The ripple moves the ray's origin, not this read
+/// (`water_reflect.march.y`).
 fn ssr_read(uv: vec2<f32>) -> SsrHit {
     var out: SsrHit;
     let read_uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));
@@ -1654,11 +1583,11 @@ fn hiz_screen(p: vec3<f32>) -> vec3<f32> {
 ///
 /// The fine ripple is deliberately NOT in that direction: it slides the ray's ORIGIN across the
 /// surface instead, so neighbouring pixels keep one direction and the march stays coherent while
-/// every sample is still a true reflection of a real point. [`RIPPLE_ORIGIN_YD`] carries the
-/// measurements and why the other two placements fail. What it cannot do is see off the screen,
-/// which is why it returns a confidence rather than just a colour: where the ray leaves the frame
-/// the planar capture and the sky mix behind it take over. Under [`WaterStyle::StylisedSsr`] there is no capture behind it and
-/// the sky mix alone catches what it misses, which is the trade that lane is offered for.
+/// every sample is still a true reflection of a real point (`water_reflect.march.y`). What it cannot
+/// do is see off the screen, which is why it returns a confidence rather than just a colour: where
+/// the ray leaves the frame the planar capture and the sky mix behind it take over. Under
+/// [`WaterStyle::StylisedSsr`] there is no capture behind it and the sky mix alone catches what it
+/// misses, which is the trade that lane is offered for.
 ///
 /// The water itself is not in the pyramid (`liquid::hiz` seeds it after the opaque pass, before
 /// anything transparent draws), so there is no self-intersection to bias against — the first step

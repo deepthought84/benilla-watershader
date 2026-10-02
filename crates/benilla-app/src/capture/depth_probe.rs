@@ -14,7 +14,8 @@
 //! Beside each pixel's depth it logs `lin=`, the Improved Water's linear depth at the same pixel
 //! (`WaterPassImages::scene_depth`, view Z in yards, 0 where nothing drew), read after the
 //! transparent pass, and its relative difference from the view Z derived here. It is written only
-//! inside the water's screen rectangle; outside it a texel holds what an earlier frame wrote there.
+//! inside the water's screen rectangle; outside it a texel holds what an earlier frame wrote there,
+//! or 0 where none has since the image was made (at boot or a resize).
 //! Without the water plugin the image is a one-texel placeholder and no `lin=` is logged.
 //!
 //! MSAA must be off (`WOW_MSAA=off`): a multisampled depth texture cannot be copied and has no

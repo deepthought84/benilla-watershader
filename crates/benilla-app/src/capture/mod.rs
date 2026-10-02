@@ -17,8 +17,9 @@
 //! draw order among coplanar equal-depth batches follows spawn order, which follows thread-pool
 //! load completion. It is a renderer defect the harness reports; waiting longer cannot gate it
 //! away. `creature-indoor-front` is one: two runs of one build differ at MAE 4.518, confined to
-//! the subject's brightness, so a 4.518 there is the flake, not the change under test. The golden
-//! water scenes' own two-state patches are written on their rows in `scenarios.rs`.
+//! the subject's brightness, so a 4.518 there is the flake, not the change under test. Each golden
+//! water scene's own two-state patches are in the first comment of its region file,
+//! `scripts/water_regions/<scene>.toml`.
 //!
 //! ## Bursts
 //! `$WOW_CAPTURE_BURST=<n>` writes `n` shots after the age instead of one, `<stem>-000.png`,
@@ -317,7 +318,7 @@ const AGE_FRAMES: u32 = 150;
 /// The golden water scenes' age ([`scenarios::water_scene_names`]): the water probe takes its
 /// first cubes 2 s into the age and a slot at a time after that, so a 2.5 s shot races them; at
 /// 1000 steps (16.7 s) every cube is in and the shot repeats byte for byte outside the scene's
-/// two-state patches (written on its row in `scenarios.rs`).
+/// two-state patches (its region file's first comment, `scripts/water_regions/<scene>.toml`).
 const WATER_AGE_FRAMES: u32 = 1000;
 
 /// The age `scene` runs: `$WOW_CAPTURE_AGE`, else its own.
