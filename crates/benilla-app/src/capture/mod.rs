@@ -232,8 +232,10 @@ pub(crate) struct FxViewState {
     /// Set once the scene has settled; the fixture spawns only then, so its age is the one asked.
     pub(crate) armed: bool,
     pub(crate) root: Option<Entity>,
-    /// `time.elapsed_secs()` when the visuals attached: the age clock's zero.
-    pub(crate) attached_at: Option<f32>,
+    /// `time.elapsed()` when the visuals attached: the age clock's zero. Exact, so a shot's clock
+    /// past it ([`shot_clock`]) is the same on every run; the age checks compare
+    /// `attached_at.as_secs_f32()`, the `elapsed_secs()` of that frame.
+    pub(crate) attached_at: Option<Duration>,
     /// The root was reaped after one sequence pass, as the game reaps a discrete kit;
     /// `WOW_FX_HOLD=1` disables the reap.
     pub(crate) expired: bool,
@@ -294,6 +296,45 @@ const BUILD_CAP_FRAMES: u32 = 1800;
 /// ([`CaptureCtx::flat_credit`]), which are no part of the build.
 fn build_cap_frames(scene: &str, flat_credit: u32) -> u32 {
     BUILD_CAP_FRAMES + stable_frames(scene) + flat_credit
+}
+
+/// The cap credit after another stable run of `run` frames on the clear colour, at most
+/// [`BUILD_CAP_FRAMES`].
+fn credit_clear_run(credit: u32, run: u32) -> u32 {
+    (credit + run).min(BUILD_CAP_FRAMES)
+}
+
+/// What a build that has settled, or reached its cap, does with its last frame ([`settle_verdict`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Settle {
+    /// Go on to the shot: the frame shows something, or it is a fixture viewer's, whose subject
+    /// arms only after the settle.
+    Shoot,
+    /// A golden water scene still shows its clear colour: the run is credited to the cap
+    /// ([`credit_clear_run`]) and the build goes on.
+    BuildOn,
+    /// One colour on a scene that does not wait for its world: the shot goes on, logged FLAT.
+    Flat,
+    /// A golden water scene reached its cap on its clear colour: logged FLAT, exit nonzero.
+    Failed,
+}
+
+/// The verdict on a settled or capped build's last frame: `flat`, every pixel one colour; `waits`,
+/// a golden water scene, which builds on until its world is in (its map can show the clear colour
+/// for longer than the whole settle: the Kalimdor scenes do); `capped`, the build reached
+/// [`build_cap_frames`]; `fixture`, a fixture viewer (`fxview`, `waterfx`).
+fn settle_verdict(flat: bool, waits: bool, capped: bool, fixture: bool) -> Settle {
+    if !flat {
+        Settle::Shoot
+    } else if waits && !capped {
+        Settle::BuildOn
+    } else if fixture {
+        Settle::Shoot
+    } else if waits {
+        Settle::Failed
+    } else {
+        Settle::Flat
+    }
 }
 
 /// Wall-clock ceiling on a capture run, past which it exits with an error. The other bounds count
@@ -467,9 +508,10 @@ fn clear_old_shots(out: &str, burst: u32) -> std::io::Result<()> {
 /// attached, which is the same on every run; else the virtual clock, which the frozen build makes
 /// the scene's age.
 fn shot_clock(game_time: &Time, fx: Option<&FxViewState>) -> f64 {
-    let now = game_time.elapsed_secs_f64();
+    let now = game_time.elapsed();
     fx.and_then(|s| s.attached_at)
-        .map_or(now, |t0| now - f64::from(t0))
+        .map_or(now, |t0| now.saturating_sub(t0))
+        .as_secs_f64()
 }
 
 /// Burst shot `shot`'s file: `<stem>-NNN.<ext>` beside `out`.
@@ -1233,10 +1275,9 @@ fn drive_capture(
                     .and_then(|px| px.as_chunks::<4>().0.split_first())
                 {
                     let flat = rest.iter().all(|p| p[..3] == first[..3]);
-                    // A golden water scene builds on until its world is in: its map can show
-                    // the clear colour for longer than the whole settle (the Kalimdor scenes do).
                     let waits = scenarios::water_scene_names().any(|s| s == ctx.name);
-                    if flat && waits && !capped {
+                    let verdict = settle_verdict(flat, waits, capped, fixture_age.is_some());
+                    if verdict == Settle::BuildOn {
                         if !ctx.waited_flat {
                             ctx.waited_flat = true;
                             info!(
@@ -1247,17 +1288,15 @@ fn drive_capture(
                             );
                         }
                         // The clear colour is no part of the build: its run extends the cap.
-                        ctx.flat_credit = (ctx.flat_credit + watch.stable).min(BUILD_CAP_FRAMES);
+                        ctx.flat_credit = credit_clear_run(ctx.flat_credit, watch.stable);
                         watch.stable = 0;
-                    } else if flat && fixture_age.is_none() {
-                        // A fixture viewer settles before it arms its subject, so its settle frame
-                        // may be the clear colour and its shot is not.
+                    } else if matches!(verdict, Settle::Flat | Settle::Failed) {
                         error!(
                             "capture: settled image is FLAT — every pixel is {:?} in the \
                              readback's channel order; the scene rendered nothing",
                             &first[..3],
                         );
-                        if waits {
+                        if verdict == Settle::Failed {
                             error!(
                                 "capture: FAILED — {} never left its clear colour; exiting \
                                  nonzero",
@@ -1317,7 +1356,7 @@ fn drive_capture(
             let aged = match (fixture_age, &fx_state) {
                 (Some(age), Some(state)) => state
                     .attached_at
-                    .is_some_and(|t0| game_time.elapsed_secs() - t0 >= age),
+                    .is_some_and(|t0| game_time.elapsed_secs() - t0.as_secs_f32() >= age),
                 _ => true,
             };
             if aged {
@@ -1918,6 +1957,54 @@ mod tests {
         let base = build_cap_frames("water-loch-modan", 0);
         assert_eq!(base, BUILD_CAP_FRAMES + WATER_STABLE_FRAMES);
         assert_eq!(build_cap_frames("water-loch-modan", 600), base + 600);
+        // Each run on the clear colour adds its length, up to one whole build.
+        let credit = credit_clear_run(credit_clear_run(0, 300), 300);
+        assert_eq!(credit, 600);
+        assert_eq!(credit_clear_run(1700, 300), BUILD_CAP_FRAMES);
+        assert_eq!(credit_clear_run(BUILD_CAP_FRAMES, 300), BUILD_CAP_FRAMES);
+    }
+
+    /// The four verdicts on a settled build's last frame: a frame that shows something is shot; a
+    /// golden water scene on its clear colour builds on until its cap, then fails; any other scene
+    /// shoots its one colour, logged FLAT; a fixture viewer's one colour is no verdict, since its
+    /// subject arms after the settle.
+    #[test]
+    fn a_settled_frame_is_shot_built_on_flagged_or_failed() {
+        for waits in [false, true] {
+            for capped in [false, true] {
+                for fixture in [false, true] {
+                    let v = settle_verdict(false, waits, capped, fixture);
+                    assert_eq!(v, Settle::Shoot, "{waits} {capped} {fixture}");
+                }
+            }
+        }
+        assert_eq!(settle_verdict(true, true, false, false), Settle::BuildOn);
+        assert_eq!(settle_verdict(true, true, true, false), Settle::Failed);
+        assert_eq!(settle_verdict(true, false, false, false), Settle::Flat);
+        assert_eq!(settle_verdict(true, false, true, false), Settle::Flat);
+        assert_eq!(settle_verdict(true, false, false, true), Settle::Shoot);
+        assert_eq!(settle_verdict(true, false, true, true), Settle::Shoot);
+    }
+
+    /// A fixture's shot clock is its age to the nanosecond, whatever frame it attached on, so two
+    /// runs of one fixture log the same times.
+    #[test]
+    fn a_fixtures_shot_clock_does_not_depend_on_when_it_attached() {
+        let aged = CAPTURE_FRAME_DT * 90;
+        for attach in [1_u32, 97, 1571, 1974, 4000] {
+            let mut time = Time::<()>::default();
+            time.advance_by(CAPTURE_FRAME_DT * attach);
+            let fx = FxViewState {
+                attached_at: Some(time.elapsed()),
+                ..Default::default()
+            };
+            time.advance_by(aged);
+            assert_eq!(
+                shot_clock(&time, Some(&fx)),
+                aged.as_secs_f64(),
+                "attached at {attach}"
+            );
+        }
     }
 
     /// Burst shots sit beside the single shot's path, numbered from 000, keeping its extension.

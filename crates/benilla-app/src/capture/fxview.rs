@@ -161,7 +161,7 @@ pub(crate) fn drive_fx_view(
                 .get(&req.model_path)
                 .and_then(|dm| dm.first_seq_span)
                 .unwrap_or(FALLBACK_SPAN);
-            if time.elapsed_secs() >= at + span {
+            if time.elapsed_secs() >= at.as_secs_f32() + span {
                 commands.entity(root).despawn();
                 state.expired = true;
             }
@@ -170,7 +170,7 @@ pub(crate) fn drive_fx_view(
     if state.attached_at.is_none() {
         // The unit and GO lanes have no attach step: their age counts from the entity's spawn.
         if req.display.is_some() || req.go.is_some() {
-            state.attached_at = Some(time.elapsed_secs());
+            state.attached_at = Some(time.elapsed());
             return;
         }
         fx.models.entry(req.model_path.clone()).or_insert_with(|| {
@@ -203,7 +203,7 @@ pub(crate) fn drive_fx_view(
             &mut palettes,
             None, // a kit effect on its model's own `Stand`
         ) {
-            state.attached_at = Some(time.elapsed_secs());
+            state.attached_at = Some(time.elapsed());
         }
     }
 }

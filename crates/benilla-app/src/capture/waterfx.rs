@@ -79,7 +79,7 @@ pub(crate) fn spawn(
 
     if view.live {
         spawn_dummy(&mut commands, &view, cx, cy, surf);
-        state.attached_at = Some(time.elapsed_secs());
+        state.attached_at = Some(time.elapsed());
         info!("waterfx: rig armed in LIVE water at ({cx}, {cy}, {surf})");
         return;
     }
@@ -121,7 +121,7 @@ pub(crate) fn spawn(
     ));
 
     spawn_dummy(&mut commands, &view, cx, cy, surf);
-    state.attached_at = Some(time.elapsed_secs());
+    state.attached_at = Some(time.elapsed());
     info!(
         "waterfx: rig armed (mode {}, speed {}, depth {}, age {})",
         match view.mode {
@@ -182,7 +182,7 @@ pub(crate) fn drive(
     let Some(t0) = state.attached_at else {
         return;
     };
-    if time.elapsed_secs() - t0 >= view.age {
+    if time.elapsed_secs() - t0.as_secs_f32() >= view.age {
         return; // hold still for the shot
     }
     for mut t in &mut units {
