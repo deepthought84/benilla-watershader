@@ -13,7 +13,8 @@
 # $WATER_SCENES="<scene> …" captures those scenes instead of every one. $WATER_VIEW=<view>
 # captures that Improved Water debug view instead (`dev_state::WATER_VIEWS`), <scene>@<view>.png,
 # Improved only and with the FFX glow off, so a pixel holds what the view wrote. $WOW_CAPTURE_PAN,
-# and any other capture knob in the environment, reaches every client.
+# and any other capture knob in the environment, reaches every client, apart from
+# $WOW_CAPTURE_STABLE and $WOW_CAPTURE_AGE, which the script drops (the render state, below).
 #
 # $WATER_PERF=<frames> measures instead of shooting (INS-4): each scene and its Reference twin build
 # and age as for a still, then run <frames> frames with vsync off (`WOW_FPS_PROBE`), so the GPU
