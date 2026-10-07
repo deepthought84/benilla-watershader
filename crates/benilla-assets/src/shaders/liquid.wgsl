@@ -2175,11 +2175,14 @@ const SKY_LUT_TEXEL0: f32 = 0.03125;
 /// Its last mip: 64² down to 2².
 const SKY_LUT_TOP: f32 = 5.0;
 
-/// The sky a surface of roughness `alpha` reflects along `dir`: the dome and its drawn clouds,
-/// unlit and in linear light, blurred by a Gaussian of the reflected lobe's width. Slopes per axis
-/// spread as N(0, α²/2), and a reflection doubles the normal's deviation, so σ ≈ √2·α.
+/// The sky a surface reflects along `dir` with `alpha` of roughness it does not resolve: the dome
+/// and its drawn clouds, unlit and in linear light, blurred by a Gaussian of the reflected lobe's
+/// width. Slopes per axis spread as N(0, α²/2), and a reflection doubles the normal's deviation, so
+/// σ ≈ √2·α. The lobe is held within half the ray's elevation: a wave sends what would leave below
+/// the horizon back up off its neighbour, so the fog row under the horizon is never averaged into
+/// the water and the dome's gradient over its lowest rings, which the mirrors show sharp, stays.
 fn sky_floor(dir: vec3<f32>, alpha: f32) -> vec3<f32> {
-    let sigma = max(1.41421356 * alpha, SKY_LUT_TEXEL0);
+    let sigma = max(min(1.41421356 * alpha, 0.5 * max(dir.y, 0.0)), SKY_LUT_TEXEL0);
     let lod = clamp(log2(sigma / SKY_LUT_TEXEL0), 0.0, SKY_LUT_TOP);
     return textureSampleLevel(sky_lut, scene_samp, dir, lod).rgb;
 }
@@ -2421,13 +2424,15 @@ fn stylised_water(
 
     // Fresnel toward the horizon. Schlick's 5th power, floored at the 2 % water reflects head-on.
     let fresnel = pow(1.0 - saturate(dot(n, to_view)), 5.0);
-    // What the surface reflects where no tier has a better answer: the sky along the rippled
-    // reflected ray, the dome and its clouds as drawn, unlit and linear, blurred by the roughness
-    // the surface cannot resolve ([`sky_floor`]). A wave's near face looks at the horizon and its
-    // far face higher up, so ripples show under any sky, not only along the sun's glitter path.
+    // What the surface reflects where no tier has a better answer: the sky, the dome and its clouds
+    // as drawn, unlit and linear ([`sky_floor`]). The sky is at infinity, where the mirrors' law
+    // (the flat reflection of a point the ripple slides sideways) reads it along the flat reflected
+    // ray; the floor reads it there too, blurred only by the slope variance the surface no longer
+    // resolves, so a mirror and the floor show one sky and the ripple shows through the Fresnel
+    // and the body as on mirror water.
     let r_rip = reflect(-to_view, n);
-    let sky = sky_floor(r_rip, surf.alpha);
-    // Seen from below, the surface reflects the dome's two stops along the same ray, lit as the
+    let sky = sky_floor(reflect(-to_view, flat_n), sqrt(surface_lost2(surf)));
+    // Seen from below, the surface reflects the dome's two stops along the rippled ray, lit as the
     // terrain is ([`underside_sky`]); the floor in gamma either way.
     let eye_above = view.world_position.y > world_pos.y;
     let sky_g = select(underside_sky(r_rip) * lit, water_enc(sky), eye_above);
