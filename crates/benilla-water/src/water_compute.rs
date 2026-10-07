@@ -517,7 +517,7 @@ mod tests {
     /// for the water on a mirror plane and the fragment for the water off it, and the two meet in
     /// a crossfade band: any difference between the copies is a seam there. The block is
     /// duplicated rather than imported (the material shader and the compute pass are composed
-    /// apart), so this keeps them from drifting.
+    /// apart), so this keeps them from drifting; the tiers' level and step budgets are part of it.
     #[test]
     fn the_floor_march_law_is_shared_verbatim() {
         let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
@@ -529,6 +529,8 @@ mod tests {
              edited one across"
         );
         assert!(march_law(compute).contains("fn floor_march("));
+        // One budget per tier, inside the shared text.
+        assert!(march_law(compute).contains("const FLOOR_MARCH_STEPS: i32 = 8;"));
         // The law's colour decode is each file's own: the same gamma.
         for wgsl in [liquid, compute] {
             assert!(wgsl.contains("const WATER_GAMMA: f32 = 2.2;"));

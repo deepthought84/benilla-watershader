@@ -1081,7 +1081,23 @@ const LAW_THICKNESS: f32 = 6.0;
 /// `uv_offset`.
 const LAW_CROSS: f32 = 0.005;
 /// The march's hard step bound: the largest tier's budget.
-const LAW_MAX_STEPS: i32 = 16;
+const LAW_MAX_STEPS: i32 = 12;
+
+// The march's lowest level and step budget per tier, one budget for the fragment's march and the
+// compute pass's, so the two give one verdict where they crossfade. The cost is the steps': about
+// 0.035 ms a step over a full screen of floor-served water at rs2.
+#ifdef WATER_TIER_HIGH
+const FLOOR_MARCH_LEVEL: i32 = 2;
+const FLOOR_MARCH_STEPS: i32 = 12;
+#else
+#ifdef WATER_TIER_LOW
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 6;
+#else
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 8;
+#endif
+#endif
 
 /// Bevy's infinite reverse-Z near plane in yards (`perspective_camera_near`).
 fn law_near() -> f32 {
@@ -2141,20 +2157,6 @@ fn underside_sky(dir: vec3<f32>) -> vec3<f32> {
     let t = sqrt(saturate(dir.y));
     return mix(water_reflect.sky_horizon.rgb, water_reflect.sky_zenith.rgb, t);
 }
-
-// The per-pixel march's lowest level and step budget, per tier.
-#ifdef WATER_TIER_HIGH
-const FLOOR_MARCH_LEVEL: i32 = 2;
-const FLOOR_MARCH_STEPS: i32 = 12;
-#else
-#ifdef WATER_TIER_LOW
-const FLOOR_MARCH_LEVEL: i32 = 3;
-const FLOOR_MARCH_STEPS: i32 = 6;
-#else
-const FLOOR_MARCH_LEVEL: i32 = 3;
-const FLOOR_MARCH_STEPS: i32 = 8;
-#endif
-#endif
 
 /// Whether this fragment's floor is occluded: the eye above the surface (the underside is not
 /// this look's), not a WMO interior pool (its floor is unlit and unoccluded), the occlusion lane

@@ -2061,9 +2061,9 @@ mod tests {
             );
         }
         // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
-        // `WATER_SSR`, the region's guards whose names only they declare. The tier's branches
-        // declare module-scope names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`), the same ones
-        // in every branch, so this key's tier declares them all.
+        // `WATER_SSR`, the region's guards whose names only they declare. The floor march law's
+        // tier branches declare module-scope names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`),
+        // the same ones in every branch, so this key's tier declares them all.
         let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
         let text = liquid_under(&water.frag_defs());
         let seen = identifiers(&text);

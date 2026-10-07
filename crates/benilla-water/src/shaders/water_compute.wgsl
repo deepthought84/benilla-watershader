@@ -37,19 +37,6 @@ struct OcclParams {
 const PARAMS_ROW: u32 = #{PARAMS_ROW};
 const MIRROR2_ROW: u32 = #{MIRROR2_ROW};
 
-// The pass's tier: its march's lowest level and step budget.
-#ifdef WATER_TIER_HIGH
-const OCC_LEVEL: i32 = 1;
-const OCC_STEPS: i32 = 16;
-#else
-#ifdef WATER_TIER_LOW
-const OCC_LEVEL: i32 = 3;
-const OCC_STEPS: i32 = 8;
-#else
-const OCC_LEVEL: i32 = 2;
-const OCC_STEPS: i32 = 12;
-#endif
-#endif
 
 /// The water's display gamma, `liquid.wgsl`'s (a test compares them).
 const WATER_GAMMA: f32 = 2.2;
@@ -72,7 +59,23 @@ const LAW_THICKNESS: f32 = 6.0;
 /// `uv_offset`.
 const LAW_CROSS: f32 = 0.005;
 /// The march's hard step bound: the largest tier's budget.
-const LAW_MAX_STEPS: i32 = 16;
+const LAW_MAX_STEPS: i32 = 12;
+
+// The march's lowest level and step budget per tier, one budget for the fragment's march and the
+// compute pass's, so the two give one verdict where they crossfade. The cost is the steps': about
+// 0.035 ms a step over a full screen of floor-served water at rs2.
+#ifdef WATER_TIER_HIGH
+const FLOOR_MARCH_LEVEL: i32 = 2;
+const FLOOR_MARCH_STEPS: i32 = 12;
+#else
+#ifdef WATER_TIER_LOW
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 6;
+#else
+const FLOOR_MARCH_LEVEL: i32 = 3;
+const FLOOR_MARCH_STEPS: i32 = 8;
+#endif
+#endif
 
 /// Bevy's infinite reverse-Z near plane in yards (`perspective_camera_near`).
 fn law_near() -> f32 {
@@ -330,8 +333,8 @@ fn occl_plane(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let p = pick.xyz;
-    let m = floor_march(p + vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(dir.x, -dir.y, dir.z), OCC_LEVEL, OCC_STEPS);
-    let o = floor_from_march(m, distance(p, eye), OCC_LEVEL, vec2<f32>(0.0));
+    let m = floor_march(p + vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(dir.x, -dir.y, dir.z), FLOOR_MARCH_LEVEL, FLOOR_MARCH_STEPS);
+    let o = floor_from_march(m, distance(p, eye), FLOOR_MARCH_LEVEL, vec2<f32>(0.0));
     textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, o.v, 1.0, o.known));
     textureStore(floor_occ, vec2<i32>(q), vec4<f32>(o.rgb, o.rho_c));
 }
