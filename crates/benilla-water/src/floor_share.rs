@@ -1,8 +1,8 @@
 //! **Whether any water on the screen can show the sky floor**, the reflection's answer where no
 //! tier has a better one (`liquid.wgsl`'s `w_floor`): the floor's share of a pixel is
-//! `(1 − w_p)(1 − w_m)`, the probe's and the mirrors' weights left over, and its occlusion (the
-//! depth pyramids, `water_compute`'s plane pass and sky cube, the fragment's march) is worth
-//! running only where that share can be above zero.
+//! `(1 − w_p)(1 − w_m)`, the probe's and the mirrors' weights left over. Its sky cube
+//! (`water_compute`'s first dispatch) and its occlusion (the depth pyramids, the plane pass, the
+//! fragment's march) are worth building only where that share can be above zero.
 //!
 //! Each liquid surface is summarised once ([`SurfaceTiers`]) as patches about a liquid cell wide:
 //! the triangles the mirrors serve whole (every vertex's mirror weight 1, the facet flat enough
@@ -15,10 +15,12 @@
 //! surface not summarised yet, a debug view or the grading reading `rho_c`, counts as floor on
 //! screen.
 //!
-//! The answer, [`FloorOnScreen`], arms the pyramids' reduce chain and the plane pass, and the
-//! render world writes it into the look's `quality.y` lane (`reflect::upload_reflect`): on a
-//! frame it is off the fragment does not march either, so the floor is never occluded from a
-//! pyramid this frame did not build.
+//! The answer, [`FloorOnScreen`], has two halves. `sky` builds the cube: every stylised fragment
+//! reads it for the floor's share, occluded or not, a WMO interior pool's too. `occluded`, the same
+//! water outside WMO interiors with the occlusion on, arms the pyramids' reduce chain and the plane
+//! pass, and the render world writes it into the look's `quality.y` lane
+//! (`reflect::upload_reflect`): on a frame it is off the fragment does not march either, so the
+//! floor is never occluded from a pyramid this frame did not build.
 
 use benilla_assets::materials::{LiquidMaterial, ATTRIBUTE_WOW_PLANAR};
 use benilla_formats::NO_SPOT;
@@ -228,10 +230,30 @@ fn summarise_surfaces(
     }
 }
 
-/// Whether any water on the world view's screen this frame can show the sky floor, with the floor
-/// occlusion on and the stylised look; extracted.
+/// Whether any water on the world view's screen this frame can show the sky floor, under the
+/// stylised look; extracted.
 #[derive(Resource, Clone, Copy, Default, PartialEq, Eq, Debug, ExtractResource)]
-pub(crate) struct FloorOnScreen(pub(crate) bool);
+pub(crate) struct FloorOnScreen {
+    /// Some water's floor share can be above zero: every stylised fragment over such water reads
+    /// the sky floor's cube, occluded or not, a WMO interior pool's included.
+    pub(crate) sky: bool,
+    /// And the floor is occluded there: the occlusion on, the water not a WMO interior pool's
+    /// (`floor_occlusion_wanted`). It arms the pyramids' reduce chain, the plane pass and the
+    /// fragment's march.
+    pub(crate) occluded: bool,
+}
+
+impl FloorOnScreen {
+    /// From the look (`shown`: stylised, water on screen), the occlusion knob, whether a debug view
+    /// or the grading wants the floor wherever water is, and whether any visible water, and any
+    /// visible water outside a WMO interior, leaves the floor a share.
+    fn decide(shown: bool, occlusion: bool, forced: bool, any: bool, exterior: bool) -> Self {
+        Self {
+            sky: shown && (forced || any),
+            occluded: shown && occlusion && (forced || exterior),
+        }
+    }
+}
 
 /// The reflection tiers this frame, as the block's lanes hold them: the elected mirror planes,
 /// and the probe spots whose cubes are in at full reach.
@@ -327,23 +349,34 @@ impl Tiers {
     }
 }
 
-/// The first of the visible water `surfaces` (each with its summary, `None` while it has none)
-/// with a patch that can show the sky floor, seen from `eye_y` under `tiers`, and that patch.
-fn floor_surface<'a, T>(
+/// A visible surface the tiers leave the floor a share of, and the patch (`None` while the surface
+/// has no summary).
+type FloorAt<'a, T> = Option<(T, Option<&'a Patch>)>;
+
+/// Of the visible water `surfaces` (each with its summary, `None` while it has none, and whether
+/// it is a WMO interior pool), the first with a patch that can show the sky floor, seen from
+/// `eye_y` under `tiers`, and the first such outside a WMO interior, each with that patch.
+fn floor_surfaces<'a, T: Copy>(
     tiers: &Tiers,
     eye_y: f32,
     in_view: &impl Fn(Vec3, Vec3) -> bool,
-    surfaces: impl Iterator<Item = (T, Option<&'a SurfaceTiers>)>,
-) -> Option<(T, Option<&'a Patch>)> {
-    for (t, summary) in surfaces {
-        let Some(summary) = summary else {
-            return Some((t, None));
+    surfaces: impl Iterator<Item = (T, Option<&'a SurfaceTiers>, bool)>,
+) -> (FloorAt<'a, T>, FloorAt<'a, T>) {
+    let mut any = None;
+    for (t, summary, interior) in surfaces {
+        let found = match summary {
+            None => (t, None),
+            Some(summary) => match tiers.floor_patch(summary, eye_y, in_view) {
+                Some(patch) => (t, Some(patch)),
+                None => continue,
+            },
         };
-        if let Some(patch) = tiers.floor_patch(summary, eye_y, in_view) {
-            return Some((t, Some(patch)));
+        any = any.or(Some(found));
+        if !interior {
+            return (any, Some(found));
         }
     }
-    None
+    (any, None)
 }
 
 /// Which readers want the depth pyramids: the screen-space march while its switch is on, the
@@ -360,9 +393,10 @@ fn pyramid_readers(ssr: bool, floor: bool) -> WaterHizConsumers {
 }
 
 /// Each frame, after the water's rectangle and the reflection block: whether any water on screen
-/// can show the sky floor ([`FloorOnScreen`]), and so which readers want the depth pyramids
-/// ([`WaterHizConsumers`]). A debug view or the grading reading `rho_c` wants the floor wherever
-/// water is on screen. `RUST_LOG=benilla_water::floor_share=debug` logs each change.
+/// can show the sky floor, and whether it is occluded there ([`FloorOnScreen`]), and so which
+/// readers want the depth pyramids ([`WaterHizConsumers`]). A debug view or the grading reading
+/// `rho_c` wants the floor wherever water is on screen. `RUST_LOG=benilla_water::floor_share=debug`
+/// logs each change.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn drive_floor_readers(
     style: Res<WaterStyle>,
@@ -384,10 +418,10 @@ pub(crate) fn drive_floor_readers(
     mut floor: ResMut<FloorOnScreen>,
     mut consumers: ResMut<WaterHizConsumers>,
 ) {
-    let armed = style.is_stylised() && look.floor_occlusion && rect.visible;
+    let shown = style.is_stylised() && rect.visible;
     let forced = dev.water.view != 0 || look.grade_strength > 0.0;
     let tiers = Tiers::from_lanes(&data.0);
-    let first = (armed && !forced)
+    let (any, exterior) = (shown && !forced)
         .then(|| {
             let (eye, frustum) = eye.single().ok()?;
             let in_view = |min: Vec3, max: Vec3| {
@@ -398,30 +432,38 @@ pub(crate) fn drive_floor_readers(
                     true,
                 )
             };
-            // Magma and slime draw no reflection, and a WMO interior's floor is never occluded
-            // (`floor_occlusion_wanted`).
+            // Magma and slime draw no reflection. A WMO interior pool reads the floor's cube
+            // but its floor is never occluded (`floor_occlusion_wanted`).
             let water = surfaces
                 .iter()
-                .filter(|(_, seen, _, material)| {
-                    seen.get()
-                        && materials
-                            .get(&material.0)
-                            .is_some_and(|m| m.extension.kind.x <= 0.5 && m.extension.path.x < 1.5)
-                })
-                .map(|(entity, _, summary, _)| (entity, summary));
-            floor_surface(&tiers, eye.translation().y, &in_view, water)
+                .filter_map(|(entity, seen, summary, material)| {
+                    let m = materials.get(&material.0)?;
+                    (seen.get() && m.extension.kind.x <= 0.5).then_some((
+                        entity,
+                        summary,
+                        m.extension.path.x >= 1.5,
+                    ))
+                });
+            Some(floor_surfaces(&tiers, eye.translation().y, &in_view, water))
         })
-        .flatten();
-    let on = armed && (forced || first.is_some());
-    if floor.set_if_neq(FloorOnScreen(on)) {
-        match first {
+        .flatten()
+        .unwrap_or_default();
+    let on = FloorOnScreen::decide(
+        shown,
+        look.floor_occlusion,
+        forced,
+        any.is_some(),
+        exterior.is_some(),
+    );
+    if floor.set_if_neq(on) {
+        match exterior.or(any) {
             Some((entity, patch)) => {
-                debug!("water: the sky floor on screen at {entity} {patch:?}, under {tiers:?}")
+                debug!("water: the sky floor {on:?} at {entity} {patch:?}, under {tiers:?}")
             }
-            None => debug!("water: the sky floor on screen {on}"),
+            None => debug!("water: the sky floor {on:?}"),
         }
     }
-    consumers.set_if_neq(pyramid_readers(dev.water.ssr, on));
+    consumers.set_if_neq(pyramid_readers(dev.water.ssr, on.occluded));
 }
 
 pub(super) fn register(app: &mut App) {
@@ -648,8 +690,10 @@ mod tests {
         ]);
         let seen = |_: Vec3, _: Vec3| true;
         let first = |s: Vec<Option<&SurfaceTiers>>| {
-            floor_surface(&tiers, 30.0, &seen, s.into_iter().enumerate())
-                .map(|(i, p)| (i, p.is_some()))
+            let s = s.into_iter().enumerate().map(|(i, s)| (i, s, false));
+            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, s);
+            assert_eq!(any.map(|(i, _)| i), exterior.map(|(i, _)| i));
+            any.map(|(i, p)| (i, p.is_some()))
         };
         assert_eq!(first(vec![Some(&served), Some(&served)]), None);
         assert_eq!(first(vec![Some(&served), Some(&bare)]), Some((1, true)));
@@ -664,6 +708,78 @@ mod tests {
         assert!(tiers.floor_patch(&probe, 30.0, &seen).is_some());
         let away = |min: Vec3, _: Vec3| min.y > 5.0;
         assert_eq!(tiers.floor_patch(&probe, 30.0, &away), None);
+    }
+
+    /// A WMO interior pool reads the floor's cube but is never occluded: an interior with floor
+    /// is sky without occlusion, and the walk goes on to an exterior one.
+    #[test]
+    fn an_interior_pool_is_sky_without_occlusion() {
+        let tiers = Tiers::from_lanes(&lanes());
+        let bare = SurfaceTiers {
+            low: 3.0,
+            spots: vec![],
+            bare: true,
+            patches: vec![patch(3.0, 3.0, false, vec![], true)],
+            ..default()
+        };
+        let served = SurfaceTiers {
+            low: 10.0,
+            mirror: Some((10.0, 10.0)),
+            patches: vec![patch(10.0, 10.0, true, vec![], false)],
+            ..default()
+        };
+        let seen = |_: Vec3, _: Vec3| true;
+        let walk = |s: Vec<(&SurfaceTiers, bool)>| {
+            let s = s.into_iter().enumerate().map(|(i, (t, x))| (i, Some(t), x));
+            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, s);
+            (any.map(|(i, _)| i), exterior.map(|(i, _)| i))
+        };
+        assert_eq!(walk(vec![(&served, false), (&bare, true)]), (Some(1), None));
+        assert_eq!(
+            walk(vec![(&bare, true), (&served, false), (&bare, false)]),
+            (Some(0), Some(2))
+        );
+        assert_eq!(walk(vec![(&bare, true), (&served, true)]), (Some(0), None));
+        assert_eq!(walk(vec![(&served, true)]), (None, None));
+        // An interior-only frame: the cube is built, nothing is occluded.
+        let interior = FloorOnScreen::decide(true, true, false, true, false);
+        assert_eq!(
+            interior,
+            FloorOnScreen {
+                sky: true,
+                occluded: false
+            }
+        );
+    }
+
+    /// The cube is the floor's whatever the occlusion knob says; the occlusion needs the knob, and
+    /// neither runs without the stylised look and water on screen.
+    #[test]
+    fn the_sky_cube_does_not_wait_for_the_occlusion() {
+        let both = FloorOnScreen {
+            sky: true,
+            occluded: true,
+        };
+        let sky = FloorOnScreen {
+            sky: true,
+            occluded: false,
+        };
+        // (shown, occlusion, forced, any, exterior)
+        for (args, want) in [
+            ((true, true, false, true, true), both),
+            ((true, false, false, true, true), sky),
+            ((true, false, true, false, false), sky),
+            ((true, true, true, false, false), both),
+            ((true, true, false, false, false), FloorOnScreen::default()),
+            ((false, true, true, true, true), FloorOnScreen::default()),
+        ] {
+            let (shown, occlusion, forced, any, exterior) = args;
+            assert_eq!(
+                FloorOnScreen::decide(shown, occlusion, forced, any, exterior),
+                want,
+                "{args:?}"
+            );
+        }
     }
 
     /// The sky floor's occlusion walks the depth pyramids, so it asks for them while the floor is

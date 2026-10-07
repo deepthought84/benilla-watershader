@@ -3,7 +3,7 @@
 //! Its shader is `shaders/water_compute.wgsl`.
 //!
 //! First the sky floor's cube ([`super::sky_lut`]), on every frame water on screen can show the sky
-//! floor ([`super::floor_share`]).
+//! floor ([`super::floor_share`]), its occlusion on or off.
 //!
 //! Then `occl_plane`, the sky floor's occlusion for the water on an active mirror plane. The water's
 //! fragment marches the depth pyramids per pixel to find what stands above it along the reflected
@@ -235,10 +235,11 @@ fn init_compute_pipelines(
 #[derive(Resource, Default)]
 pub(crate) struct ComputeFrame {
     /// The sky floor's cube is rebuilt this frame: the stylised look, water on screen that can show
-    /// the floor.
+    /// the floor, occluded or not.
     pub(crate) lut: bool,
     params: UniformBuffer<OcclParams>,
-    /// The occlusion dispatch runs this frame: armed, the floor on screen, a mirror plane active.
+    /// The occlusion dispatch runs this frame: armed, the floor on screen and occluded, a mirror
+    /// plane active.
     occl: bool,
     /// Its workgroups.
     groups: UVec2,
@@ -246,11 +247,24 @@ pub(crate) struct ComputeFrame {
     tier: u8,
 }
 
-/// Render world, before the graph: which dispatches run this frame. The sky floor's cube runs
-/// while the stylised look is on and water on screen can show the floor ([`FloorOnScreen`]): the
-/// cube is read only for it. The occlusion runs while the floor is on screen and a mirror plane is
-/// active, over the rectangle's texels: off the planes the water marches per pixel and never reads
-/// the images.
+/// Whether the sky floor's cube and the plane occlusion run this frame: the cube while the stylised
+/// look is armed and water on screen can show the floor, whatever its occlusion (every stylised
+/// fragment reads the cube for the floor's share); the occlusion while that floor is occluded too,
+/// the pass armed and a mirror plane active.
+fn compute_gates(
+    look_armed: bool,
+    occl_armed: bool,
+    water: bool,
+    floor: FloorOnScreen,
+    plane: bool,
+) -> (bool, bool) {
+    let lut = look_armed && water && floor.sky;
+    (lut, occl_armed && water && floor.occluded && plane)
+}
+
+/// Render world, before the graph: which dispatches run this frame ([`compute_gates`]). The
+/// occlusion runs over the rectangle's texels: off the planes the water marches per pixel and
+/// never reads the images.
 fn prepare_water_compute(
     hiz: Option<Res<WaterHiz>>,
     occ: Option<Res<FloorOcc>>,
@@ -266,11 +280,16 @@ fn prepare_water_compute(
     let (Some(occ), Some(rect), Some(data)) = (occ, rect, data) else {
         return;
     };
-    // The floor on screen implies the look armed with its occlusion on and water on screen.
-    let floor = floor.is_some_and(|f| f.0);
-    frame.lut = hiz.is_some_and(|h| h.armed) && rect.visible && floor;
     let plane = |row: u32| data.0[row as usize * 4 + 1] > 0.0;
-    if !(occ.armed && rect.visible && floor && (plane(PARAMS_ROW) || plane(MIRROR2_ROW))) {
+    let (lut, occl) = compute_gates(
+        hiz.is_some_and(|h| h.armed),
+        occ.armed,
+        rect.visible,
+        floor.map_or_else(FloorOnScreen::default, |f| *f),
+        plane(PARAMS_ROW) || plane(MIRROR2_ROW),
+    );
+    frame.lut = lut;
+    if !occl {
         return;
     }
     let (origin, end) = occl_tiles(rect.min, rect.max, occl_scale(occ.tier), occ.size);
@@ -500,6 +519,29 @@ pub(super) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sky floor's cube is built wherever the floor shows, its occlusion on or off (a WMO
+    /// interior pool's floor is shown and never occluded); the plane pass only where it is
+    /// occluded on a mirror plane.
+    #[test]
+    fn the_sky_cube_is_built_wherever_the_floor_shows() {
+        let floor = |sky, occluded| FloorOnScreen { sky, occluded };
+        // (look armed, occlusion armed, water, floor, plane) -> (cube, plane pass)
+        for (args, want) in [
+            ((true, true, true, floor(true, true), true), (true, true)),
+            ((true, false, true, floor(true, false), true), (true, false)),
+            ((true, true, true, floor(true, false), true), (true, false)),
+            ((true, true, true, floor(true, true), false), (true, false)),
+            (
+                (true, true, true, floor(false, false), true),
+                (false, false),
+            ),
+            ((true, true, false, floor(true, true), true), (false, false)),
+        ] {
+            let (look, occl, water, f, plane) = args;
+            assert_eq!(compute_gates(look, occl, water, f, plane), want, "{args:?}");
+        }
+    }
 
     /// The text between the floor-march-law markers of one shader.
     fn march_law(wgsl: &str) -> &str {

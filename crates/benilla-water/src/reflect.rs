@@ -1451,7 +1451,7 @@ fn upload_reflect(
     // `quality.y`'s one writer, for the same reason: whether the floor is occluded this frame is
     // known after visibility. Off, the fragment does not march, and nothing reads the pyramids and
     // the plane pass's images, which this frame did not build.
-    let on = f32::from(floor.is_some_and(|f| f.0));
+    let on = f32::from(floor.is_some_and(|f| f.occluded));
     queue.write_buffer(
         &buffer.0,
         ((LOOK_QUALITY + 1) * 4) as u64,
