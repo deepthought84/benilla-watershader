@@ -1080,6 +1080,9 @@ const LAW_THICKNESS: f32 = 6.0;
 /// How far past a cell wall a ray is placed when it leaves the cell, in level-0 texels: FFX SSSR's
 /// `uv_offset`.
 const LAW_CROSS: f32 = 0.005;
+/// How far short of the far plane the end of a ray's path on screen is read, as a share of the
+/// way there: just inside it, where the depth still places the ray.
+const LAW_FAR_SHY: f32 = 0.999;
 /// The march's hard step bound: the largest tier's budget.
 const LAW_MAX_STEPS: i32 = 12;
 
@@ -1147,9 +1150,11 @@ const FLOOR_UNKNOWN: u32 = 0u;
 const FLOOR_ESCAPED: u32 = 1u;
 const FLOOR_HIT: u32 = 2u;
 
-/// Where a floor march ended: its verdict, the screen UV and device depth it reached, and how far
-/// along the ray that point is from the origin, yards.
+/// Where a floor march ended: its verdict, the screen UV and device depth it reached, how far
+/// along the ray that point is from the origin, yards, and for an unknown verdict how much the
+/// frame at the ray's end covers it (0 none).
 struct FloorMarch {
+    cover: f32,
     state: u32,
     uv: vec2<f32>,
     z: f32,
@@ -1165,11 +1170,17 @@ struct FloorMarch {
 /// - a tile of pure sky is not a hit: the ray crosses it and climbs, remembering it was over sky;
 /// - leaving the frame through its top over sky, or passing the far plane, has escaped; leaving
 ///   it anywhere else, or running out of steps, is unknown: the screen cannot say;
-/// - a hit is validated against the slab of the `min_level` texel it stopped in.
+/// - a hit is validated against the slab of the `min_level` texel it stopped in;
+/// - an unknown verdict reads the frame at the end of the ray's path on screen: where its
+///   projection meets the far plane inside the frame (the pixel the eye sees along the reflected
+///   direction), else where it leaves the frame through the top. Geometry drawn there above the
+///   water and in front of the ray covers it, softly by how far in front ([`LAW_THICKNESS`] for
+///   about two thirds): the canopy, deck or far shore the walk ran out of steps before reaching.
+///   The end moves with the pixel, not with the cells the walk stopped in.
 ///
 /// `travelled` is the distance from the origin to the point the verdict was reached at: the hit,
-/// where the ray left the frame, or where the budget ran out. The reflected thing is at least that
-/// far behind the water.
+/// the covering geometry, where the ray left the frame, or where the budget ran out. The reflected
+/// thing is at least that far behind the water.
 fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32) -> FloorMarch {
     // The direction as the difference of two projected points; a ray heading back toward the eye
     // is cut to half the distance to the eye plane, so its second point stays in front of it.
@@ -1278,9 +1289,27 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
             state = select(FLOOR_UNKNOWN, FLOOR_HIT, abs(gap) <= LAW_THICKNESS);
         }
     }
+    var cover = 0.0;
+    if (state == FLOOR_UNKNOWN) {
+        let t_far = select(big, -o.z * inv_d.z, d.z < 0.0);
+        let to_far = t_far < t_out;
+        if (to_far || (d.y < 0.0 && -o.y * inv_d.y <= t_out)) {
+            let e = o + select(t_out, LAW_FAR_SHY * t_far, to_far) * d;
+            let e_uv = clamp(e.xy, vec2<f32>(0.0), vec2<f32>(1.0) - 0.5 / base_res);
+            let e_depth = textureLoad(hiz_tex, vec2<i32>(e_uv * base_res), 0).r;
+            if (e.z > 0.0 && e_depth > e.z) {
+                let at_e = law_ndc_to_world(vec3<f32>(law_uv_to_ndc(e_uv), e_depth));
+                if (at_e.y > origin.y) {
+                    let gap = law_view_z(e_depth) - law_view_z(e.z);
+                    cover = 1.0 - exp(-gap / LAW_THICKNESS);
+                    p = vec3<f32>(e_uv, e_depth);
+                }
+            }
+        }
+    }
     // Past the far plane the depth cannot place the point: as far as it reaches.
     let at = law_ndc_to_world(vec3<f32>(law_uv_to_ndc(p.xy), max(p.z, 1e-6)));
-    return FloorMarch(state, p.xy, p.z, distance(origin, at));
+    return FloorMarch(cover, state, p.xy, p.z, distance(origin, at));
 }
 
 /// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
@@ -1298,7 +1327,8 @@ struct FloorOcc {
 /// verdict was reached: a hit at `D`, an escape or an unknown past it, all say the reflected thing
 /// is at least `D` behind the water, so it is continuous from a contact to the far field. The
 /// occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of the lookup
-/// point on screen.
+/// point on screen. An unknown verdict the frame's end covers is that share occluded and known,
+/// its colour the frame's there, read at full resolution.
 fn floor_from_march(m: FloorMarch, d_eye: f32, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
     let rho = m.travelled / max(d_eye + m.travelled, 1e-4);
     if (m.state == FLOOR_HIT) {
@@ -1306,6 +1336,10 @@ fn floor_from_march(m: FloorMarch, d_eye: f32, min_level: i32, tap_shift: vec2<f
     }
     if (m.state == FLOOR_ESCAPED) {
         return FloorOcc(vec3<f32>(0.0), 1.0, rho, 1.0);
+    }
+    if (m.cover > 0.0) {
+        let c = m.cover;
+        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, 0)) * c, 1.0 - c, rho, c);
     }
     return FloorOcc(vec3<f32>(0.0), 1.0, rho, 0.0);
 }
