@@ -110,7 +110,8 @@ pub(crate) struct WaterHizConsumers(pub(crate) u32);
 impl WaterHizConsumers {
     /// The screen-space reflection march, the `WATER_SSR` debug variant.
     pub(crate) const SSR: u32 = 1 << 0;
-    /// The sky floor's occlusion march (`liquid.wgsl`'s `floor_march`).
+    /// The sky floor's occlusion march (`liquid.wgsl`'s `floor_march`), while water on screen can
+    /// show the floor (`floor_share`).
     pub(crate) const FLOOR_OCCLUSION: u32 = 1 << 1;
     /// The sun's and moon's per-pixel visibility for the glint; no system sets it.
     #[allow(dead_code)]

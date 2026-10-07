@@ -919,9 +919,11 @@ pub(crate) mod schedule_tests {
 
     /// `PostUpdate`'s undeclared-order pairs on the declared graph; `GlobalTransform` and the
     /// particle `EffectQuads` are most of it. The water cameras and the ripple window against the rig
-    /// and pose writers are `Transform` on disjoint lanes. `WOW_AMBIGUITY_DUMP=1` prints every
-    /// pair after `Update`'s.
-    const POST_UPDATE_CEILING: usize = 385;
+    /// and pose writers are `Transform` on disjoint lanes. The water's surface summary
+    /// (`floor_share::summarise_surfaces`) reads the liquid surfaces' `Mesh3d` against the zfill
+    /// and straddle twin writers, which set it only on their twins, and Bevy's mesh change marker,
+    /// which only flags it changed. `WOW_AMBIGUITY_DUMP=1` prints every pair after `Update`'s.
+    const POST_UPDATE_CEILING: usize = 388;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may

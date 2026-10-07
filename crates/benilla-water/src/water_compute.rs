@@ -2,7 +2,8 @@
 //! ([`super::hiz`]) and the scene snapshot ([`super::scene_color`]), before the water draws.
 //! Its shader is `shaders/water_compute.wgsl`.
 //!
-//! First the sky floor's cube ([`super::sky_lut`]), on every frame the stylised water is on screen.
+//! First the sky floor's cube ([`super::sky_lut`]), on every frame water on screen can show the sky
+//! floor ([`super::floor_share`]).
 //!
 //! Then `occl_plane`, the sky floor's occlusion for the water on an active mirror plane. The water's
 //! fragment marches the depth pyramids per pixel to find what stands above it along the reflected
@@ -44,6 +45,7 @@ use bevy::shader::ShaderDefVal;
 
 use benilla_world::liquid::{WaterQuality, MIRROR2_LANES};
 
+use super::floor_share::FloorOnScreen;
 use super::hiz::{WaterHiz, WaterHizLabel};
 use super::look::WaterLook;
 use super::reflect::{WaterReflectBuffer, WaterReflectData};
@@ -232,10 +234,11 @@ fn init_compute_pipelines(
 /// Render world: this frame's dispatches, written by [`prepare_water_compute`].
 #[derive(Resource, Default)]
 pub(crate) struct ComputeFrame {
-    /// The sky floor's cube is rebuilt this frame: the stylised look, water on screen.
+    /// The sky floor's cube is rebuilt this frame: the stylised look, water on screen that can show
+    /// the floor.
     pub(crate) lut: bool,
     params: UniformBuffer<OcclParams>,
-    /// The occlusion dispatch runs this frame: armed, water on screen, a mirror plane active.
+    /// The occlusion dispatch runs this frame: armed, the floor on screen, a mirror plane active.
     occl: bool,
     /// Its workgroups.
     groups: UVec2,
@@ -244,13 +247,15 @@ pub(crate) struct ComputeFrame {
 }
 
 /// Render world, before the graph: which dispatches run this frame. The sky floor's cube runs
-/// while the stylised look is on and water is on screen. The occlusion runs while it is armed too
-/// and a mirror plane is active, over the rectangle's texels: off the planes the water marches per
-/// pixel and never reads the images.
+/// while the stylised look is on and water on screen can show the floor ([`FloorOnScreen`]): the
+/// cube is read only for it. The occlusion runs while the floor is on screen and a mirror plane is
+/// active, over the rectangle's texels: off the planes the water marches per pixel and never reads
+/// the images.
 fn prepare_water_compute(
     hiz: Option<Res<WaterHiz>>,
     occ: Option<Res<FloorOcc>>,
     rect: Option<Res<WaterScreenRect>>,
+    floor: Option<Res<FloorOnScreen>>,
     data: Option<Res<WaterReflectData>>,
     mut frame: ResMut<ComputeFrame>,
     device: Res<RenderDevice>,
@@ -261,9 +266,11 @@ fn prepare_water_compute(
     let (Some(occ), Some(rect), Some(data)) = (occ, rect, data) else {
         return;
     };
-    frame.lut = hiz.is_some_and(|h| h.armed) && rect.visible;
+    // The floor on screen implies the look armed with its occlusion on and water on screen.
+    let floor = floor.is_some_and(|f| f.0);
+    frame.lut = hiz.is_some_and(|h| h.armed) && rect.visible && floor;
     let plane = |row: u32| data.0[row as usize * 4 + 1] > 0.0;
-    if !(occ.armed && rect.visible && (plane(PARAMS_ROW) || plane(MIRROR2_ROW))) {
+    if !(occ.armed && rect.visible && floor && (plane(PARAMS_ROW) || plane(MIRROR2_ROW))) {
         return;
     }
     let (origin, end) = occl_tiles(rect.min, rect.max, occl_scale(occ.tier), occ.size);

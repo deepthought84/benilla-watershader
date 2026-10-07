@@ -2,10 +2,11 @@
 //! `WaterLook`): the owner's and the developer's knobs, written whole by `drive_reflection` every
 //! frame, so every row is valid on the frames the mirror is off.
 //!
-//! Each row has one writer. [`look_lanes`] writes every row but `water_rect`, which leaves it 0: the
-//! water's screen rectangle is known only after visibility, which runs after the mirror's system,
-//! so the render world writes that row itself (`reflect::upload_reflect`). A row no knob fills
-//! (the body) stays 0.
+//! Each row has one writer. [`look_lanes`] writes every row but `water_rect` and `quality.y`, which
+//! it leaves 0: the water's screen rectangle, and whether its floor is occluded this frame
+//! (`floor_share`), are known only after visibility, which runs after the mirror's system, so the
+//! render world writes them itself (`reflect::upload_reflect`). A row no knob fills (the body)
+//! stays 0.
 
 use std::sync::OnceLock;
 
@@ -264,23 +265,15 @@ fn ripple_loss_at(stats: &RippleStats, bias: f32, fade: (f32, f32), lod: f32) ->
     [all, mips]
 }
 
-/// The look block as `WaterLook` lays it out. `water_rect` is left 0 for the render world, and
-/// the rows no knob fills (the body) stay 0.
+/// The look block as `WaterLook` lays it out. `water_rect` and `quality.y` are left 0 for the render
+/// world, and the rows no knob fills (the body) stay 0.
 pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FLOATS] {
     let mut lanes = [0.0; LOOK_FLOATS];
     let mut row = |at: usize, v: [f32; 4]| {
         lanes[at - LOOK_LANES.start..][..4].copy_from_slice(&v);
     };
     // The tier is a copy for the debug views: the shader branches on its def.
-    row(
-        LOOK_QUALITY,
-        [
-            f32::from(inputs.tier),
-            f32::from(look.floor_occlusion),
-            0.0,
-            0.0,
-        ],
-    );
+    row(LOOK_QUALITY, [f32::from(inputs.tier), 0.0, 0.0, 0.0]);
     row(
         LOOK_COMPOSITE,
         [
@@ -338,7 +331,7 @@ mod tests {
         let lanes = look_lanes(&WaterLook::default(), &inputs);
         let row =
             |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
-        assert_eq!(row(LOOK_QUALITY), [1.0, 1.0, 0.0, 0.0]);
+        assert_eq!(row(LOOK_QUALITY), [1.0, 0.0, 0.0, 0.0]);
         let high = look_lanes(
             &WaterLook::default(),
             &LookInputs {

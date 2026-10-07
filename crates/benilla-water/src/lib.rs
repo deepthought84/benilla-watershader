@@ -3,8 +3,9 @@
 //! mirrors serve and where the fixed cube probes stand (`liquid_planar`, cached by `water_map`),
 //! the two planar mirrors (`reflect`), the probes (`probe`), the depth pyramid and scene colour
 //! the screen-space march reads (`depth`, `hiz`, `scene_color`), the sky floor's occlusion over the
-//! mirror planes and the sky floor's cube (`water_compute`, `sky_lut`), the wave simulation
-//! (`ripple_sim`), the surface's clock (`clock`) and the look's knobs (`look`). The surface shading
+//! mirror planes and the sky floor's cube (`water_compute`, `sky_lut`), whether the water on screen
+//! can show the sky floor at all (`floor_share`), the wave simulation (`ripple_sim`), the surface's
+//! clock (`clock`) and the look's knobs (`look`). The surface shading
 //! is `liquid.wgsl`'s stylised lane, in the engine.
 //!
 //! Every pass is inert on the reference lane (`WaterStyle::Reference`); the plugin only makes
@@ -16,6 +17,7 @@ use bevy::prelude::*;
 
 mod clock;
 mod depth;
+mod floor_share;
 mod flow;
 mod hiz;
 mod liquid_planar;
@@ -70,6 +72,7 @@ impl Plugin for ImprovedWaterPlugin {
         scene_color::register(app);
         sky_lut::register(app);
         water_compute::register(app);
+        floor_share::register(app);
         depth::register(app);
         probe::register(app);
         app.add_systems(
@@ -87,25 +90,20 @@ impl Plugin for ImprovedWaterPlugin {
 fn register_caps(app: &mut App) {
     app.add_systems(
         PreUpdate,
-        drive_pipeline_caps.run_if(
-            resource_changed::<dev_state::DebugState>
-                .or(resource_changed::<WaterQuality>)
-                .or(resource_changed::<look::WaterLook>),
-        ),
+        drive_pipeline_caps
+            .run_if(resource_changed::<dev_state::DebugState>.or(resource_changed::<WaterQuality>)),
     );
 }
 
-/// Ask the stylised liquid pipelines for the variants this plugin's switches need, the depth
-/// pyramid for the readers they turn on and the ripple map for the tier's anisotropy: the quality
-/// tier, the debug views while one is chosen, the screen-space march while its switch is on, the
-/// sky floor's occlusion while its lane is. A no-op unless the answer changes, so the materials are
-/// touched only then.
+/// Ask the stylised liquid pipelines for the variants this plugin's switches need and the ripple
+/// map for the tier's anisotropy: the quality tier, the debug views while one is chosen, the
+/// screen-space march while its switch is on. A no-op unless the answer changes, so the materials
+/// are touched only then. The depth pyramid's readers are asked each frame
+/// (`floor_share::drive_floor_readers`).
 fn drive_pipeline_caps(
     dev: Res<dev_state::DebugState>,
     quality: Res<WaterQuality>,
-    look: Res<look::WaterLook>,
     mut caps: ResMut<WaterPipelineCaps>,
-    mut consumers: ResMut<hiz::WaterHizConsumers>,
     mut aniso: ResMut<RippleAniso>,
 ) {
     let next = WaterPipelineCaps {
@@ -115,14 +113,6 @@ fn drive_pipeline_caps(
         ..*caps
     };
     caps.set_if_neq(next);
-    let mut readers = 0;
-    if dev.water.ssr {
-        readers |= hiz::WaterHizConsumers::SSR;
-    }
-    if look.floor_occlusion {
-        readers |= hiz::WaterHizConsumers::FLOOR_OCCLUSION;
-    }
-    consumers.set_if_neq(hiz::WaterHizConsumers(readers));
     aniso.set_if_neq(RippleAniso(look::ripple_aniso(quality.tier())));
 }
 
@@ -183,9 +173,7 @@ mod tests {
         let mut world = World::new();
         world.init_resource::<super::dev_state::DebugState>();
         world.init_resource::<super::WaterPipelineCaps>();
-        world.init_resource::<super::hiz::WaterHizConsumers>();
         world.init_resource::<super::RippleAniso>();
-        world.insert_resource(super::look::WaterLook::default());
         world
             .resource_mut::<super::dev_state::DebugState>()
             .water
@@ -218,15 +206,13 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<super::dev_state::DebugState>()
             .init_resource::<super::WaterPipelineCaps>()
-            .init_resource::<super::hiz::WaterHizConsumers>()
             .init_resource::<super::RippleAniso>()
-            .insert_resource(super::look::WaterLook::default())
             .insert_resource(Low);
         super::register_caps(&mut app);
         let tier = |app: &App| app.world().resource::<super::WaterPipelineCaps>().tier;
         // Each condition counts changes since it was last evaluated, and `or` evaluates one only
-        // when those before it are false: three frames let each of the three see the state once.
-        for _ in 0..3 {
+        // when those before it are false: two frames let each of the two see the state once.
+        for _ in 0..2 {
             app.update();
         }
         assert_eq!(tier(&app), Low.tier(), "the boot tier");
@@ -245,35 +231,5 @@ mod tests {
         app.insert_resource(Medium);
         app.update();
         assert_eq!(tier(&app), Medium.tier(), "a new tier reaches the caps");
-    }
-
-    /// The sky floor's occlusion walks the depth pyramids, so its lane asks for them, beside the
-    /// march's switch and without it.
-    #[test]
-    fn the_floor_occlusion_asks_for_the_pyramid() {
-        use super::hiz::WaterHizConsumers as C;
-        let mut world = World::new();
-        world.init_resource::<super::dev_state::DebugState>();
-        world.init_resource::<super::WaterPipelineCaps>();
-        world.init_resource::<C>();
-        world.init_resource::<super::RippleAniso>();
-        world.insert_resource(super::WaterQuality::Medium);
-        for (ssr, floor, want) in [
-            (false, true, C::FLOOR_OCCLUSION),
-            (true, true, C::SSR | C::FLOOR_OCCLUSION),
-            (true, false, C::SSR),
-            (false, false, 0),
-        ] {
-            world
-                .resource_mut::<super::dev_state::DebugState>()
-                .water
-                .ssr = ssr;
-            world.insert_resource(super::look::WaterLook {
-                floor_occlusion: floor,
-                ..default()
-            });
-            world.run_system_once(super::drive_pipeline_caps).unwrap();
-            assert_eq!(world.resource::<C>().0, want, "ssr {ssr}, floor {floor}");
-        }
     }
 }

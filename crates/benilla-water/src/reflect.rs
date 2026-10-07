@@ -53,8 +53,8 @@ use super::WaterStyle;
 use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_world::liquid::{
-    mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, LOOK_LANES, LOOK_WATER_RECT,
-    MARCH_LANES, MIRROR2_LANES, PROBE_LANES, REFLECT_FLOATS,
+    mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, LOOK_LANES, LOOK_QUALITY,
+    LOOK_WATER_RECT, MARCH_LANES, MIRROR2_LANES, PROBE_LANES, REFLECT_FLOATS,
 };
 
 /// How far from the eye a water surface may be and still be the **fallback** plane — the "water
@@ -148,7 +148,7 @@ fn reflect_downscale() -> u32 {
 /// *below* that plane is missing whatever geometry stands between the two heights, and one above it
 /// keeps a little it should have cut. The clip follows the plane the prominence walk picked — the
 /// water covering most of the screen — so the error lands on the bodies occupying least of it.
-const PLANE_TOLERANCE: f32 = 10.0;
+pub(crate) const PLANE_TOLERANCE: f32 = 10.0;
 
 /// How far below the capture plane the mirror's clip may be dropped to spare a lower water body,
 /// in yards.
@@ -1420,12 +1420,13 @@ fn restamp_reflection_target(
 }
 
 /// Render world: the whole block once a frame, before anything draws, then the water rectangle's
-/// row over it.
+/// row and the floor occlusion's lane over it.
 fn upload_reflect(
     queue: Res<RenderQueue>,
     buffer: Option<Res<WaterReflectBuffer>>,
     data: Option<Res<WaterReflectData>>,
     rect: Option<Res<super::world_view::WaterScreenRect>>,
+    floor: Option<Res<super::floor_share::FloorOnScreen>>,
 ) {
     let (Some(buffer), Some(data)) = (buffer, data) else {
         return;
@@ -1446,6 +1447,15 @@ fn upload_reflect(
         &buffer.0,
         (LOOK_WATER_RECT * 4) as u64,
         bytemuck::cast_slice(&r),
+    );
+    // `quality.y`'s one writer, for the same reason: whether the floor is occluded this frame is
+    // known after visibility. Off, the fragment does not march, and nothing reads the pyramids and
+    // the plane pass's images, which this frame did not build.
+    let on = f32::from(floor.is_some_and(|f| f.0));
+    queue.write_buffer(
+        &buffer.0,
+        ((LOOK_QUALITY + 1) * 4) as u64,
+        bytemuck::bytes_of(&on),
     );
 }
 
@@ -1550,18 +1560,20 @@ mod tests {
                 "e_sun_raw: vec4<f32>",
             ]
         );
-        // The rect row has one writer: `upload_reflect` in the render world, over the zeros
-        // `look_lanes` leaves there.
+        // The rect row and the floor occlusion's lane have one writer: `upload_reflect` in the
+        // render world, over the zeros `look_lanes` leaves there.
         let src = include_str!("reflect.rs");
         let upload = &src[src.find("fn upload_reflect(").unwrap()..];
         let upload = &upload[..upload.find("\n}\n").unwrap()];
         assert!(upload.contains("(LOOK_WATER_RECT * 4) as u64"));
+        assert!(upload.contains("((LOOK_QUALITY + 1) * 4) as u64"));
         let lanes = super::super::look::look_lanes(
             &super::super::look::WaterLook::default(),
             &super::super::look::LookInputs::default(),
         );
         let rect = LOOK_WATER_RECT - LOOK_LANES.start;
         assert_eq!(lanes[rect..rect + 4], [0.0; 4]);
+        assert_eq!(lanes[LOOK_QUALITY + 1 - LOOK_LANES.start], 0.0);
     }
 
     /// The members of the WGSL struct `name`, in order, comments and trailing commas dropped.

@@ -223,7 +223,8 @@ struct WaterBody {
 // writer per row, and a row no writer fills reads 0.
 struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
-    // occlusion (1 on), zw spare.
+    // occlusion this frame (1 on, with water on screen the floor can serve; written by the render
+    // world), zw spare.
     quality: vec4<f32>,
     // x the reflection's grazing ceiling (1 = none), y the glint weight in linear light, z a glow
     // excess forced onto every water pixel, w spare.
