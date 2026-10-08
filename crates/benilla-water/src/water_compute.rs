@@ -579,6 +579,87 @@ mod tests {
         }
     }
 
+    /// The floor march law's `law_cover`, as the shared text carries it.
+    const LAW_COVER_WGSL: &str = "\
+fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32) -> f32 {
+    if (end <= 0.0 || depth <= end) {
+        return 0.0;
+    }
+    let c = 1.0 - exp(-(law_view_z(depth) - law_view_z(end)) / LAW_THICKNESS);
+    if (depth < start) {
+        return c;
+    }
+    if (ray_q <= 0.0 || frame_q <= 0.0) {
+        return 0.0;
+    }
+    return c * (1.0 - saturate((law_view_z(ray_q) - law_view_z(frame_q)) / LAW_THICKNESS));
+}";
+
+    /// [`LAW_COVER_WGSL`] in Rust, with `law_view_z` = −near / depth and `LAW_THICKNESS` 6 yd.
+    fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32, near: f32) -> f32 {
+        let view_z = |d: f32| -near / d;
+        if end <= 0.0 || depth <= end {
+            return 0.0;
+        }
+        let c = 1.0 - (-(view_z(depth) - view_z(end)) / 6.0).exp();
+        if depth < start {
+            return c;
+        }
+        if ray_q <= 0.0 || frame_q <= 0.0 {
+            return 0.0;
+        }
+        c * (1.0 - ((view_z(ray_q) - view_z(frame_q)) / 6.0).clamp(0.0, 1.0))
+    }
+
+    /// **Geometry nearer the eye than the water covers its ray only where the ray is shut.** An
+    /// unknown verdict reads the frame where the ray's path on screen ends. What the frame shows
+    /// there beyond the water point covers the ray. What stands nearer the eye than the water (the
+    /// avatar in third person, a trunk beside the camera, a deck overhead) is not on the ray: it
+    /// covers it only where the ray's own point at its height is on or behind what the frame
+    /// shows there, a deck that reaches out over the water, and not where that point floats in
+    /// front of the far shore, as at the avatar's height.
+    #[test]
+    fn near_geometry_covers_a_ray_only_where_the_ray_is_shut() {
+        let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        assert!(
+            march_law(liquid).contains(LAW_COVER_WGSL),
+            "the law's law_cover is not the text this test mirrors"
+        );
+        assert!(march_law(liquid).contains("cover = law_cover(o.z, e.z, e_depth, ray_q, frame_q);"));
+        // Reverse-Z depth is near / distance; near 0.1 yd.
+        let near = 0.1;
+        let at = |yd: f32| near / yd;
+        let cover =
+            |start, end, depth, ray_q, frame_q| law_cover(start, end, depth, ray_q, frame_q, near);
+        // Water 40 yd out, its ray's path on screen ending at the far plane's shy point.
+        let (water, end) = (at(40.0), at(40_000.0));
+        // A canopy 60 yd out covers it, whatever the frame holds at the ray's point.
+        assert!(cover(water, end, at(60.0), 0.0, 0.0) > 0.999);
+        assert!(cover(water, end, at(41.0), 0.0, 0.0) > 0.999);
+        // The avatar 4 yd from the eye, a trunk 12 yd: the ray's point at their height lies 70 yd
+        // out, over the far shore 300 yd away. No cover; nor off the frame.
+        for near_thing in [at(4.0), at(12.0)] {
+            assert_eq!(cover(water, end, near_thing, at(70.0), at(300.0)), 0.0);
+            assert_eq!(cover(water, end, near_thing, 0.0, 0.0), 0.0);
+        }
+        // A deck overhead, 3 yd from the eye: the ray's point at its height is on the deck 25 yd
+        // out (the frame shows the deck there, half a yard behind it), or behind a beam in front
+        // of it.
+        assert!(cover(water, end, at(3.0), at(25.0), at(25.5)) > 0.9);
+        assert!(cover(water, end, at(3.0), at(25.0), at(10.0)) > 0.999);
+        // Softly by how far the point floats in front of what the frame shows: 3 yd, half.
+        let c = cover(water, end, at(3.0), at(25.0), at(28.0));
+        assert!((c - 0.5).abs() < 1e-3, "{c}");
+        // Sky, and geometry behind the ray's end, do not cover it; nor does an end past the far
+        // plane.
+        assert_eq!(cover(water, end, 0.0, 0.0, 0.0), 0.0);
+        assert_eq!(cover(water, at(50.0), at(55.0), 0.0, 0.0), 0.0);
+        assert_eq!(cover(water, 0.0, at(60.0), 0.0, 0.0), 0.0);
+        // Softly by the gap: 6 yd in front of the end is 1 − 1/e.
+        let c = cover(at(10.0), at(30.0), at(24.0), 0.0, 0.0);
+        assert!((c - (1.0 - (-1.0f32).exp())).abs() < 1e-4, "{c}");
+    }
+
     /// The dispatch covers the texels under the rectangle's pixels, and no more than the image.
     #[test]
     fn the_occlusion_dispatch_covers_the_rectangle() {

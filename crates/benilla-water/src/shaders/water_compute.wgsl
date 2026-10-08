@@ -113,6 +113,29 @@ fn law_behind_slab(ray: f32, depth: f32, near: f32) -> bool {
     return ray * (near + LAW_THICKNESS * depth) < near * depth;
 }
 
+/// How much the geometry at the end of a ray's path on screen covers the ray (device depths: the
+/// ray starts at `start` and its path ends at `end`; the frame shows `depth` there): geometry in
+/// front of the end, softly by how far in front ([`LAW_THICKNESS`] for about two thirds). Geometry
+/// farther than the water point stands on the ray's side of it. Geometry nearer the eye than the
+/// water (the avatar, a trunk beside the camera, a deck overhead) covers it only where the ray's
+/// own point at that geometry's height (`ray_q`, 0 off the frame) is shut in the frame there
+/// (`frame_q`): on or behind what the frame shows, a deck reaching out over the water, and open
+/// once it floats [`LAW_THICKNESS`] in front of it, as at the avatar's height over far water. 0
+/// for sky and for an end past the far plane.
+fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32) -> f32 {
+    if (end <= 0.0 || depth <= end) {
+        return 0.0;
+    }
+    let c = 1.0 - exp(-(law_view_z(depth) - law_view_z(end)) / LAW_THICKNESS);
+    if (depth < start) {
+        return c;
+    }
+    if (ray_q <= 0.0 || frame_q <= 0.0) {
+        return 0.0;
+    }
+    return c * (1.0 - saturate((law_view_z(ray_q) - law_view_z(frame_q)) / LAW_THICKNESS));
+}
+
 /// The occluder as the frame shows it, over the walked level's cell: four bilinear taps at
 /// ±2^(level − 1) pixels, averaged, gamma.
 fn snapshot_box(uv: vec2<f32>, level: i32) -> vec3<f32> {
@@ -152,9 +175,10 @@ struct FloorMarch {
 /// - an unknown verdict reads the frame at the end of the ray's path on screen: where its
 ///   projection meets the far plane inside the frame (the pixel the eye sees along the reflected
 ///   direction), else where it leaves the frame through the top. Geometry drawn there above the
-///   water and in front of the ray covers it, softly by how far in front ([`LAW_THICKNESS`] for
-///   about two thirds): the canopy, deck or far shore the walk ran out of steps before reaching.
-///   The end moves with the pixel, not with the cells the walk stopped in.
+///   water and in front of the ray covers it ([`law_cover`]; nearer the eye than the water only
+///   where the ray's own point at its height is shut in the frame): the canopy, deck or far shore
+///   the walk ran out of steps before reaching. The end moves with the pixel, not with the cells
+///   the walk stopped in.
 ///
 /// `travelled` is the distance from the origin to the point the verdict was reached at: the hit,
 /// the covering geometry, where the ray left the frame, or where the budget ran out. The reflected
@@ -278,9 +302,20 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
             if (e.z > 0.0 && e_depth > e.z) {
                 let at_e = law_ndc_to_world(vec3<f32>(law_uv_to_ndc(e_uv), e_depth));
                 if (at_e.y > origin.y) {
-                    let gap = law_view_z(e_depth) - law_view_z(e.z);
-                    cover = 1.0 - exp(-gap / LAW_THICKNESS);
-                    p = vec3<f32>(e_uv, e_depth);
+                    // The ray's point at the geometry's height, and the frame there.
+                    var ray_q = 0.0;
+                    var frame_q = 0.0;
+                    if (e_depth >= o.z && dir.y > 0.0) {
+                        let q = law_world_to_screen(origin + dir * ((at_e.y - origin.y) / dir.y));
+                        if (all(q.xy >= vec2<f32>(0.0)) && all(q.xy < vec2<f32>(1.0))) {
+                            ray_q = q.z;
+                            frame_q = textureLoad(hiz_tex, vec2<i32>(q.xy * base_res), 0).r;
+                        }
+                    }
+                    cover = law_cover(o.z, e.z, e_depth, ray_q, frame_q);
+                    if (cover > 0.0) {
+                        p = vec3<f32>(e_uv, e_depth);
+                    }
                 }
             }
         }
