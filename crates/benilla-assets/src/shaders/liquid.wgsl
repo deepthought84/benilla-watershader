@@ -335,8 +335,8 @@ struct LiquidParams {
     kind: vec4<f32>,
     // x = renderer (`LiquidPath`): 0 = ADT MCLQ, 1 = WMO exterior, 2 = WMO interior; yzw reserved.
     path: vec4<f32>,
-    // y = frame count; z = scroll flag (WMO magma/slime only, liquid nibbles 6/7); w = clock
-    // enable (0 on a deterministic run).
+    // x = the frame sheet's mean alpha (the stylised lane's lift); y = frame count; z = scroll flag
+    // (WMO magma/slime only, liquid nibbles 6/7); w = clock enable (0 on a deterministic run).
     anim: vec4<f32>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var<uniform> w: LiquidParams;

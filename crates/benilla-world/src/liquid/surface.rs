@@ -993,7 +993,7 @@ pub(super) fn setup_liquid(
     // a uniform write rather than a material rebuild.
     let wake = pass.wake.clone();
     for &(kind, dir, stem, count) in FRAME_SETS {
-        let Some((frames, frame_count)) =
+        let Some((frames, frame_count, mean_alpha)) =
             load_frame_array(&mut world_assets, &mut images, kind, dir, stem, count)
         else {
             warn!("liquid: no frames for {stem} — {kind:?} water will not render");
@@ -1073,10 +1073,10 @@ pub(super) fn setup_liquid(
                         if kind == LiquidKind::Magma { 1.0 } else { 0.0 },
                         style_bits,
                     ),
-                    // x reserved; y = frame count; z = scroll; w = clock enable (0 on a
-                    // deterministic run: frame 0, scroll 0).
+                    // x = the sheet's mean alpha, the stylised lane's lift; y = frame count;
+                    // z = scroll; w = clock enable (0 on a deterministic run: frame 0, scroll 0).
                     anim: Vec4::new(
-                        0.0,
+                        mean_alpha,
                         frame_count as f32,
                         if scroll { 1.0 } else { 0.0 },
                         if crate::dev_state::deterministic_run() {
@@ -1157,7 +1157,8 @@ pub(super) fn apply_ripple_aniso(
 }
 
 /// Decode frames `1..=count` with their authored mips into one repeating, anisotropic array,
-/// stopping at the first missing, non-square or mis-sized frame; returns it and the count loaded.
+/// stopping at the first missing, non-square or mis-sized frame; returns it, the count loaded and
+/// the loop's mean mip-0 alpha.
 fn load_frame_array(
     world_assets: &mut WorldAssets,
     images: &mut Assets<Image>,
@@ -1165,7 +1166,7 @@ fn load_frame_array(
     dir: &str,
     stem: &str,
     count: u32,
-) -> Option<(Handle<Image>, u32)> {
+) -> Option<(Handle<Image>, u32, f32)> {
     let mut frames: Vec<BlpMipChain> = Vec::new();
     let mut size = 0u32;
     for i in 1..=count {
@@ -1192,7 +1193,8 @@ fn load_frame_array(
     // mipping turns the shipped frames' drifting means into a flicker on distant water; magma and
     // slime keep theirs, the body's intended pulse.
     let normalize_dc = !kind.is_fullbright();
-    Some((images.add(liquid_frame_array(frames, normalize_dc)), loaded))
+    let (array, mean_alpha) = liquid_frame_array(frames, normalize_dc);
+    Some((images.add(array), loaded, mean_alpha))
 }
 
 #[cfg(test)]
@@ -1451,6 +1453,28 @@ mod real_data {
     use super::LiquidKind;
     use benilla_formats::{parse_wmo_root, wmo_group_liquid_mesh};
     use std::collections::HashMap;
+
+    /// The water sheets' loop-mean alpha, the stylised lane's lift (`anim.x`): `lake_a` 0.213,
+    /// `ocean_h` 0.223 and `fast_a` opaque, after the DC pass.
+    #[test]
+    fn the_water_sheets_mean_alpha_is_measured_at_load() {
+        let data = benilla_formats::wow_data_or_skip!();
+        let mut chain = benilla_formats::open_chain(&data).expect("open chain");
+        for (stem, want) in [("lake_a", 0.213), ("ocean_h", 0.223), ("fast_a", 1.0)] {
+            let &(_, dir, _, count) = super::FRAME_SETS
+                .iter()
+                .find(|s| s.2 == stem)
+                .expect("a frame set");
+            let frames: Vec<_> = (1..=count)
+                .map(|i| {
+                    let path = format!("XTextures\\{dir}\\{stem}.{i}.blp");
+                    super::read_texture_mip_chain(&mut chain, &path).expect("frame readable")
+                })
+                .collect();
+            let (_, mean) = benilla_assets::liquid_frame_array(frames, true);
+            assert!((mean - want).abs() < 0.0015, "{stem}: {mean}");
+        }
+    }
 
     /// The scroll gate over the shipped pools, where both behaviours share buildings: Ironforge has
     /// 9 static nibble-2 and 2 scrolling nibble-6 magma groups, Blackrock is nibble 6 throughout,

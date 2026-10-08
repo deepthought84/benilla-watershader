@@ -56,6 +56,10 @@ pub struct WowLighting {
     /// Per-kind water alphas `[shallow, deep]`, `LightParams` fields 5-8, blended like the tint.
     pub(crate) water_river_alpha: [f32; 2],
     pub(crate) water_ocean_alpha: [f32; 2],
+    /// The water swatch of [`Self::water_colors`] at noon, clear and dry, river then ocean: the
+    /// same area blend at half-minute 1440, resampled only when the map changes or the eye moves
+    /// a yard, so what derives from it does not follow the clock.
+    pub(crate) water_noon: [([f32; 3], [f32; 3], f32, f32); 2],
     /// The FFXGlow composite weight, `LightParams.glow` quantised as the reference packs it.
     pub(crate) glow: f32,
     /// The dawn/dusk sky warp strength `curve(dayfrac) × highlightSky` for `sky.wgsl`'s warp
@@ -106,7 +110,7 @@ impl WowLighting {
     /// WMO liquid's opacity is the 256-entry `shallow + d·(deep − shallow)/256` (`0x6b6b60`). One
     /// depth `V` indexes colour and alpha: `clamp(byte/42)` for river and lake (`0x68d790`, opaque
     /// by about 5 yd), `clamp(byte/255)` for ocean (`0x68d690`), both built in `0x68c4c0`.
-    pub(crate) fn water_colors(&self, kind: LiquidKind) -> ([f32; 3], [f32; 3], f32, f32) {
+    pub fn water_colors(&self, kind: LiquidKind) -> ([f32; 3], [f32; 3], f32, f32) {
         let (shallow_rgb, deep_rgb, alpha) = if kind == LiquidKind::Ocean {
             (
                 self.water_ocean[0],
@@ -121,6 +125,11 @@ impl WowLighting {
             )
         };
         (shallow_rgb, deep_rgb, alpha[0], alpha[1])
+    }
+
+    /// [`Self::water_colors`] as the clear, dry noon (half-minute 1440) paints it at this place.
+    pub fn water_colors_noon(&self, kind: LiquidKind) -> ([f32; 3], [f32; 3], f32, f32) {
+        self.water_noon[usize::from(kind == LiquidKind::Ocean)]
     }
 }
 

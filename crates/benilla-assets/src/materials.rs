@@ -695,7 +695,8 @@ pub struct LiquidExt {
     /// reference lane.
     #[uniform(102)]
     pub path: Vec4,
-    /// `y` = frame count, `z` = scroll flag, `w` = clock enable.
+    /// `x` = the frame sheet's mean alpha (the stylised lane only: the reference combine's
+    /// `0.25·detail.a` lift), `y` = frame count, `z` = scroll flag, `w` = clock enable.
     #[uniform(102)]
     pub anim: Vec4,
     /// The shared global light, read in both stages (the vertex stage evaluates the sun sheen).

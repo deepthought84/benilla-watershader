@@ -140,7 +140,8 @@ fn flatten_frame_dc(data: &mut [u8], spans: &[Vec<(usize, usize)>], levels: usiz
 /// The animated liquid frames stacked layer-major into one `texture_2d_array` from their authored
 /// mips, a full chain to 1×1; a level a frame lacks is filled `NEAREST` from its nearest authored
 /// level, so no gamma averaging. Every frame shares mip 0's `size` (the caller enforces it).
-pub fn liquid_frame_array(frames: Vec<BlpMipChain>, normalize_dc: bool) -> Image {
+/// Returns it with the loop's mean mip-0 alpha (after the DC pass), 0..1.
+pub fn liquid_frame_array(frames: Vec<BlpMipChain>, normalize_dc: bool) -> (Image, f32) {
     let size = frames[0].width;
     // Square 1.12 frames: levels = log2(size) + 1.
     let mip_level_count = {
@@ -175,6 +176,7 @@ pub fn liquid_frame_array(frames: Vec<BlpMipChain>, normalize_dc: bool) -> Image
     if normalize_dc && dc_normalization_enabled() {
         flatten_frame_dc(&mut data, &spans, mip_level_count as usize);
     }
+    let mean_alpha = mean_level0_alpha(&data, &spans);
     let mut image = Image::new_uninit(
         Extent3d {
             width: size,
@@ -203,7 +205,22 @@ pub fn liquid_frame_array(frames: Vec<BlpMipChain>, normalize_dc: bool) -> Image
         anisotropy_clamp: filter.anisotropy_clamp(),
         ..default()
     });
-    image
+    (image, mean_alpha)
+}
+
+/// The mean alpha of every frame's mip 0, 0..1: the sheet's `detail.a` averaged over the loop.
+fn mean_level0_alpha(data: &[u8], spans: &[Vec<(usize, usize)>]) -> f32 {
+    let (mut sum, mut texels) = (0u64, 0u64);
+    for &(start, len) in spans.iter().filter_map(|frame| frame.first()) {
+        for px in data[start..start + len].as_chunks::<4>().0 {
+            sum += u64::from(px[3]);
+            texels += 1;
+        }
+    }
+    if texels == 0 {
+        return 0.0;
+    }
+    (sum as f64 / texels as f64 / 255.0) as f32
 }
 
 /// A single-mip sRGB image for winit's custom OS cursor; macOS builds an `NSCursor` instead.
@@ -413,7 +430,7 @@ mod tests {
     fn flatten_frame_dc_equalizes_every_frame_at_every_level() {
         let frames = dc_frames();
         let n = frames.len();
-        let img = liquid_frame_array(frames, true);
+        let (img, _) = liquid_frame_array(frames, true);
         let data = img.data.as_ref().expect("array has data");
 
         // LayerMajor: frame0[2x2, 1x1], frame1[2x2, 1x1].
@@ -437,12 +454,22 @@ mod tests {
         }
     }
 
+    /// The array's mean alpha is the loop's mip-0 mean, `(45 + 85)/2` bytes, before and after the
+    /// DC pass, which moves each frame onto it.
+    #[test]
+    fn the_frame_array_reports_the_loops_mean_alpha() {
+        for normalize in [true, false] {
+            let (_, mean) = liquid_frame_array(dc_frames(), normalize);
+            assert!((mean - 65.0 / 255.0).abs() < 1e-6, "{normalize}: {mean}");
+        }
+    }
+
     /// The control for the test above: opted out (the magma and slime lane), the frames keep their
     /// own DC, so a no-op pass cannot pass it.
     #[test]
     fn raw_lever_keeps_the_authored_per_frame_dc() {
         let frames = dc_frames();
-        let img = liquid_frame_array(frames, false);
+        let (img, _) = liquid_frame_array(frames, false);
         let data = img.data.as_ref().expect("array has data");
         let mean = |start: usize, len: usize| {
             data[start..start + len]
