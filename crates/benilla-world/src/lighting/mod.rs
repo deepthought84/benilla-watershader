@@ -13,6 +13,7 @@ mod prop_probes; // the interior-prop SH probe table
 mod resolve; // the per-frame time-of-day resolve and the interior-fog crossfade
 mod sh; // the model SH probe fold
 pub use blob::LightBlob;
+pub use daynight::{celestial_sun_direction, sun_direction};
 pub use global_light::{new_shared_light_buffer, LightRooms, SharedLightBuffer, WorldPointLight};
 pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,

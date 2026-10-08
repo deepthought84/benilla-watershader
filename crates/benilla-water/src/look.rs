@@ -5,8 +5,8 @@
 //! Each row has one writer. [`look_lanes`] writes every row but `water_rect` and `quality.y`, which
 //! it leaves 0: the water's screen rectangle, and whether its floor is occluded this frame
 //! (`floor_share`), are known only after visibility, which runs after the mirror's system, so the
-//! render world writes them itself (`reflect::upload_reflect`). A row no knob fills (the body)
-//! stays 0.
+//! render world writes them itself (`reflect::upload_reflect`). The body's rows are
+//! `body::body_lanes`, from the resolved light and the dome.
 
 use std::sync::OnceLock;
 
@@ -14,11 +14,14 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::camera::MipBias;
 
+use crate::body::{body_lanes, BodyLook, BODY_FLOATS};
+use crate::lighting::WowLighting;
+use crate::mcsh::WaterShadowWindow;
 use crate::view::WorldCamera;
 use benilla_world::liquid::{
-    RippleAniso, RippleStats, WaterQuality, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE, LOOK_LANES,
-    LOOK_QUALITY, LOOK_RIPPLE_LOSS, LOOK_RIPPLE_MEAN, LOOK_SHORE, LOOK_SHORE_KIND, LOOK_SURF,
-    RIPPLE_LOSS_ROWS, RIPPLE_SIZE,
+    RippleAniso, RippleStats, WaterQuality, LOOK_BODY, LOOK_COMPOSITE, LOOK_DETAIL, LOOK_GRADE,
+    LOOK_LANES, LOOK_QUALITY, LOOK_RIPPLE_LOSS, LOOK_RIPPLE_MEAN, LOOK_SHORE, LOOK_SHORE_KIND,
+    LOOK_SURF, RIPPLE_LOSS_ROWS, RIPPLE_SIZE,
 };
 
 /// The calm surface's GGX roughness α0: √0.003, Cox and Munk's (1954) clean-surface slope
@@ -119,6 +122,8 @@ pub(crate) struct WaterLook {
     pub(crate) floor_occlusion: bool,
     /// The authored sheet's contrast as painted detail; 0, off.
     pub(crate) painted_detail: f32,
+    /// The body's optics and light.
+    pub(crate) body: BodyLook,
     /// The shore's wet line, wet darkening, contact foam and meniscus gains.
     pub(crate) k_line: f32,
     pub(crate) f_wet: f32,
@@ -142,6 +147,7 @@ impl Default for WaterLook {
             grade_c_far: 0.3,
             floor_occlusion: floor_occlusion(),
             painted_detail: 0.0,
+            body: BodyLook::default(),
             k_line: 0.35,
             f_wet: 0.61,
             k_contact: 1.0,
@@ -167,6 +173,8 @@ pub(crate) struct LookInputs<'a> {
     pub(crate) aniso: u16,
     /// The ripple's loss table ([`ripple_loss`]); rows it does not fill stay 0, nothing lost.
     pub(crate) loss: &'a [[f32; 4]],
+    /// The body rows ([`body_lanes`]); `None` leaves them 0.
+    pub(crate) body: Option<&'a [f32; BODY_FLOATS]>,
 }
 
 /// The ripple's loss table and the inputs it was tabulated from, so a frame rebuilds it only when
@@ -189,8 +197,8 @@ impl LossTable {
 }
 
 /// What `drive_reflection` writes the look block from: the knobs, the quality tier, the ripple
-/// map's statistics, when the map exists, its sampler's anisotropy clamp, and the world camera's
-/// texture LOD bias, which every octave's LOD carries.
+/// map's statistics, when the map exists, its sampler's anisotropy clamp, the world camera's
+/// texture LOD bias, which every octave's LOD carries, and the terrain shadow's window.
 #[derive(SystemParam)]
 pub(crate) struct LookSources<'w, 's> {
     look: Res<'w, WaterLook>,
@@ -198,19 +206,23 @@ pub(crate) struct LookSources<'w, 's> {
     ripple: Option<Res<'w, RippleStats>>,
     aniso: Res<'w, RippleAniso>,
     bias: Query<'w, 's, &'static MipBias, With<WorldCamera>>,
+    shadow: Res<'w, WaterShadowWindow>,
     loss: Local<'s, LossTable>,
 }
 
 impl LookSources<'_, '_> {
-    /// This frame's look block ([`look_lanes`]).
-    pub(crate) fn lanes(&mut self) -> [f32; LOOK_FLOATS] {
+    /// This frame's look block ([`look_lanes`]) under `light`, whose dome rows are `dome`
+    /// (`sky::dome_uniforms`).
+    pub(crate) fn lanes(&mut self, light: &WowLighting, dome: &[Vec4; 7]) -> [f32; LOOK_FLOATS] {
         let ripple = self.ripple.as_deref().copied().unwrap_or_default();
         let bias = self.bias.iter().next().map_or(0.0, |b| b.0);
+        let body = body_lanes(light, dome, &self.look.body, self.shadow.lanes());
         let inputs = LookInputs {
             tier: self.quality.tier(),
             ripple,
             aniso: self.aniso.0,
             loss: self.loss.rows(&ripple, bias, self.look.feature_fade),
+            body: Some(&body),
         };
         look_lanes(&self.look, &inputs)
     }
@@ -266,7 +278,7 @@ fn ripple_loss_at(stats: &RippleStats, bias: f32, fade: (f32, f32), lod: f32) ->
 }
 
 /// The look block as `WaterLook` lays it out. `water_rect` and `quality.y` are left 0 for the render
-/// world, and the rows no knob fills (the body) stay 0.
+/// world.
 pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FLOATS] {
     let mut lanes = [0.0; LOOK_FLOATS];
     let mut row = |at: usize, v: [f32; 4]| {
@@ -313,6 +325,9 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
     );
     let [still, rapids, ocean] = look.kind_line;
     row(LOOK_SHORE_KIND, [still, rapids, ocean, 0.0]);
+    if let Some(body) = inputs.body {
+        lanes[LOOK_BODY - LOOK_LANES.start..][..BODY_FLOATS].copy_from_slice(body);
+    }
     lanes
 }
 
@@ -321,7 +336,8 @@ mod tests {
     use super::*;
     use benilla_world::liquid::LOOK_WATER_RECT;
 
-    /// The defaults land in their rows; the render world's row and the unfilled rows stay 0.
+    /// The defaults land in their rows; the render world's row, and the body's without its
+    /// lanes, stay 0.
     #[test]
     fn the_look_rows_carry_their_defaults() {
         let inputs = LookInputs {
@@ -511,6 +527,24 @@ mod tests {
         ] {
             assert!(wgsl.contains(&decl), "liquid.wgsl lacks `{decl}`");
         }
+    }
+
+    /// The body's ten rows land in `WaterLook::body`, between the ripple's mean and the shore.
+    #[test]
+    fn the_body_rows_land_in_the_look_block() {
+        let body: [f32; BODY_FLOATS] = std::array::from_fn(|i| i as f32 + 1.0);
+        let lanes = look_lanes(
+            &WaterLook::default(),
+            &LookInputs {
+                body: Some(&body),
+                ..LookInputs::default()
+            },
+        );
+        let at = LOOK_BODY - LOOK_LANES.start;
+        assert_eq!(lanes[at..at + BODY_FLOATS], body);
+        assert_eq!(LOOK_BODY, benilla_world::liquid::LOOK_RIPPLE_MEAN + 4);
+        assert_eq!(LOOK_BODY + BODY_FLOATS, LOOK_SHORE);
+        assert_eq!(WaterLook::default().body, BodyLook::default());
     }
 
     /// The ripple sampler's clamp lands in `surf.y`, the shader's N; High takes 4, the others none.

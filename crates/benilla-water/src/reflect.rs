@@ -1192,7 +1192,8 @@ pub(super) fn drive_reflection(
 ) {
     // The look rows and the sun lanes first and unconditionally: they are not the mirror's, and
     // every path out of this system below is a frame on which the water still has to draw.
-    data.0[LOOK_LANES].copy_from_slice(&look.lanes());
+    let mut dome = crate::sky::dome_uniforms(&light);
+    data.0[LOOK_LANES].copy_from_slice(&look.lanes(&light, &dome));
     let to_sun = light.celestial_dir.normalize_or_zero();
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();
@@ -1235,7 +1236,6 @@ pub(super) fn drive_reflection(
         // `w` spare.
         0.0,
     ]);
-    let mut dome = crate::sky::dome_uniforms(&light);
     dome[6].z = f32::from(sky_read_snapshot());
     for (row, v) in dome.iter().enumerate() {
         data.0[DOME_LANES.start + 4 * row..DOME_LANES.start + 4 * row + 4]

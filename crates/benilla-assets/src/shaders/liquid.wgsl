@@ -2318,9 +2318,16 @@ const WV_SLOPE_FULL: u32 = 12u;
 const WV_SLOPE_LO: u32 = 13u;
 const WV_FLOOR_OCC: u32 = 14u;
 const WV_SKY_FLOOR: u32 = 15u;
+const WV_SIGMA_SHAPE: u32 = 16u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
+}
+
+// The absorption per yard of this material's kind (`WaterBody`'s ocean row on the ocean swatch).
+fn view_sigma_abs() -> vec3<f32> {
+    let body = water_reflect.look.body;
+    return select(body.sig_river.rgb, body.sig_ocean.rgb, w.kind.y > 0.5);
 }
 #endif
 
@@ -3021,6 +3028,10 @@ fn stylised_water(
             v = vec3<f32>(vec2<f32>(0.5) + 4.0 * surf.n_lo.xz, 0.0);
         } else if (view_id == WV_SKY_FLOOR) {
             v = water_enc(sky);
+        } else if (view_id == WV_SIGMA_SHAPE) {
+            // The fragment's kind's absorption per channel over its largest channel.
+            let sigma = view_sigma_abs();
+            v = sigma / max(max(sigma.r, max(sigma.g, sigma.b)), 1e-6);
         } else if (view_id == WV_FLOOR_OCC) {
             // r the open sky v, g rho_c, b the per-pixel march's share (1 off the planes, 0 on
             // them, between in the crossfade band); half bright where the verdict is unknown.

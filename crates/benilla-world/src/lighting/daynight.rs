@@ -8,7 +8,7 @@ use benilla_assets::coords::wow_to_bevy;
 /// The lighting sun, `DayNight::SetDirection` (wowdev.wiki Rendering/DayNight): azimuth fixed at
 /// 225° and polar angle wobbling between ~110° and ~127°, so the sun never sets and night comes
 /// from the colours. Returns the Bevy-space travel direction; `minute` is the game minute of day.
-pub(super) fn sun_direction(minute: f32) -> Vec3 {
+pub fn sun_direction(minute: f32) -> Vec3 {
     // `(dayProgression, φ)`; the client's half-minute / 2880 equals minute / 1440.
     const PHI_TABLE: [(f32, f32); 4] = [
         (0.0, 2.2165682),
@@ -27,7 +27,7 @@ pub(super) fn sun_direction(minute: f32) -> Vec3 {
 /// The visible sun, body 0 of `0x6d3b80`: on the lighting sun's 45° bearing it rises and sets,
 /// polar angle 5° at solar noon to 100° (10° below the horizon) at night, offset from the camera in
 /// world space with no rotation. Returns the Bevy-space to-sun direction.
-pub(super) fn celestial_sun_direction(minute: f32) -> Vec3 {
+pub fn celestial_sun_direction(minute: f32) -> Vec3 {
     // Elevation table `0xce8d64` (dayProgression, polar φ): 100° is 10° below the horizon, 5° near
     // the zenith, held across noon; the azimuth table `0xce8d4c` is a constant 45°.
     const ELEV_TABLE: [(f32, f32); 5] = [

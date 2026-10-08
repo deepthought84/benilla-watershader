@@ -5,7 +5,8 @@
 //! the screen-space march reads (`depth`, `hiz`, `scene_color`), the sky floor's occlusion over the
 //! mirror planes and the sky floor's cube (`water_compute`, `sky_lut`), whether the water on screen
 //! can show the sky floor at all (`floor_share`), the wave simulation (`ripple_sim`), the surface's
-//! clock (`clock`) and the look's knobs (`look`). The surface shading
+//! clock (`clock`), the body's optics and light (`body`), the terrain shadow's window (`mcsh`)
+//! and the look's knobs (`look`). The surface shading
 //! is `liquid.wgsl`'s stylised lane, in the engine.
 //!
 //! Every pass is inert on the reference lane (`WaterStyle::Reference`); the plugin only makes
@@ -15,6 +16,7 @@ use std::path::PathBuf;
 
 use bevy::prelude::*;
 
+pub mod body;
 mod clock;
 mod depth;
 mod floor_share;
@@ -22,6 +24,7 @@ mod flow;
 mod hiz;
 mod liquid_planar;
 mod look;
+mod mcsh;
 mod probe;
 mod reflect;
 mod ripple_sim;
@@ -64,7 +67,8 @@ impl Plugin for ImprovedWaterPlugin {
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
-        app.init_resource::<look::WaterLook>();
+        app.init_resource::<look::WaterLook>()
+            .init_resource::<mcsh::WaterShadowWindow>();
         reflect::register(app);
         ripple_sim::register(app);
         world_view::register(app);
