@@ -76,7 +76,7 @@ const FLOOR_MARCH_LEVEL: i32 = 3;
 const FLOOR_MARCH_STEPS: i32 = 6;
 #else
 const FLOOR_MARCH_LEVEL: i32 = 3;
-const FLOOR_MARCH_STEPS: i32 = 8;
+const FLOOR_MARCH_STEPS: i32 = 6;
 #endif
 #endif
 

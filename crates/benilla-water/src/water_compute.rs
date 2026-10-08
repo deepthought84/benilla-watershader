@@ -572,7 +572,7 @@ mod tests {
         );
         assert!(march_law(compute).contains("fn floor_march("));
         // One budget per tier, inside the shared text.
-        assert!(march_law(compute).contains("const FLOOR_MARCH_STEPS: i32 = 8;"));
+        assert!(march_law(compute).contains("const FLOOR_MARCH_STEPS: i32 = 6;"));
         // The law's colour decode is each file's own: the same gamma.
         for wgsl in [liquid, compute] {
             assert!(wgsl.contains("const WATER_GAMMA: f32 = 2.2;"));
