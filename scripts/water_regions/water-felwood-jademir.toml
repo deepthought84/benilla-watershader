@@ -1,6 +1,7 @@
 # wg-felwood-jademir: Jademir Lake in Feralas, murky green-yellow water under fog; the far
 # waterline at y 475 on the right (x 1300-1600), where the water meets the fogged bank. Flake:
-# lake-bed plants at x1237-1599 y483-608 land in three or more states.
+# lake-bed plants at x1237-1599 y483-608 land in three or more states, and a patch at x750-768
+# y233-278 in two, in the shot and its Reference twin alike.
 scene = "water-felwood-jademir"
 [box]
 water = [0, 650, 1600, 900]
