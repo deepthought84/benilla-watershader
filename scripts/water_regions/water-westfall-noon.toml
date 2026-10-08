@@ -12,6 +12,7 @@ water = [500, 520, 1600, 900]
 rough_a = [790, 458, 810, 900]
 rough_b = [1190, 458, 1210, 900]
 rough_c = [1490, 458, 1510, 900]
+sky_water = [0, 0, 1600, 900]
 [[row]]
 metric = "horizon_ratio"
 water = "far_water"
@@ -39,13 +40,22 @@ metric = "roughness_profile"
 label = "rough_a"
 box = "rough_a"
 max = 10.8
+rising = true
 [[row]]
 metric = "roughness_profile"
 label = "rough_b"
 box = "rough_b"
 max = 10.8
+rising = true
 [[row]]
 metric = "roughness_profile"
 label = "rough_c"
 box = "rough_c"
 max = 10.8
+rising = true
+# The sky floor against the mirror where both see open sky (R-C3): the floor-served still
+# (WOW_PROBE=0 WOW_NO_REFLECT=1) as ~floor, its FLOOR_OCC view as ~floor@floor_occ and the shipped
+# TIERS view, inside boxes where the mirror shows only the dome and its clouds.
+[[row]]
+metric = "tier_consistency"
+box = "sky_water"

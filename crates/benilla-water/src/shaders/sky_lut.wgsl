@@ -2,8 +2,9 @@
 // better answer, as a 64² cube with five prefiltered mips, rebuilt every frame the stylised water is
 // on screen. Mip 0 is the dome's own gradient (the dome law, the sky pass's text) under the drawn
 // cloud layer (the cloud law, the cloud dome's mesh mapping inverted), unlit and in linear light;
-// each mip below it widens the one above by a Gaussian, so the water reads the sky blurred by its
-// own roughness (`liquid.wgsl`'s `sky_floor`).
+// each mip below it widens the one above by a Gaussian, so the water reads the sky along its flat
+// reflected ray blurred by the roughness it no longer resolves, never by more than half the ray's
+// elevation (`liquid.wgsl`'s `sky_floor`).
 
 // The reflection block (`liquid.wgsl`'s `WaterReflect`) as rows; the dome's seven from DOME_ROW.
 @group(0) @binding(0) var<storage, read> lanes: array<vec4<f32>>;

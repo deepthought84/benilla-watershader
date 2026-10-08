@@ -32,7 +32,8 @@ never install data. Its first comment names what the scene shows and its flake b
     [[row]]
     metric = "refl_contrast"     # a row of the catalogue
     label = "crown"              # optional, tells two rows of one metric apart
-    object = "crown"             # a string names a [box]; a list is an inline box
+    object = "crown"             # a string names a [box]; a list is an inline box, or a list
+                                 # of names (a row that reads several boxes)
     ...                          # the row's other parameters; max/min/near override its gate
 
 A row passes against an absolute gate (the catalogue's, or the region row's `max`, `min`, or
@@ -587,6 +588,47 @@ def floor_ncc(img, other, box, r=8):
     return {"value": float((ha * hb).sum() / den) if den > 0 else 0.0}
 
 
+def tier_consistency(img, floor, tiers, occ, box, rows=16, min_px=400):
+    """Where a mirror and the sky floor both see open sky, they show one sky: on water the shipped
+    TIERS view gives whole to a mirror (r 0, b full) and the floor-served FLOOR_OCC view `occ` sees
+    open (v = 1, the verdict known or not), inside `box` (one box or a list), the floor-served
+    still `floor` against the shipped still. The value is the largest |luma ratio − 1| of the two
+    mean colours (Rec. 709 over the codes) over the whole mask and over each band of `rows` rows
+    holding at least `min_px` of it; `ratio` and `dhue` are the whole mask's, `worst_dhue` the
+    largest hue difference (degrees, of the mean colours), `bands` the bands measured, `n` the
+    mask's pixels."""
+    boxes = box if isinstance(box[0], (list, tuple)) else [box]
+    inside = np.zeros(img.shape[:2], dtype=bool)
+    for b in boxes:
+        x0, y0, x1, y1 = (int(v) for v in b)
+        crop(img, b)
+        inside[y0:y1, x0:x1] = True
+    mirror = (tiers[..., 0] <= 2) & (tiers[..., 2] >= 253)
+    r = occ[..., 0]
+    open_sky = (r >= 253) | ((r >= 126) & (r <= 129))
+    m = mirror & open_sky & inside
+    n = int(m.sum())
+    if n == 0:
+        return {"value": None, "n": 0, "error": "no mirror-served open-sky water in the box"}
+
+    def compare(mask):
+        a, b = floor[mask].mean(0), img[mask].mean(0)
+        ratio = float((a @ LUMA_709) / max(float(b @ LUMA_709), 1e-6))
+        return ratio, float(hue_dist(hue_deg(a[None]), hue_deg(b[None]))[0])
+
+    ratio, dhue = compare(m)
+    worst, worst_dhue, bands = abs(ratio - 1.0), dhue, 0
+    ys = np.nonzero(m.any(1))[0]
+    for y0 in range(ys.min() // rows * rows, ys.max() + 1, rows):
+        bm = np.zeros_like(m)
+        bm[y0 : y0 + rows] = m[y0 : y0 + rows]
+        if bm.sum() >= min_px:
+            br, bh = compare(bm)
+            worst, worst_dhue, bands = max(worst, abs(br - 1.0)), max(worst_dhue, bh), bands + 1
+    return {"value": worst, "ratio": ratio, "dhue": dhue, "worst_dhue": worst_dhue,
+            "bands": bands, "n": n}
+
+
 def stair_step(img, box, rise=3, tread=4):
     """Stair-steps along a bank: per column, the row of the strongest vertical luma edge in the box
     (the waterline, rows smoothed over 3); a step is a riser, consecutive columns moving the edge
@@ -872,6 +914,17 @@ ROWS: dict[str, Row] = {
     "floor_ncc": Row(
         floor_ncc, STILL + [("variant", "other", "noreflect")], "higher", {"min": 0.7}
     ),
+    "tier_consistency": Row(
+        tier_consistency,
+        STILL
+        + [
+            ("variant", "floor", "floor"),
+            ("view", "tiers", "tiers", True),
+            ("variant", "occ", "floor@floor_occ"),
+        ],
+        "lower",
+        {"max": 0.1, "worst_dhue": {"max": 5.0}},
+    ),
     "stair_step": Row(stair_step, STILL, "lower"),
     "shore_band_ratio": Row(shore_band_ratio, STILL, "lower", {"max": 1.1}),
     "band_width": Row(band_width, STILL, "lower", {"max": 4.0}),
@@ -1007,11 +1060,17 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
     row = ROWS[name]
     base = "-ref" if spec.get("lane") == "ref" else lane
     params = {k: v for k, v in spec.items() if k not in META}
+    def named(v):
+        if not isinstance(v, str):
+            return v
+        if v not in boxes:
+            raise KeyError(f"no box named {v!r}")
+        return boxes[v]
+
     for k in params.keys() & BOX_PARAMS:
-        if isinstance(params[k], str):
-            if params[k] not in boxes:
-                raise KeyError(f"no box named {params[k]!r}")
-            params[k] = boxes[params[k]]
+        v = params[k]
+        listed = isinstance(v, list) and v and isinstance(v[0], str)
+        params[k] = [named(b) for b in v] if listed else named(v)
     box = params.get("box")
     args: dict = {}
     missing: list[str] = []

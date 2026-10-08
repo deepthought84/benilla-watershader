@@ -1,6 +1,8 @@
 //! **The sky floor's cube**: the sky the stylised water reflects where no tier has a better
 //! answer, as a 64² cube with a prefiltered mip chain (`shaders/sky_lut.wgsl`), bound to every
-//! liquid material at 119 and read by `liquid.wgsl`'s `sky_floor` at the water's roughness.
+//! liquid material at 119 and read by `liquid.wgsl`'s `sky_floor` along the flat reflected ray,
+//! blurred only by the roughness the surface no longer resolves and by no more than half the ray's
+//! elevation.
 //!
 //! Mip 0 is the dome along each texel's direction by the sky pass's own law (the dome rows of the
 //! reflection block, its single writer's), with the drawn cloud layer over it as the sky pass

@@ -238,9 +238,11 @@ pub(crate) struct WaterReflect {
 pub(crate) struct WaterReflectData(pub(crate) [f32; REFLECT_FLOATS]);
 
 /// The ripple's slide of the point a reflection is read for, in yards per unit of the normal's
-/// horizontal tilt (`water_reflect.march.y`): the planar mirror, the floor occlusion, the probes
-/// and the march read the reflection at `world_pos + n.xz · this`, the ray's direction unchanged,
-/// so neighbouring pixels stay coherent and every sample reflects a real point.
+/// horizontal tilt (`water_reflect.march.y`): the planar mirror, the probes and the march read the
+/// reflection at `world_pos + n.xz · this`, the ray's direction unchanged, so neighbouring pixels
+/// stay coherent and every sample reflects a real point. The floor occlusion reads its plane result
+/// and its occluder's colour there too, but its off-plane verdict marches from the unrippled point,
+/// so a still camera gets a still verdict (`liquid.wgsl`'s `floor_occlusion`).
 fn ripple_origin() -> f32 {
     3.0
 }

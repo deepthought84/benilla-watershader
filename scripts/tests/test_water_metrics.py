@@ -478,6 +478,78 @@ class Baselines(unittest.TestCase):
             self.assertRegex(out, r"pop +\S+ +- .* WORSE")
 
 
+class TierConsistency(unittest.TestCase):
+    """The sky floor against the mirror where both see open sky (R-C3): the floor-served still
+    against the shipped one, on mirror-served water whose floor verdict is open."""
+
+    def scene(self):
+        still = flat([90, 130, 170])
+        tiers = flat([128, 128, 128])  # the probe or the floor: not a mirror's
+        tiers[:, :200] = [0, 0, 255]  # mirror 1
+        tiers[100:140, :200] = [0, 255, 255]  # mirror 2
+        occ = flat([255, 0, 0])  # open sky, known
+        occ[:, 100:] = [128, 0, 0]  # open sky, unknown
+        occ[200:, :] = [0, 0, 0]  # occluded
+        return still, tiers, occ
+
+    def test_one_sky_scores_zero_and_a_brighter_floor_its_excess(self):
+        still, tiers, occ = self.scene()
+        box = [0, 0, W, H]
+        r = wm.tier_consistency(still, still.copy(), tiers, occ, box)
+        self.assertEqual((r["value"], r["worst_dhue"]), (0.0, 0.0))
+        self.assertEqual(r["n"], 200 * 200)  # the mirrors' open water, known or not
+        floor = still.copy()
+        floor[:, :200] *= 1.2
+        r = wm.tier_consistency(still, floor, tiers, occ, box)
+        self.assertAlmostEqual(r["value"], 0.2, places=5)
+        self.assertFalse(wm.judge(r["value"], wm.ROWS["tier_consistency"].gate, r))
+        # Brighter only where the mirror does not serve, or where the floor is occluded: the same.
+        floor = still.copy()
+        floor[:, 200:] *= 1.5
+        floor[200:, :] *= 1.5
+        self.assertEqual(wm.tier_consistency(still, floor, tiers, occ, box)["value"], 0.0)
+
+    def test_one_band_off_fails_where_the_whole_mask_passes(self):
+        still, tiers, occ = self.scene()
+        floor = still.copy()
+        floor[32:48, :200] *= 1.3  # one 16-row band, a tenth of the mask
+        r = wm.tier_consistency(still, floor, tiers, occ, [0, 0, W, H])
+        self.assertLess(abs(r["ratio"] - 1.0), 0.1)
+        self.assertAlmostEqual(r["value"], 0.3, places=4)
+        self.assertEqual(r["bands"], 13)  # rows 0-199 in 16-row bands, 200 px wide
+
+    def test_a_hue_shift_fails_on_worst_dhue(self):
+        still, tiers, occ = self.scene()
+        still[:] = hsv_patch(200, 0.5, 0.6)
+        floor = flat(hsv_patch(208, 0.5, 0.6))
+        r = wm.tier_consistency(still, floor, tiers, occ, [0, 0, W, H])
+        self.assertLess(r["value"], 0.1)
+        self.assertAlmostEqual(r["worst_dhue"], 8.0, delta=0.5)
+        self.assertFalse(wm.judge(r["value"], wm.ROWS["tier_consistency"].gate, r))
+
+    def test_the_row_reads_its_variants_and_named_boxes_from_files(self):
+        still, tiers, occ = self.scene()
+        floor = still.copy()
+        floor[:, :50] *= 1.05
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-t.toml").write_text(
+                "[box]\na = [0, 0, 50, 100]\nb = [0, 100, 300, 240]\n"
+                '[[row]]\nmetric = "tier_consistency"\nbox = ["a", "b"]\n'
+            )
+            save(still, d / "wg-t.png")
+            res = wm.measure(d, d, ["wg-t"])["wg-t"]["tier_consistency"]
+            self.assertIn("wg-t~floor.png", res["missing"])
+            self.assertIsNone(res["pass"])
+            save(floor, d / "wg-t~floor.png")
+            save(tiers, d / "wg-t@tiers.png")
+            save(occ, d / "wg-t~floor@floor_occ.png")
+            res = wm.measure(d, d, ["wg-t"])["wg-t"]["tier_consistency"]
+            self.assertEqual(res["n"], 50 * 100 + 200 * 100)
+            self.assertTrue(res["pass"])
+            self.assertAlmostEqual(res["value"], 0.05, delta=0.01)
+
+
 class Profiles(unittest.TestCase):
     def test_roughness_rising_toward_the_far_rows_is_monotone(self):
         view = np.zeros((100, 4, 3), dtype=np.float32)

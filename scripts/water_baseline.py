@@ -239,14 +239,15 @@ def rows(directory: pathlib.Path, regions: pathlib.Path) -> dict:
 
 
 def ins4(directory: pathlib.Path) -> dict:
-    """{<sweep>/<shot>: record} from each shot's journal, log and the sweep's vram.tsv."""
+    """{<sweep>/<shot>: record} from each shot's journal, log and its own sweep's vram.tsv (a
+    scene shot in two sweeps has a peak in each)."""
     vram = {}
     for sub in ["stills", "bursts"]:
         t = directory / sub / "vram.tsv"
         if t.exists():
             for line in t.read_text().splitlines():
                 out, v, g = line.split("\t")
-                vram[pathlib.Path(out).stem] = (int(v) / 1024, int(g) / 1024)
+                vram[f"{sub}/{pathlib.Path(out).stem}"] = (int(v) / 1024, int(g) / 1024)
     shots = {}
     for sub in ["stills", "bursts"]:
         for journal in sorted((directory / sub).glob("*.fps.csv")):
@@ -274,8 +275,8 @@ def ins4(directory: pathlib.Path) -> dict:
                 m = re.search(r"image settled after (\d+) frames, aging (\d+)", txt)
                 rec["settle"], rec["age"] = (int(m[1]), int(m[2])) if m else (None, None)
                 rec["flat"] = "settled image is FLAT" in txt
-            if stem in vram:
-                rec["vram_mib"], rec["gtt_mib"] = vram[stem]
+            if f"{sub}/{stem}" in vram:
+                rec["vram_mib"], rec["gtt_mib"] = vram[f"{sub}/{stem}"]
             shots[f"{sub}/{stem}"] = rec
     return shots
 
@@ -364,8 +365,8 @@ def selfcheck(a: pathlib.Path, b: pathlib.Path) -> int:
 
 
 def changes(old: dict, new: dict) -> list[tuple[str, str, str]]:
-    """(scene lane, label, what changed) for every row whose value, metric, basis or informational
-    standing differs between two tables, or that only one of them holds."""
+    """(scene lane, label, what changed) for every row whose value, metric, basis, gate or
+    informational standing differs between two tables, or that only one of them holds."""
     out = []
     for scene in sorted(set(old) | set(new)):
         o, n = old.get(scene, {}), new.get(scene, {})
@@ -384,6 +385,9 @@ def changes(old: dict, new: dict) -> list[tuple[str, str, str]]:
                 what.append(f"value {fmt(a.get('value'))} -> {fmt(b.get('value'))}")
             if a.get("basis") != b.get("basis"):
                 what.append(f"basis {a.get('basis')} -> {b.get('basis')}")
+            if (a.get("gate") or {}) != (b.get("gate") or {}):
+                old_gate = wm.gate_text(a.get("gate") or {}) or "none"
+                what.append(f"gate {old_gate} -> {wm.gate_text(b.get('gate') or {}) or 'none'}")
             if (a.get("gated") is False) != (b.get("gated") is False):
                 what.append("informational" if b.get("gated") is False else "gated")
             if what:

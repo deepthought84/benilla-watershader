@@ -1567,9 +1567,10 @@ const SSR_EDGE_FADE: f32 = 0.14;
 
 /// Read the scene snapshot where the ray landed, and score how much to believe it: the UV is
 /// clamped inside the frame, which the snapshot does not reach past, and the confidence falls off
-/// toward the frame's border ([`ssr_edge_conf`]). Both of the march's terminations, opaque geometry
-/// and sky, read through it. The ripple moves the ray's origin, not this read
-/// (`water_reflect.march.y`).
+/// toward the frame's border ([`ssr_edge_conf`]). The march's opaque hits read through it; a sky hit
+/// is the dome along the ray by the dome's own law with the same edge confidence, and reads the
+/// snapshot here only under the debug switch `dome.warp.z`. The ripple moves the ray's origin, not
+/// this read (`water_reflect.march.y`).
 fn ssr_read(uv: vec2<f32>) -> SsrHit {
     var out: SsrHit;
     let read_uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));

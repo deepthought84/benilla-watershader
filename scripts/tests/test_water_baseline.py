@@ -131,6 +131,9 @@ class Table(unittest.TestCase):
                 "GPU_PASSES frames=60 water_hiz_seed=1.0 water_snapshot=0.4\n"
             )
             (stills / "vram.tsv").write_text(f"{stills / 'wg-t.png'}\t2048\t1024\n")
+            # The burst sweep shoots the same scene under the same stem, with its own peak.
+            (bursts / "wg-t.fps.csv").write_text("\n".join(journal) + "\n")
+            (bursts / "vram.tsv").write_text(f"{bursts / 'wg-t.png'}\t4096\t512\n")
             rc, _ = run(wb.table, d / "run", d / "out", regions)
             self.assertEqual(rc, 0)
             base = json.loads((d / "out" / "baseline.json").read_text())
@@ -146,6 +149,8 @@ class Table(unittest.TestCase):
             self.assertEqual(perf["water_hiz_reduce"], 0.0)
             self.assertEqual((perf["settle"], perf["age"], perf["flat"]), (1571, 1000, False))
             self.assertEqual((perf["vram_mib"], perf["gtt_mib"]), (2.0, 1.0))
+            burst = json.loads((d / "out" / "ins4.json").read_text())["bursts/wg-t"]
+            self.assertEqual((burst["vram_mib"], burst["gtt_mib"]), (4.0, 0.5))
             md = (d / "out" / "table.md").read_text()
             self.assertIn("| shimmer | shimmer |", md)
             self.assertIn("| lum_vs_ref | lum_vs_ref | 2 | min 1 pass |", md)
@@ -176,16 +181,20 @@ class Checks(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("identical 1, differing 0, unmatched 1", out)
 
-    def test_diff_lists_moved_relabelled_and_informational_rows(self):
+    def test_diff_lists_moved_relabelled_regated_and_informational_rows(self):
         old = {"s": {"a": {"metric": "m", "value": 1.0}, "b": {"metric": "view_std", "value": 2},
-                     "c": {"metric": "pop", "value": 3}, "d": {"metric": "m", "value": 4}}}
+                     "c": {"metric": "pop", "value": 3}, "d": {"metric": "m", "value": 4},
+                     "e": {"metric": "m", "value": 5, "gate": {"max": 10.8}}}}
         new = {"s": {"a": {"metric": "m", "value": 1.5}, "b2": {"metric": "frame_std", "value": 2},
                      "c": {"metric": "pop", "value": 3, "gated": False},
-                     "d": {"metric": "m", "value": 4}}}
+                     "d": {"metric": "m", "value": 4},
+                     "e": {"metric": "m", "value": 5,
+                           "gate": {"max": 10.8, "monotone": {"min": 1.0}}}}}
         self.assertEqual(wb.changes(old, new), [
             ("s", "a", "value 1 -> 1.5"),
             ("s", "b", "removed (view_std 2)"),
             ("s", "c", "informational"),
+            ("s", "e", "gate max 10.8 -> max 10.8 monotone min 1"),
             ("s", "b2", "added (frame_std 2)"),
         ])
 
