@@ -507,3 +507,26 @@ fn the_shaders_transfer_is_the_mirrors() {
     let luma = format!("const LUMA_709: vec3<f32> = vec3<f32>({r:?}, {g:?}, {b:?});");
     assert!(wgsl.contains(&luma), "liquid.wgsl lost `{luma}`");
 }
+
+/// The shader's composite is this mirror's algebra: the layers, the fog guard, the scalar β and
+/// the two remainders, line for line.
+#[test]
+fn the_shaders_composite_is_the_mirrors() {
+    let wgsl = include_str!("shaders/liquid.wgsl");
+    assert_eq!(WATER_LAYER_EPS, 1e-4);
+    for line in [
+        "const WATER_LAYER_EPS: f32 = 1e-4;",
+        "return WaterLayer(f * r + s + (1.0 - f) * w_in * i, (1.0 - f) * t_bed);",
+        "return WaterLayer(c * a.l, vec3<f32>(1.0) - c * (vec3<f32>(1.0) - a.t));",
+        "return WaterLayer(cover * colour + (1.0 - cover) * a.l, (1.0 - cover) * a.t);",
+        "let own = water_enc(a.l / max(o, vec3<f32>(WATER_LAYER_EPS)));",
+        "return WaterLayer(o * water_dec(apply_fog(own, world_pos, room_fog)), a.t);",
+        "let c_lin = a.l + a.t * bed;",
+        "let beta = pow(max(dot(a.t, LUMA_709), 0.0), 1.0 / WATER_GAMMA);",
+        "return vec4<f32>(c - beta * snap_px, 1.0 - beta);",
+        "let beta3 = water_enc(a.t);",
+        "return vec4<f32>(c - beta3 * snap_px, 1.0 - beta);",
+    ] {
+        assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+    }
+}

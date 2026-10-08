@@ -2298,6 +2298,98 @@ fn floor_occlusion(
     return floor_occ_mix(floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift), plane, wp);
 }
 
+#ifdef WATER_COMPOSITE
+// ---- the linear composite (FND-2) ---------------------------------------------------------------
+//
+// The framebuffer holds gamma values and light adds in linear, so the water is built as
+// premultiplied linear layers and handed to the blender as a remainder against the snapshot: the
+// pixel lands on `enc(l + t·dec(background))` wherever the framebuffer still holds the snapshot.
+// `liquid_composite` mirrors every function here on the CPU and tests the algebra.
+
+/// The layer guard where fog divides a layer by its own coverage.
+const WATER_LAYER_EPS: f32 = 1e-4;
+
+/// One premultiplied layer: `l` the linear radiance it adds, `t` how much of what is behind passes.
+struct WaterLayer {
+    l: vec3<f32>,
+    t: vec3<f32>,
+};
+
+/// The surface: `f·r + s + (1 − f)·w_in·i` added, `(1 − f)·t_bed` passing; `w_in` weighs the
+/// in-scatter and `t_bed` the bed (`w_in + t_bed ≤ 1`).
+fn layer_surface(
+    f: f32,
+    r: vec3<f32>,
+    s: vec3<f32>,
+    i: vec3<f32>,
+    w_in: vec3<f32>,
+    t_bed: vec3<f32>,
+) -> WaterLayer {
+    return WaterLayer(f * r + s + (1.0 - f) * w_in * i, (1.0 - f) * t_bed);
+}
+
+/// Edge coverage `c`: the layer scaled toward nothing.
+fn layer_cover(a: WaterLayer, c: f32) -> WaterLayer {
+    return WaterLayer(c * a.l, vec3<f32>(1.0) - c * (vec3<f32>(1.0) - a.t));
+}
+
+/// An opaque `colour` over the layer with coverage `cover` (foam).
+fn layer_over(colour: vec3<f32>, cover: f32, a: WaterLayer) -> WaterLayer {
+    return WaterLayer(cover * colour + (1.0 - cover) * a.l, (1.0 - cover) * a.t);
+}
+
+/// [`apply_fog`]'s gamma law on the layer's own colour, weighted by its opacity: opaque water
+/// fogs as the gamma look did, clear water leaves the bed's own fog alone. Where the law leaves
+/// every colour as it is (no fog, or water nearer than the fog's start) the layer is returned as
+/// it came, without the round trip through gamma.
+fn layer_fog(a: WaterLayer, world_pos: vec3<f32>, room_fog: u32) -> WaterLayer {
+    let black = apply_fog(vec3<f32>(0.0), world_pos, room_fog);
+    let white = apply_fog(vec3<f32>(1.0), world_pos, room_fog);
+    if (all(black == vec3<f32>(0.0)) && all(white == vec3<f32>(1.0))) {
+        return a;
+    }
+    let o = vec3<f32>(1.0) - a.t;
+    let own = water_enc(a.l / max(o, vec3<f32>(WATER_LAYER_EPS)));
+    return WaterLayer(o * water_dec(apply_fog(own, world_pos, room_fog)), a.t);
+}
+
+/// The snapshot's texel under this fragment, the colour the blender's destination holds wherever
+/// nothing drew between the snapshot and the water; 0 while the snapshot is not this view's size.
+fn water_snapshot_px(frag_xy: vec2<f32>) -> vec3<f32> {
+    let ok = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(view.viewport.zw));
+    return select(vec3<f32>(0.0), textureLoad(scene_tex, vec2<i32>(frag_xy), 0).rgb, ok);
+}
+
+#ifdef WATER_DUAL_SOURCE
+var<private> water_src1: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+#endif
+
+/// The water's output: `C = enc(l + t·bed)` less `β` times the snapshot, with `1 − β` in alpha, so
+/// the premultiplied blend `src + β·dst` lands on `C` where `dst` is the snapshot, and a transparent
+/// drawn before the water shows through attenuated by `β = enc(luma(t))`. `refr_uv` and `accept`
+/// are the refracted bed's lookup and weight, `cov` the share of the pixel the surface covers.
+fn water_output(
+    a: WaterLayer,
+    frag_xy: vec2<f32>,
+    snap_px: vec3<f32>,
+    refr_uv: vec2<f32>,
+    accept: f32,
+    cov: f32,
+) -> vec4<f32> {
+    let bed = water_dec(snap_px);
+    let c_lin = a.l + a.t * bed;
+    let c = water_enc(c_lin);
+    let beta = pow(max(dot(a.t, LUMA_709), 0.0), 1.0 / WATER_GAMMA);
+#ifdef WATER_DUAL_SOURCE
+    let beta3 = water_enc(a.t);
+    water_src1 = vec4<f32>(beta3, beta);
+    return vec4<f32>(c - beta3 * snap_px, 1.0 - beta);
+#else
+    return vec4<f32>(c - beta * snap_px, 1.0 - beta);
+#endif
+}
+#endif // WATER_COMPOSITE
+
 #ifdef WATER_VIEW
 // ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
 //
@@ -2319,6 +2411,11 @@ const WV_SLOPE_LO: u32 = 13u;
 const WV_FLOOR_OCC: u32 = 14u;
 const WV_SKY_FLOOR: u32 = 15u;
 const WV_SIGMA_SHAPE: u32 = 16u;
+// The composite's own views, which change the layer rather than paint over it: identity hands the
+// blender a layer that passes everything (the frame must equal the snapshot), discard returns 0
+// (the frame is untouched). Only the linear composite (`WATER_COMPOSITE`) draws them.
+const WV_COMPOSITE_IDENTITY: u32 = 17u;
+const WV_DISCARD: u32 = 18u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2365,6 +2462,10 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
+#ifdef WATER_COMPOSITE
+    // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
+    let snap_px = water_snapshot_px(frag_coord);
+#endif
 
     // ---- the live wave field ----------------------------------------------------------------
     //
@@ -2765,6 +2866,24 @@ fn stylised_water(
     let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
         * (1.0 - w_s)
         + ssr.rgb * w_s;
+#ifdef WATER_COMPOSITE
+    // The same chain in linear light: each tier decoded where it has a share, the floor as the
+    // occlusion built it.
+    var floor_l = occ.rgb + occ.v * sky;
+    if (!eye_above) {
+        floor_l = water_dec(sky_g);
+    }
+    var refl_l = floor_l;
+    if (w_p > 0.0) {
+        refl_l = mix(refl_l, water_dec(probe_rgb), w_p);
+    }
+    if (w_m > 0.0) {
+        refl_l = mix(refl_l, water_dec(mirror_g), w_m);
+    }
+    if (w_s > 0.0) {
+        refl_l = mix(refl_l, water_dec(ssr.rgb), w_s);
+    }
+#endif
     // How much of `refl` came from the CUBE PROBE, so the Fresnel weight can be lifted where — and
     // only where — the probe is the tier answering. See the final mix.
     let probe_share = w_p * (1.0 - w_m) * (1.0 - w_s);
@@ -2964,9 +3083,10 @@ fn stylised_water(
     }
     let alpha = max(mix(shallow.w, deep.w, sqrt(depth)) * soft, foam);
 #ifdef WATER_VIEW
-    // The debug views paint one quantity over the water, opaque and unfogged.
+    // The debug views paint one quantity over the water, opaque and unfogged; the composite's own
+    // views change its layer below instead.
     let view_id = water_view_id();
-    if (view_id != 0u && view_id != WV_FLAT) {
+    if (view_id != 0u && view_id != WV_FLAT && view_id < WV_COMPOSITE_IDENTITY) {
         var v = vec3<f32>(0.0);
         if (view_id == WV_MIRROR1) {
             v = m1.rgb;
@@ -3040,7 +3160,50 @@ fn stylised_water(
         return vec4<f32>(v, 1.0);
     }
 #endif
+#ifdef WATER_COMPOSITE
+    // ---- the composite, in linear light ---------------------------------------------------------
+    //
+    // The gamma look's terms as one premultiplied layer: the reflection weight with the probe's
+    // lift, the tiers' linear chain, the glints in linear, the body as in-scatter over today's
+    // opacity, the edge's coverage, the foam over it, then the gamma fog law on the layer.
+    let probe_boost = max(water_reflect.probe_box_max.x, 0.0);
+    let f_w = saturate(mix(fres, min(fres * probe_boost, PROBE_REFLECT_CEIL), probe_share));
+    // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
+    // so the peak over black is the gamma look's; the moon's weight is raised likewise.
+    let gw = water_reflect.look.composite.y;
+    let spec_l = water_dec(wow_light.light_spec.rgb)
+        * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
+        * (gw * sun_reach)
+        + water_dec(MOON_SPEC_COLOR)
+            * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
+            * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w);
+    // The body's opacity is the share it scatters back; the rest of the bed passes.
+    let opacity = mix(shallow.w, deep.w, sqrt(depth));
+    var layer = layer_surface(
+        f_w,
+        refl_l,
+        spec_l,
+        water_dec(body),
+        vec3<f32>(opacity),
+        vec3<f32>(1.0 - opacity),
+    );
+    layer = layer_cover(layer, soft);
+    // Foam is coverage: spray over the surface, hiding what is under it.
+    if (foam > 0.0) {
+        layer = layer_over(water_dec(FOAM_COLOR * lit), foam, layer);
+    }
+    layer = layer_fog(layer, world_pos, room_fog);
+#ifdef WATER_VIEW
+    if (view_id == WV_COMPOSITE_IDENTITY) {
+        layer = WaterLayer(vec3<f32>(0.0), vec3<f32>(1.0));
+    } else if (view_id == WV_DISCARD) {
+        return vec4<f32>(0.0);
+    }
+#endif
+    return water_output(layer, frag_coord, snap_px, frag_coord_to_uv(frag_coord), 0.0, 1.0);
+#else
     return vec4<f32>(apply_fog(rgb, world_pos, room_fog), alpha);
+#endif
 }
 #endif // WATER_STYLISED
 

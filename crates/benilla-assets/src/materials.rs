@@ -397,8 +397,8 @@ impl LiquidKey {
     pub const TIER_SHIFT: u16 = 3;
     /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3.
     pub const SSR: u16 = 1 << 5;
-    /// The linear composite as a variant (`path.w` bit 4): a pipeline of its own, for which
-    /// [`Self::frag_defs`] pushes no def.
+    /// The linear composite as a variant (`path.w` bit 4): `WATER_COMPOSITE` and the premultiplied
+    /// blend the remainder needs ([`LiquidExt::specialize`]).
     pub const COMPOSITE: u16 = 1 << 6;
     /// The highlight excess stored for the glow (`path.w` bit 5): a pipeline of its own, for which
     /// [`Self::frag_defs`] pushes no def.
@@ -495,7 +495,16 @@ impl LiquidKey {
         if self.has(Self::SSR) {
             defs.push("WATER_SSR");
         }
+        if self.has(Self::COMPOSITE) {
+            defs.push("WATER_COMPOSITE");
+        }
         defs
+    }
+
+    /// Whether the pipeline blends premultiplied (`One, OneMinusSrcAlpha`): the linear composite
+    /// hands the blender `C − β·snapshot` with `1 − β` in alpha, so `dst' = src + β·dst`.
+    pub fn premultiplied(self) -> bool {
+        self.composite() && self.has(Self::COMPOSITE)
     }
 }
 
@@ -784,7 +793,9 @@ impl MaterialExtension for LiquidExt {
     /// boundary, so neighbouring triangles' shorelines would disagree.
     ///
     /// The [`LiquidKey`] defs go to the fragment stage before the attribute check returns, so a
-    /// mesh without our attributes takes them all the same.
+    /// mesh without our attributes takes them all the same, and so does the linear composite's
+    /// premultiplied blend ([`LiquidKey::premultiplied`]); sort, phase and depth state stay
+    /// `AlphaMode::Blend`'s.
     fn specialize(
         _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -798,6 +809,11 @@ impl MaterialExtension for LiquidExt {
         if let Some(f) = descriptor.fragment.as_mut() {
             f.shader_defs
                 .extend(key.bind_group_data.frag_defs().into_iter().map(Into::into));
+            if key.bind_group_data.premultiplied() {
+                for target in f.targets.iter_mut().flatten() {
+                    target.blend = Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+                }
+            }
         }
 
         // Our own attributes, where the mesh carries them, each behind its shader def.
@@ -1831,6 +1847,23 @@ mod tests {
             ]
         );
         assert!(!plain.frag_defs().contains(&"WATER_SSR"));
+        // The linear composite compiles its def and blends premultiplied; nothing else does.
+        let composite = key(0.0, 1.0, 16.0);
+        assert!(composite.has(LiquidKey::COMPOSITE) && composite.premultiplied());
+        assert_eq!(
+            composite.frag_defs(),
+            [
+                "WATER_STYLISED",
+                "WATER_SCENE_DEPTH",
+                "WATER_TIER_LOW",
+                "WATER_COMPOSITE"
+            ]
+        );
+        assert!(!plain.premultiplied() && !ssr.premultiplied() && !view.premultiplied());
+        assert!(
+            !key(1.0, 1.0, 16.0).premultiplied() && !key(0.0, 0.0, 16.0).premultiplied(),
+            "magma, slime and the reference lane keep the alpha blend"
+        );
         // A negative lane reads as no bits.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
         // The tier's two bits, each tier its one def; a stale 3 reads as High.
@@ -2061,12 +2094,15 @@ mod tests {
                 "{key:?} lost the magma grade"
             );
         }
-        // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
-        // `WATER_SSR`, the region's guards whose names only they declare. The floor march law's
-        // tier branches declare module-scope names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`),
-        // the same ones in every branch, so this key's tier declares them all.
-        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
-        let text = liquid_under(&water.frag_defs());
+        // The debug views with the march and the linear composite (`path.w` bits 0, 3 and 4)
+        // carry `WATER_VIEW`, `WATER_SSR` and `WATER_COMPOSITE`, the region's guards whose names
+        // only they declare, and `WATER_DUAL_SOURCE` the composite's second output. The floor march
+        // law's tier branches declare module-scope names too (`FLOOR_MARCH_LEVEL`,
+        // `FLOOR_MARCH_STEPS`), the same ones in every branch, so this key's tier declares them all.
+        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 25.0));
+        let mut defs = water.frag_defs();
+        defs.push("WATER_DUAL_SOURCE");
+        let text = liquid_under(&defs);
         let seen = identifiers(&text);
         let missing: Vec<&String> = region
             .iter()

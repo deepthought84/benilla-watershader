@@ -33,6 +33,10 @@ const ALPHA_CALM: f32 = 0.0548;
 /// mip's leakage) all do.
 const FEATURE_FADE_PX: (f32, f32) = (2.0, 4.0);
 
+/// The glints' weight in linear light: the gamma look's `SPEC_WEIGHT` 0.22 raised to 2.2, the same
+/// peak over black.
+const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
+
 /// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
 const HIGH_RIPPLE_ANISO: u16 = 4;
 
@@ -76,6 +80,29 @@ fn feature_fade() -> (f32, f32) {
 fn floor_occlusion() -> bool {
     static OFF: OnceLock<bool> = OnceLock::new();
     !*OFF.get_or_init(|| std::env::var("WOW_WATER_FLOOR_OCC").is_ok_and(|v| v.trim() == "0"))
+}
+
+/// Whether the stylised pipelines take the linear composite (`WATER_COMPOSITE`): off, unless
+/// `$WOW_WATER_COMPOSITE=1` (read once) asks for the variant.
+pub(crate) fn composite_variant() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| v.trim() == "1"))
+}
+
+/// The glints' linear weight: `SPEC_WEIGHT` 0.22 raised to the gamma, so the peak over black is the
+/// gamma look's, unless `$WOW_WATER_GLINT=<weight>` (read once, above 0) sets it, to fit it.
+fn glint_weight_lin() -> f32 {
+    static FORCED: OnceLock<Option<f32>> = OnceLock::new();
+    FORCED
+        .get_or_init(|| {
+            let w = std::env::var("WOW_WATER_GLINT")
+                .ok()?
+                .trim()
+                .parse::<f32>()
+                .ok()?;
+            (w > 0.0 && w.is_finite()).then_some(w)
+        })
+        .unwrap_or(GLINT_WEIGHT_LIN)
 }
 
 /// The ripple map's anisotropy clamp for quality tier `tier` (0 Low, 1 Medium, 2 High).
@@ -140,7 +167,7 @@ impl Default for WaterLook {
     fn default() -> Self {
         Self {
             grazing_limit: 0.45,
-            glint_weight_lin: 0.22f32.powf(2.2),
+            glint_weight_lin: glint_weight_lin(),
             glow_test: 0.0,
             grade_strength: 0.0,
             grade_c_near: 0.2,
@@ -363,6 +390,10 @@ mod tests {
         let [graze, glint, glow, _] = row(LOOK_COMPOSITE);
         assert_eq!((graze, glow), (0.45, 0.0));
         assert!((glint - 0.0358).abs() < 1e-4, "{glint}");
+        assert!(
+            (super::GLINT_WEIGHT_LIN - 0.22f32.powf(2.2)).abs() < 1e-8,
+            "the gamma weight 0.22 raised to the gamma"
+        );
         assert_eq!(row(LOOK_GRADE), [0.0, 0.3, 0.2, 0.0]);
         assert_eq!(row(LOOK_SHORE), [0.35, 0.61, 1.0, 1.0]);
         assert_eq!(row(LOOK_SHORE_KIND), [1.0, 1.0, 1.0, 0.0]);
