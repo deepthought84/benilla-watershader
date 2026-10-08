@@ -183,9 +183,18 @@ struct GxGpuCache {
 type GxPipeKey = (u32, TextureFormat);
 
 /// The key of the view a pass draws into: the sample count its colour and depth attachments carry
-/// and the format of its colour target.
-fn pipe_key(msaa: &Msaa, target: &ViewTarget) -> GxPipeKey {
-    (msaa.samples(), target.main_texture_format())
+/// and the format of its colour target (`ViewTarget::main_texture_format`).
+fn pipe_key(msaa: &Msaa, format: TextureFormat) -> GxPipeKey {
+    (msaa.samples(), format)
+}
+
+/// The pipeline set a view draws with: its own key's, and none until that key is served.
+fn view_set<'a, Id>(
+    sets: &'a HashMap<GxPipeKey, GxPipelineSet<Id>>,
+    msaa: &Msaa,
+    format: TextureFormat,
+) -> Option<&'a GxPipelineSet<Id>> {
+    sets.get(&pipe_key(msaa, format))
 }
 
 /// The pass's pipelines for one view key.
@@ -420,7 +429,11 @@ fn prepare_static_gx(
     if views.is_empty() {
         return;
     }
-    let keys = || views.iter().map(|(msaa, target, _)| pipe_key(msaa, target));
+    let keys = || {
+        views
+            .iter()
+            .map(|(msaa, target, _)| pipe_key(msaa, target.main_texture_format()))
+    };
     if keys().any(|key| !pipes.sets.contains_key(&key)) {
         let shader: Handle<Shader> =
             asset_server.load("embedded://benilla_world/shaders/static_gx.wgsl");
@@ -873,7 +886,7 @@ impl ViewNode for StaticGxPrepassNode {
         if resolved.is_empty() {
             return Ok(());
         }
-        let Some(set) = pipes.sets.get(&pipe_key(msaa, target)) else {
+        let Some(set) = view_set(&pipes.sets, msaa, target.main_texture_format()) else {
             return Ok(());
         };
         // All-or-none, exactly as the colour pass requires it: a half-compiled set would write a
@@ -953,7 +966,7 @@ impl ViewNode for StaticGxNode {
             return Ok(());
         }
         // The set of this view's own key: the world camera may multisample, its mirrors never do.
-        let Some(set) = pipes.sets.get(&pipe_key(msaa, target)) else {
+        let Some(set) = view_set(&pipes.sets, msaa, target.main_texture_format()) else {
             return Ok(());
         };
         // All four pipelines or none: a region drawing only its opaque half would flash its
@@ -1113,22 +1126,29 @@ mod tests {
         assert!(build_runs(&draws, &slots, &[0b11111u64]).is_empty());
     }
 
-    /// Each view the pass draws into gets the pipelines of its own key: with `gxMultisample` 4 the
-    /// world camera multisamples and its mirrors and probe faces do not, and a pipeline whose
-    /// sample count is not its pass's is a validation error that aborts the client.
+    /// Each view the pass draws into gets the pipelines of its own key, through the lookup both
+    /// nodes draw with ([`view_set`]): with `gxMultisample` 4 the world camera multisamples and its
+    /// mirrors and probe faces do not, and a pipeline whose sample count is not its pass's is a
+    /// validation error that aborts the client.
     #[test]
-    fn every_pass_view_draws_with_pipelines_of_its_own_sample_count() {
+    fn every_pass_view_looks_up_pipelines_of_its_own_sample_count() {
         let mut world = World::new();
         let mirror = world.spawn(crate::liquid::mirror_view_shape()).id();
         let hdr = ViewTarget::TEXTURE_FORMAT_HDR;
-        let mirror_key = (world.get::<Msaa>(mirror).unwrap().samples(), hdr);
-        let world_key = |samples| (crate::view::MsaaSetting { samples }.level().samples(), hdr);
+        // Each view as the render world holds it: its Msaa and its target's format.
+        let mirror_view = (*world.get::<Msaa>(mirror).unwrap(), hdr);
+        let world_view = |samples| (crate::view::MsaaSetting { samples }.level(), hdr);
+        let key = |(msaa, format): (Msaa, TextureFormat)| pipe_key(&msaa, format);
         assert_ne!(
-            world_key(4),
-            mirror_key,
+            key(world_view(4)),
+            key(mirror_view),
             "MSAA 4 draws the pass under two keys a frame"
         );
-        assert_eq!(world_key(1), mirror_key, "MSAA off draws it under one");
+        assert_eq!(
+            key(world_view(1)),
+            key(mirror_view),
+            "MSAA off draws it under one"
+        );
 
         let layout = [
             BindGroupLayoutDescriptor::new("view", &[]),
@@ -1137,23 +1157,25 @@ mod tests {
         let shader = Handle::<Shader>::default();
         let views_4x = [
             // The query's order is the render world's: either view may come first.
-            [world_key(4), mirror_key, mirror_key],
-            [mirror_key, mirror_key, world_key(4)],
+            [world_view(4), mirror_view, mirror_view],
+            [mirror_view, mirror_view, world_view(4)],
         ];
         for (views, distinct) in views_4x
             .into_iter()
             .map(|v| (v, 2))
-            .chain([([world_key(1), mirror_key, mirror_key], 1)])
+            .chain([([world_view(1), mirror_view, mirror_view], 1)])
         {
             let mut sets = HashMap::default();
             let mut queued = 0;
-            serve_view_keys(&mut sets, views, &shader, &layout, |d| {
+            serve_view_keys(&mut sets, views.map(key), &shader, &layout, |d| {
                 queued += 1;
                 d
             });
             assert_eq!(queued, 8 * distinct, "eight pipelines per distinct key");
-            for (samples, format) in views {
-                let set = &sets[&(samples, format)];
+            // Each view draws with the set the nodes look up for it.
+            for (msaa, format) in views {
+                let samples = msaa.samples();
+                let set = view_set(&sets, &msaa, format).expect("every view's key is served");
                 assert_eq!((set.colour.len(), set.depth.len()), (4, 4));
                 for d in set.colour.values().chain(set.depth.values()) {
                     assert_eq!(d.multisample.count, samples, "{:?}", d.label);
@@ -1169,7 +1191,7 @@ mod tests {
             }
             // A view that comes back, a probe face between captures, queues nothing.
             let mut again = 0;
-            serve_view_keys(&mut sets, views, &shader, &layout, |d| {
+            serve_view_keys(&mut sets, views.map(key), &shader, &layout, |d| {
                 again += 1;
                 d
             });

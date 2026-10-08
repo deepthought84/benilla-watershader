@@ -26,7 +26,9 @@
 # The render state is pinned: 1600x900, render scale 2, far clip 777, MSAA off, water quality
 # Medium ($WATER_QUALITY=0|1|2 picks another `waterQuality` tier; each log's `water:` line says
 # which tier drew the shot). $WATER_MSAA=2|4|8 multisamples the world camera instead, whatever
-# $WOW_MSAA the caller exported: the MSAA smoke, where a client that aborts fails the run. Each
+# $WOW_MSAA the caller exported: the MSAA smoke, where a client that aborts fails the run. Its
+# shots carry the golden set's names, so it takes an explicit <dir> and refuses the default one;
+# every shot's log opens with the level it drew at (`water-shots: msaa <level>`). Each
 # scene carries its own settle (300 still frames) and age (1000 steps) (`capture`'s
 # WATER_STABLE_FRAMES, WATER_AGE_FRAMES), so the script drops a $WOW_CAPTURE_STABLE or
 # $WOW_CAPTURE_AGE the caller exported. Every shot also writes the perf journal of its run,
@@ -46,6 +48,10 @@ case "$msaa" in
   off|2|4|8) ;;
   *) echo "water-shots.sh: \$WATER_MSAA is off, 2, 4 or 8, not $msaa" >&2; exit 2 ;;
 esac
+if [ "$msaa" != off ] && [ $# -eq 0 ]; then
+  echo "water-shots.sh: \$WATER_MSAA=$msaa writes the golden set's names; give it a <dir> of its own" >&2
+  exit 2
+fi
 if [ "$perf" -gt 0 ] && { [ "$burst" -gt 0 ] || [ -n "${WATER_VIEW:-}" ]; }; then
   echo "water-shots.sh: \$WATER_PERF measures the stills' render state, not a burst or a view" >&2
   exit 2
@@ -85,12 +91,13 @@ done
 # across runs.
 shot() {
   rm -f "$dir/$2.fps.csv"
+  echo "water-shots: msaa $msaa" > "$dir/$2.log"
   env "${@:4}" WOW_CAPTURE="$1" WOW_CAPTURE_OUT="$dir/$2.png" \
     WOW_CAPTURE_BURST="$burst" WOW_CAPTURE_BURST_EVERY="$every" \
     WOW_WATER_STYLE="$3" WOW_WATER_QUALITY="$quality" \
     WOW_RENDER_SCALE=2 WOW_FARCLIP=777 WOW_WIN=1600x900 WOW_MSAA="$msaa" \
     WOW_FPS_JOURNAL="$dir/$2.fps.csv" WOW_GPU_PASSES=1 \
-    "$bin" > "$dir/$2.log" 2>&1 || { echo "capture $2 FAILED, log: $dir/$2.log" >&2; exit 1; }
+    "$bin" >> "$dir/$2.log" 2>&1 || { echo "capture $2 FAILED, log: $dir/$2.log" >&2; exit 1; }
 }
 
 for s in $scenes; do
@@ -112,4 +119,4 @@ for s in $scenes; do
     shot "$s" "$s-ref" 0
   fi
 done
-echo "water scenes written to $dir"
+echo "water scenes written to $dir (msaa $msaa)"

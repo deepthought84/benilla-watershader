@@ -132,6 +132,23 @@ class Shots(unittest.TestCase):
             log = (self.tmp / "msaa" / f"{stem}.log").read_text()
             self.assertIn("WOW_MSAA=4\n", log)
 
+    def test_water_msaa_refuses_the_default_directory(self):
+        r = self.shots(self.caller, WATER_MSAA="4")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("give it a <dir> of its own", r.stderr)
+        self.assertFalse((self.repo / "target" / "visual").exists())
+
+    def test_every_log_names_the_msaa_level(self):
+        for level, sub in (("4", "m4"), (None, "off")):
+            env = {"WATER_MSAA": level} if level else {}
+            r = self.shots(self.caller, self.tmp / sub, **env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            for stem in ("water-a", "water-a-ref"):
+                log = (self.tmp / sub / f"{stem}.log").read_text()
+                self.assertTrue(log.startswith(f"water-shots: msaa {level or 'off'}\n"), log)
+                self.assertIn(f"WOW_MSAA={level or 'off'}\n", log)
+            self.assertIn(f"(msaa {level or 'off'})", r.stdout)
+
     def test_an_msaa_level_wgpu_does_not_express_is_refused(self):
         r = self.shots(self.caller, self.tmp / "msaa", WATER_MSAA="3")
         self.assertEqual(r.returncode, 2)
