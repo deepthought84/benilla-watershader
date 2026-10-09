@@ -2575,7 +2575,9 @@ fn water_body_optics(
     o.known = sb.known && !below;
     // μ_d the lighting sun refracted into the water, μ_v the view ray refracted into it: the bed's
     // light reaches the eye along the refracted ray, which is never steeper than the critical
-    // angle, so a grazing view crosses at most 1/0.66 yd of water per yard of depth.
+    // angle, so a grazing view crosses at most 1/0.66 yd of water per yard of depth. z is the depth
+    // of the bed on this pixel's straight ray, not of the bed the refracted ray meets: where the bed
+    // drops away from the eye the path over-counts the water, where it rises it under-counts.
     let mu_s = max(-normalize(wow_light.light_sun.xyz).y, 0.0);
     let mu_d = max(sqrt(1.0 - (1.0 - mu_s * mu_s) * INV_IOR * INV_IOR), MU_D_MIN);
     let ci = saturate(dot(flat_n, to_view));
