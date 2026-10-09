@@ -693,6 +693,26 @@ mod tests {
         }
     }
 
+    /// The shader's lift, stops and transport are this module's: `body_lift` line for line, the
+    /// stops on the zone's line at the ceiling and half of it (rows 0 and 63, no ocean tail, as
+    /// [`deep_stop`]), and the bed's transmittance and the in-scatter's weight from one turbidity.
+    #[test]
+    fn the_shaders_body_is_the_mirrors() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        for line in [
+            "return lift * a_g / max(max(a_g.r, max(a_g.g, a_g.b)), max(lift, 1e-4));",
+            "let r0 = swatch_row(body_shallow, body_deep, 0.0, ocean).rgb;",
+            "let r63 = swatch_row(body_shallow, body_deep, 63.0, false).rgb;",
+            "let dc = water_reflect.look.body.spare.y;",
+            "mix(r0, r63, 0.5 * dc),",
+            "mix(r0, r63, dc),",
+            "o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);",
+            "o.w_in = select(1.0, 1.0 - t_turb, o.known);",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
+    }
+
     /// The deep stop at the ceiling is today's `mix(shallow, deep, BODY_DEPTH_MAX)` within one row
     /// step of the byte ramp, `ceil(|c1 − c0|/64)`.
     #[test]

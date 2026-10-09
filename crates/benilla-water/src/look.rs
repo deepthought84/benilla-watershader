@@ -105,6 +105,31 @@ fn glint_weight_lin() -> f32 {
         .unwrap_or(GLINT_WEIGHT_LIN)
 }
 
+/// A unit-interval lever read once from `$<var>`, for an A/B of an owner's knob.
+fn unit_lever(var: &str) -> Option<f32> {
+    let v = std::env::var(var).ok()?.trim().parse::<f32>().ok()?;
+    (0.0..=1.0).contains(&v).then_some(v)
+}
+
+/// The body's knobs at their defaults, unless `$WOW_WATER_DEEP_CEILING=<0-1>` sets where the deep
+/// stop sits on the zone's line (1 the swatch's last row) or `$WOW_WATER_BAND_PUSH=<0-1>` how far
+/// the three bands pull the ramp (0 unbanded); each read once, to measure it.
+fn body_look() -> BodyLook {
+    static FORCED: OnceLock<(Option<f32>, Option<f32>)> = OnceLock::new();
+    let (ceiling, push) = *FORCED.get_or_init(|| {
+        (
+            unit_lever("WOW_WATER_DEEP_CEILING"),
+            unit_lever("WOW_WATER_BAND_PUSH"),
+        )
+    });
+    let look = BodyLook::default();
+    BodyLook {
+        deep_ceiling: ceiling.unwrap_or(look.deep_ceiling),
+        band_push: push.unwrap_or(look.band_push),
+        ..look
+    }
+}
+
 /// The ripple map's anisotropy clamp for quality tier `tier` (0 Low, 1 Medium, 2 High).
 pub(crate) fn tier_ripple_aniso(tier: u8) -> u16 {
     if tier >= 2 {
@@ -174,7 +199,7 @@ impl Default for WaterLook {
             grade_c_far: 0.3,
             floor_occlusion: floor_occlusion(),
             painted_detail: 0.0,
-            body: BodyLook::default(),
+            body: body_look(),
             k_line: 0.35,
             f_wet: 0.61,
             k_contact: 1.0,

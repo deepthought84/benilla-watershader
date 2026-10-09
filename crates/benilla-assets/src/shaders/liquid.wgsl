@@ -2388,6 +2388,163 @@ fn water_output(
     return vec4<f32>(c - beta * snap_px, 1.0 - beta);
 #endif
 }
+
+// ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
+//
+// The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
+// `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the view ray's length through the water plus the
+// way down from the surface to the bed along the refracted lighting sun. The colour is the zone's
+// swatch ramp (`look.body`'s rows from Light.dbc) read at the turbidity's optical depth, in three
+// soft bands. `benilla_water::body` derives σ from the swatch on the CPU.
+
+/// Fresh water's index of refraction and its inverse.
+const WATER_IOR: f32 = 1.333;
+const INV_IOR: f32 = 0.7501875;
+/// The cosine of the critical angle (48.61°): a ray refracted into water lies within it.
+const MU_D_MIN: f32 = 0.6612;
+/// Yards per unit of the authored depth coordinate, for a pixel whose bed is not known: the river
+/// LUT's span (`0x810380`), and 255 over the ocean's 1.72 bytes per yard.
+const REF_RIVER_V_YD: f32 = 4.6667;
+const REF_OCEAN_V_YD: f32 = 148.26;
+
+/// What `fragment` knows about the body under a water pixel.
+struct BodyIn {
+    // The albedo stops in gamma: swatch row 0, and the zone's line from it to row 63 at half the
+    // deep ceiling and at the ceiling (`look.body.spare.y`).
+    s: vec3<f32>,
+    m: vec3<f32>,
+    d: vec3<f32>,
+    // The kind's absorption per yard per channel and its turbidity per yard.
+    sig_abs: vec3<f32>,
+    sig_turb: f32,
+    // The lift: `look.body.look.w` × the frame sheet's mean alpha; 0 on unlit interiors.
+    lift: f32,
+    // The authored depth in yards, for a bed that is not known.
+    fallback_z: f32,
+    // A WMO interior pool: lit by 1, as the reference draws it.
+    unlit: bool,
+    // ADT water, which the terrain's shadow covers.
+    adt: bool,
+    // The terrain's lit for a flat surface (gamma), the body's light until the sky and sun light it.
+    lit_interim: vec3<f32>,
+};
+
+/// The water column under a pixel and what it does to light.
+struct BodyOptics {
+    // The bed was found behind the pixel, seen from above.
+    known: bool,
+    // The water's height above the bed, the view ray's path to it and the optical path, yards.
+    z: f32,
+    l_view: f32,
+    l_opt: f32,
+    // The bed's transmittance and the in-scatter's weight (`w_in + t_bed ≤ 1`).
+    t_bed: vec3<f32>,
+    w_in: f32,
+    // The ramp coordinate after the bands, the albedo there in linear and gamma.
+    x: f32,
+    a_lin: vec3<f32>,
+    a_g: vec3<f32>,
+    // The bed's refracted lookup, its weight and its blur level (no refraction: the pixel's own).
+    bed_uv_r: vec2<f32>,
+    accept: f32,
+    bed_lod: f32,
+};
+
+/// The body's light: its in-scatter radiance, the illuminant on the body and on foam, and the fog.
+struct BodyLight {
+    in_scatter: vec3<f32>,
+    irradiance: vec3<f32>,
+    foam_irradiance: vec3<f32>,
+    fog_f: f32,
+    fog_g: vec3<f32>,
+};
+
+/// Three soft bands over the ramp coordinate `x`, their edges widened by the pixel's own footprint
+/// `fw` of `3x` so they never alias.
+fn band_soft(x: f32, fw: f32) -> f32 {
+    let y = x * 3.0;
+    let e = water_reflect.look.body.look.z + min(fw, 0.5);
+    return (floor(y) + smoothstep(0.5 - e, 0.5 + e, fract(y))) / 3.0;
+}
+
+/// The albedo in linear light at ramp coordinate `x` between the gamma stops `s`, `m` and `d`,
+/// mixed in linear; only the two stops `x` lies between are decoded.
+fn albedo_ramp(s: vec3<f32>, m: vec3<f32>, d: vec3<f32>, x: f32) -> vec3<f32> {
+    let low = x < 0.5;
+    let a = select(m, s, low);
+    let b = select(d, m, low);
+    return mix(water_dec(a), water_dec(b), select(2.0 * x - 1.0, 2.0 * x, low));
+}
+
+/// The reference's sheen lift on an albedo `a_g` (gamma): `lift` in the albedo's hue, its peak
+/// channel at most `lift` (`benilla_water::body::body_lift`).
+fn body_lift(a_g: vec3<f32>, lift: f32) -> vec3<f32> {
+    return lift * a_g / max(max(a_g.r, max(a_g.g, a_g.b)), max(lift, 1e-4));
+}
+
+/// The water column behind this pixel and its transmittance, the in-scatter's weight and the
+/// albedo. Takes `fwidth`: call it in uniform control flow.
+fn water_body_optics(
+    world_pos: vec3<f32>,
+    frag_coord: vec2<f32>,
+    sb: SceneBehind,
+    n: vec3<f32>,
+    flat_n: vec3<f32>,
+    to_view: vec3<f32>,
+    bi: BodyIn,
+    wake_push: f32,
+) -> BodyOptics {
+    var o: BodyOptics;
+    // From below the surface the column is not this pass's to draw: the deep body, opaque.
+    let below = view.world_position.y < world_pos.y;
+    o.known = sb.known && !below;
+    // μ_d the lighting sun refracted into the water, μ_v the view (for the authored fallback).
+    let mu_s = max(-normalize(wow_light.light_sun.xyz).y, 0.0);
+    let mu_d = max(sqrt(1.0 - (1.0 - mu_s * mu_s) * INV_IOR * INV_IOR), MU_D_MIN);
+    let ci = saturate(dot(flat_n, to_view));
+    let mu_v = max(sqrt(1.0 - (1.0 - ci * ci) * INV_IOR * INV_IOR), MU_D_MIN);
+    o.z = select(bi.fallback_z, max(sb.vertical, 0.0), o.known);
+    o.l_view = select(bi.fallback_z / mu_v, sb.path, o.known);
+    o.l_opt = min(o.l_view + o.z / mu_d, 4096.0);
+    let tau_t = bi.sig_turb * o.l_opt;
+    let t_turb = exp(-tau_t);
+    o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);
+    o.w_in = select(1.0, 1.0 - t_turb, o.known);
+    let look = water_reflect.look.body.look;
+    let x0 = select(1.0 - exp(-look.x * tau_t), 1.0, below);
+    let fw = fwidth(x0 * 3.0);
+    o.x = saturate(mix(x0, band_soft(x0, fw), look.y) + wake_push);
+    o.a_lin = albedo_ramp(bi.s, bi.m, bi.d, o.x);
+    o.a_g = water_enc(o.a_lin);
+    o.bed_uv_r = (frag_coord - view.viewport.xy) / view.viewport.zw;
+    o.accept = 0.0;
+    o.bed_lod = 0.0;
+    return o;
+}
+
+/// The body's in-scatter: the albedo under the illuminant, the lift on it in gamma, the ripple's
+/// shading. The illuminant is the terrain's lit until the sky and sun light the body; `vis` is the
+/// screen-space visibility (1 until then), `wave_tilt` the facet's tilt along the sun's bearing.
+fn water_body_light(
+    o: BodyOptics,
+    world_pos: vec3<f32>,
+    vis: vec4<f32>,
+    bi: BodyIn,
+    wave_tilt: f32,
+    room_fog: u32,
+) -> BodyLight {
+    var l: BodyLight;
+    // The illuminant in gamma; `enc(a·E) = enc(a)·enc(E)` under the pure power law.
+    let e_g = select(bi.lit_interim, vec3<f32>(1.0), bi.unlit);
+    let e = water_dec(e_g);
+    let lit_g = o.a_g * e_g + body_lift(o.a_g, bi.lift);
+    l.in_scatter = water_dec(lit_g) * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
+    l.irradiance = e;
+    l.foam_irradiance = e;
+    l.fog_f = 1.0;
+    l.fog_g = vec3<f32>(0.0);
+    return l;
+}
 #endif // WATER_COMPOSITE
 
 #ifdef WATER_VIEW
@@ -2413,9 +2570,13 @@ const WV_SKY_FLOOR: u32 = 15u;
 const WV_SIGMA_SHAPE: u32 = 16u;
 // The composite's own views, which change the layer rather than paint over it: identity hands the
 // blender a layer that passes everything (the frame must equal the snapshot), discard returns 0
-// (the frame is untouched). Only the linear composite (`WATER_COMPOSITE`) draws them.
+// (the frame is untouched). Only the linear composite (`WATER_COMPOSITE`) draws them, and the
+// body's: enc(t_bed), enc(in-scatter) and the albedo at the pixel's ramp coordinate.
 const WV_COMPOSITE_IDENTITY: u32 = 17u;
 const WV_DISCARD: u32 = 18u;
+const WV_TRANSMITTANCE: u32 = 19u;
+const WV_IN_SCATTER: u32 = 20u;
+const WV_ALBEDO: u32 = 21u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2447,6 +2608,10 @@ fn stylised_water(
     shallow: vec4<f32>,
     deep: vec4<f32>,
     lit: vec3<f32>,
+#ifdef WATER_COMPOSITE
+    // The body's stops, optics rows and light ([`water_body_optics`]).
+    bi: BodyIn,
+#endif
     room_fog: u32,
 ) -> vec4<f32> {
     let xz = world_pos.xz;
@@ -2565,6 +2730,12 @@ fn stylised_water(
     let sun_xz = normalize(water_reflect.sun.xz + vec2<f32>(1e-4, 1e-4));
     let wave_tilt = dot(n.xz, sun_xz);
     let body = body_rgb * lit * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
+#ifdef WATER_COMPOSITE
+    // The body as transport: the column behind the pixel, its transmittance and its albedo, in
+    // uniform control flow for the bands' `fwidth`; then its light.
+    let optics = water_body_optics(world_pos, frag_coord, sb, n, flat_n, to_view, bi, wake_push);
+    let body_light = water_body_light(optics, world_pos, vec4<f32>(1.0), bi, wave_tilt, room_fog);
+#endif
 
     // Fresnel toward the horizon. Schlick's 5th power, floored at the 2 % water reflects head-on.
     let fresnel = pow(1.0 - saturate(dot(n, to_view)), 5.0);
@@ -3164,8 +3335,8 @@ fn stylised_water(
     // ---- the composite, in linear light ---------------------------------------------------------
     //
     // The gamma look's terms as one premultiplied layer: the reflection weight with the probe's
-    // lift, the tiers' linear chain, the glints in linear, the body as in-scatter over today's
-    // opacity, the edge's coverage, the foam over it, then the gamma fog law on the layer.
+    // lift, the tiers' linear chain, the glints in linear, the body's in-scatter and the bed's
+    // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
     let probe_boost = max(water_reflect.probe_box_max.x, 0.0);
     let f_w = saturate(mix(fres, min(fres * probe_boost, PROBE_REFLECT_CEIL), probe_share));
     // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
@@ -3177,15 +3348,25 @@ fn stylised_water(
         + water_dec(MOON_SPEC_COLOR)
             * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
             * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w);
-    // The body's opacity is the share it scatters back; the rest of the bed passes.
-    let opacity = mix(shallow.w, deep.w, sqrt(depth));
+#ifdef WATER_VIEW
+    // The body's own views, opaque and unfogged: what passes from the bed, what the body scatters,
+    // and the albedo the ramp reads at this pixel.
+    if (view_id == WV_TRANSMITTANCE) {
+        return vec4<f32>(water_enc(optics.t_bed), 1.0);
+    } else if (view_id == WV_IN_SCATTER) {
+        return vec4<f32>(water_enc(body_light.in_scatter), 1.0);
+    } else if (view_id == WV_ALBEDO) {
+        return vec4<f32>(optics.a_g, 1.0);
+    }
+#endif
+    // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
     var layer = layer_surface(
         f_w,
         refl_l,
         spec_l,
-        water_dec(body),
-        vec3<f32>(opacity),
-        vec3<f32>(1.0 - opacity),
+        body_light.in_scatter,
+        vec3<f32>(optics.w_in),
+        optics.t_bed,
     );
     layer = layer_cover(layer, soft);
     // Foam is coverage: spray over the surface, hiding what is under it.
@@ -3437,6 +3618,30 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         // What stands behind this water pixel, from the complete linear depth (`liquid::hiz`): the
         // static world, entity-path models and units included.
         let sb = scene_behind(in.world_position.xyz, in.clip_position.xy);
+#ifdef WATER_COMPOSITE
+        // The body's stops lie on the zone's own line from swatch row 0 toward row 63 (without the
+        // ocean's ×0.9 tail): the deep stop at the deep ceiling, the mid stop at half of it, so the
+        // three bands keep equal spans. A WMO exterior's pair is its deep river row twice, an
+        // interior's its pool colour twice.
+        let ocean = w.kind.y > 0.5;
+        let r0 = swatch_row(body_shallow, body_deep, 0.0, ocean).rgb;
+        let r63 = swatch_row(body_shallow, body_deep, 63.0, false).rgb;
+        let dc = water_reflect.look.body.spare.y;
+        let sig = select(water_reflect.look.body.sig_river, water_reflect.look.body.sig_ocean, ocean);
+        let unlit = w.path.x > 1.5;
+        let bi = BodyIn(
+            r0,
+            mix(r0, r63, 0.5 * dc),
+            mix(r0, r63, dc),
+            sig.xyz,
+            sig.w,
+            select(water_reflect.look.body.look.w * w.anim.x, 0.0, unlit),
+            depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
+            unlit,
+            w.path.x < 0.5,
+            lit,
+        );
+#endif
         return stylised_water(
             in.world_position.xyz,
             in.clip_position.xy,
@@ -3450,6 +3655,9 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             body_shallow,
             body_deep,
             lit,
+#ifdef WATER_COMPOSITE
+            bi,
+#endif
             in.room_fog,
         );
     }

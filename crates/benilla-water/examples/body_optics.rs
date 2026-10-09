@@ -141,6 +141,10 @@ fn main() -> anyhow::Result<()> {
             );
         }
         let minute_f = minute as f32;
+        // The terrain's lit on flat water, `liquid.wgsl`'s `lit` (the body's interim light).
+        let mu_s = (-sun_direction(minute_f).normalize_or_zero().y).max(0.0);
+        let lit: [f32; 3] =
+            std::array::from_fn(|c| (now.ambient[c] + now.sun_diffuse[c] * mu_s).clamp(0.0, 1.0));
         let mut light = WowLighting::default();
         light.sky = now.sky;
         light.fog_color = now.fog_color;
@@ -157,13 +161,15 @@ fn main() -> anyhow::Result<()> {
         let open: [f32; 3] = std::array::from_fn(|i| e.e_sky[i] + e.e_sun[i]);
         let raw: [f32; 3] = std::array::from_fn(|i| e.e_sky_raw[i] + e.e_sun_raw[i]);
         println!(
-            "  light  k_E {:.2}  sun share {:.2}  s0 {:.2}  night {:.2}  open E {:?}  raw E {:?}",
+            "  light  k_E {:.2}  sun share {:.2}  s0 {:.2}  night {:.2}  open E {:?}  raw E {:?}  \
+             lit {:?}",
             e.k_e,
             e.sun_share,
             e.s0,
             e.night,
             enc(open),
             enc(raw),
+            bytes(lit),
         );
     }
     Ok(())

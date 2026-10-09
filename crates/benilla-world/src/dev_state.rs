@@ -101,9 +101,10 @@ impl Default for WaterDebug {
 
 /// The Improved Water debug views by id (`WaterDebug::view`, `liquid.wgsl`'s `WV_*` consts); 0 is
 /// off. A view paints one quantity over the water; `flat` is a mode instead, the whole look on the
-/// unrippled normal, and `composite_identity` and `discard` change the linear composite's layer
-/// (drawn only with `$WOW_WATER_COMPOSITE=1`; the gamma look draws as usual under them).
-pub const WATER_VIEWS: [&str; 19] = [
+/// unrippled normal, and `composite_identity` and `discard` change the linear composite's layer.
+/// Those two and the body's `transmittance`, `in_scatter` and `albedo` are drawn only with
+/// `$WOW_WATER_COMPOSITE=1`; the gamma look draws as usual under them.
+pub const WATER_VIEWS: [&str; 22] = [
     "off",
     "mirror1",
     "mirror2",
@@ -123,6 +124,9 @@ pub const WATER_VIEWS: [&str; 19] = [
     "sigma_shape",
     "composite_identity",
     "discard",
+    "transmittance",
+    "in_scatter",
+    "albedo",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.
