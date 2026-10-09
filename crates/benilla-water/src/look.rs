@@ -115,7 +115,8 @@ fn unit_lever(var: &str) -> Option<f32> {
 }
 
 /// The grading's strength, 0, unless `$WOW_WATER_GRADE=<s>` (read once, finite, at least 0) sets
-/// it, to measure it.
+/// it, to measure it. Only the composite variant grades: without it the lever is ignored, so it
+/// cannot force the floor's readers on under the shipped look.
 fn grade_strength() -> f32 {
     static FORCED: OnceLock<Option<f32>> = OnceLock::new();
     FORCED
@@ -125,6 +126,10 @@ fn grade_strength() -> f32 {
                 .trim()
                 .parse::<f32>()
                 .ok()?;
+            if s > 0.0 && !composite_variant() {
+                warn!("water: WOW_WATER_GRADE={s} ignored: only WOW_WATER_COMPOSITE=1 grades");
+                return None;
+            }
             (s >= 0.0 && s.is_finite()).then_some(s)
         })
         .unwrap_or(0.0)
