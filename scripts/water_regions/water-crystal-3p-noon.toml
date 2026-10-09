@@ -3,10 +3,10 @@
 # static burst.
 scene = "water-crystal-3p-noon"
 [box]
-hut = [1150, 335, 1205, 360]         # a hut's roof on the far strip
+hut = [1150, 335, 1205, 360]         # a hut's roof on the far strip; its legs meet the water at y 430
 grass = [1000, 250, 1100, 280]       # the grass behind it
-hut_refl = [1150, 405, 1205, 430]    # the hut's reflection under the strip
-grass_refl = [1000, 405, 1100, 430]  # the water beside it
+hut_refl = [1145, 503, 1180, 523]    # the roof's reflection, a faint warm patch below the legs
+grass_refl = [1080, 503, 1130, 523]  # the water beside it, the same rows
 water = [100, 480, 1500, 680]
 near_bank = [400, 700, 1600, 800]
 [[row]]
