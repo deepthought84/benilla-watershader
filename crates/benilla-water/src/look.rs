@@ -114,6 +114,22 @@ fn unit_lever(var: &str) -> Option<f32> {
     (0.0..=1.0).contains(&v).then_some(v)
 }
 
+/// The grading's strength, 0, unless `$WOW_WATER_GRADE=<s>` (read once, finite, at least 0) sets
+/// it, to measure it.
+fn grade_strength() -> f32 {
+    static FORCED: OnceLock<Option<f32>> = OnceLock::new();
+    FORCED
+        .get_or_init(|| {
+            let s = std::env::var("WOW_WATER_GRADE")
+                .ok()?
+                .trim()
+                .parse::<f32>()
+                .ok()?;
+            (s >= 0.0 && s.is_finite()).then_some(s)
+        })
+        .unwrap_or(0.0)
+}
+
 /// The grazing limit, 0.45, unless `$WOW_WATER_GRAZE=<0-1>` (read once; 1 for none) sets it.
 fn grazing_limit() -> f32 {
     static FORCED: OnceLock<Option<f32>> = OnceLock::new();
@@ -175,7 +191,7 @@ pub(crate) struct WaterLook {
     pub(crate) glint_weight_lin: f32,
     /// A glow excess forced onto every water pixel, for testing the glow path; 0.
     pub(crate) glow_test: f32,
-    /// The reflection grading's strength `s`; 0, no grading.
+    /// The reflection grading's strength `s`; 0, no grading. The linear composite reads it.
     pub(crate) grade_strength: f32,
     /// The grading's near share `C_NEAR`, 0.2.
     pub(crate) grade_c_near: f32,
@@ -205,7 +221,7 @@ impl Default for WaterLook {
             grazing_limit: grazing_limit(),
             glint_weight_lin: glint_weight_lin(),
             glow_test: 0.0,
-            grade_strength: 0.0,
+            grade_strength: grade_strength(),
             grade_c_near: 0.2,
             grade_c_far: 0.3,
             floor_occlusion: floor_occlusion(),

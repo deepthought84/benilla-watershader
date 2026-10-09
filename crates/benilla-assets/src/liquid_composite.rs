@@ -147,6 +147,29 @@ fn water_fresnel(n_dot_v: f32, alpha: f32) -> f32 {
     (schlick * k).clamp(0.0, 1.0).max(F0_WATER)
 }
 
+/// The grading's reach: roughness and distance as independent losses.
+fn grade_rho(rho_a: f32, rho_c: f32) -> f32 {
+    1.0 - (1.0 - rho_a) * (1.0 - rho_c)
+}
+
+/// The contrast kept at reach `rho` under strength `s` and shares `c_near`, `c_far`.
+fn grade_keep(s: f32, c_near: f32, c_far: f32, rho: f32) -> f32 {
+    (1.0 - s * (c_near + c_far * rho)).clamp(0.0, 1.0)
+}
+
+/// The two-stage grading: `k_n` about `p_near`, then the rest of `K` about `sky`.
+fn grade_reflection(r: V3, sky: V3, p_near: V3, rho: f32, s: f32, c_near: f32, c_far: f32) -> V3 {
+    let k = grade_keep(s, c_near, c_far, rho);
+    let k_n = (1.0 - s * c_near).clamp(0.0, 1.0);
+    let k_f = if k_n <= 1e-4 { 0.0 } else { k / k_n.max(1e-4) };
+    let r1 = add(p_near, scale(zip(r, p_near, |a, b| a - b), k_n));
+    zip(
+        add(sky, scale(zip(r1, sky, |a, b| a - b), k_f)),
+        [0.0; 3],
+        f32::max,
+    )
+}
+
 /// How the blender's arithmetic is modelled: plain f32, or a half-float target whose sources and
 /// result round through `f16` (the framebuffer's own values are f16 already).
 #[derive(Clone, Copy, Debug)]
@@ -549,6 +572,79 @@ fn the_shaders_fresnel_is_the_mirrors() {
         "let schlick = F0_WATER + (1.0 - F0_WATER) * pow(1.0 - mu, 5.0);",
         "let k = env_brdf_approx(F0_WATER, mu, rough) / env_brdf_approx(F0_WATER, mu, 0.0);",
         "return max(saturate(schlick * k), F0_WATER);",
+    ] {
+        assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+    }
+}
+
+/// At s = 0 the grading is the identity. Where the floor's ray escaped (the near pivot is the open
+/// sky) it keeps `K` of the reflection's distance from the sky; where the march has no verdict
+/// (the pivot is the reflection) only the far stage acts, `K / k_n`; at reach 0 only the near stage
+/// acts: the reflection is pulled toward the occluder by `1 − k_n`, never toward the sky.
+#[test]
+fn the_grading_keeps_k_and_pulls_shaded_water_toward_its_occluder() {
+    let (c_near, c_far) = (0.2, 0.3);
+    let mut rng = Lcg(0x5EED_0009);
+    for _ in 0..20_000 {
+        let (r, sky, occ) = (rng.v3(0.0, 1.2), rng.v3(0.0, 1.2), rng.v3(0.0, 1.2));
+        let rho = grade_rho(rng.unit(), rng.unit());
+        assert!((0.0..=1.0).contains(&rho));
+        let same = grade_reflection(r, sky, occ, rho, 0.0, c_near, c_far);
+        assert!(max_diff(same, r) <= 1e-6, "s 0 moved {r:?} to {same:?}");
+        let s = rng.range(0.0, 2.4);
+        let k = grade_keep(s, c_near, c_far, rho);
+        let k_n = (1.0 - s * c_near).clamp(0.0, 1.0);
+        let about_sky = |kept: f32| {
+            zip(
+                add(sky, scale(zip(r, sky, |a, b| a - b), kept)),
+                [0.0; 3],
+                f32::max,
+            )
+        };
+        let escaped = grade_reflection(r, sky, sky, rho, s, c_near, c_far);
+        assert!(max_diff(escaped, about_sky(k)) <= 1e-5, "s {s}, rho {rho}");
+        if k_n > 1e-4 {
+            let unknown = grade_reflection(r, sky, r, rho, s, c_near, c_far);
+            assert!(
+                max_diff(unknown, about_sky(k / k_n)) <= 1e-5,
+                "s {s}, rho {rho}: the far stage alone"
+            );
+        }
+        let near = grade_reflection(r, sky, occ, 0.0, s, c_near, c_far);
+        let want = add(occ, scale(zip(r, occ, |a, b| a - b), k_n));
+        assert!(max_diff(near, want) <= 1e-5, "s {s}: the near stage alone");
+    }
+    // Under a deck: a dark reflection of the underside, a bright sky. The near pivot keeps it dark;
+    // a single pivot on the sky would lift it toward the sky.
+    let (under, sky) = ([0.03, 0.03, 0.025], [0.6, 0.7, 0.9]);
+    let graded = grade_reflection(under, sky, under, 0.0, 1.0, c_near, c_far);
+    assert!(max_diff(graded, under) <= 1e-6);
+    let single = zip(
+        add(
+            sky,
+            scale(
+                zip(under, sky, |a, b| a - b),
+                grade_keep(1.0, c_near, c_far, 0.0),
+            ),
+        ),
+        [0.0; 3],
+        f32::max,
+    );
+    assert!(dot(single, LUMA_709) > 2.0 * dot(graded, LUMA_709));
+}
+
+/// The shader's grading is this mirror's, line for line.
+#[test]
+fn the_shaders_grading_is_the_mirrors() {
+    let wgsl = include_str!("shaders/liquid.wgsl");
+    for line in [
+        "return 1.0 - (1.0 - rho_a) * (1.0 - rho_c);",
+        "return clamp(1.0 - g.x * (g.z + g.y * rho), 0.0, 1.0);",
+        "let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);",
+        "let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);",
+        "let r1 = p_near + k_n * (r - p_near);",
+        "return max(sky + k_f * (r1 - sky), vec3<f32>(0.0));",
+        "let p_near = mix(refl_l, occ.rgb + occ.v * sky, occ.known);",
     ] {
         assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
     }

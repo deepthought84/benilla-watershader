@@ -2422,6 +2422,38 @@ fn water_fresnel(n_dot_v: f32, alpha: f32) -> f32 {
     return max(saturate(schlick * k), F0_WATER);
 }
 
+// ---- the reflection's grading (REF-13) ----------------------------------------------------------
+//
+// A reflection loses a share of its contrast at every distance and more with the distance and the
+// roughness that show it: the grading keeps `K = clamp(1 − s·(C_NEAR + C_FAR·ρ), 0, 1)` of it, in
+// two stages, `look.grade` holding s, C_FAR and C_NEAR. `liquid_composite` mirrors it.
+
+/// The grading's reach: the surface's unresolved roughness share `rho_a` and the reflected thing's
+/// distance share `rho_c` as independent losses.
+fn grade_rho(rho_a: f32, rho_c: f32) -> f32 {
+    return 1.0 - (1.0 - rho_a) * (1.0 - rho_c);
+}
+
+/// The contrast the grading keeps at reach `rho`.
+fn grade_keep(rho: f32) -> f32 {
+    let g = water_reflect.look.grade;
+    return clamp(1.0 - g.x * (g.z + g.y * rho), 0.0, 1.0);
+}
+
+/// The reflection `r` graded in two stages: the near stage keeps `k_n = 1 − s·C_NEAR` of it about
+/// `p_near`, the occluded floor where the floor's march has a verdict (the occluder where it hit,
+/// the sky where it escaped), so water under a deck is pulled toward the deck's underside, never
+/// the sky; the far stage keeps the rest of `K` about the open `sky`. `k_n·k_f = K`, and s = 0 is
+/// the identity.
+fn grade_reflection(r: vec3<f32>, sky: vec3<f32>, p_near: vec3<f32>, rho: f32) -> vec3<f32> {
+    let g = water_reflect.look.grade;
+    let k = grade_keep(rho);
+    let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);
+    let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);
+    let r1 = p_near + k_n * (r - p_near);
+    return max(sky + k_f * (r1 - sky), vec3<f32>(0.0));
+}
+
 // ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
 //
 // The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
@@ -2610,6 +2642,10 @@ const WV_DISCARD: u32 = 18u;
 const WV_TRANSMITTANCE: u32 = 19u;
 const WV_IN_SCATTER: u32 = 20u;
 const WV_ALBEDO: u32 = 21u;
+// The grading's: r ρ_α, g ρ_c, b the contrast kept K; the reflection before and after it, enc.
+const WV_GRADE: u32 = 22u;
+const WV_REFL_UNGRADED: u32 = 23u;
+const WV_REFL_GRADED: u32 = 24u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -3096,6 +3132,15 @@ fn stylised_water(
     if (w_s > 0.0) {
         refl_l = mix(refl_l, water_dec(ssr.rgb), w_s);
     }
+    // Graded here, while the floor's verdict and the open sky are at hand ([`grade_reflection`]):
+    // the near pivot is the occluded floor where the march reached a verdict, the reflection itself
+    // where it did not. From below the surface, or at strength 0, nothing is graded.
+    let rho_g = grade_rho(surf.rho_a, occ.rho_c);
+    var refl_g = refl_l;
+    if (eye_above && water_reflect.look.grade.x > 0.0) {
+        let p_near = mix(refl_l, occ.rgb + occ.v * sky, occ.known);
+        refl_g = grade_reflection(refl_l, sky, p_near, rho_g);
+    }
 #endif
     // How much of `refl` came from the CUBE PROBE, so the Fresnel weight can be lifted where — and
     // only where — the probe is the tier answering. See the final mix.
@@ -3380,11 +3425,9 @@ fn stylised_water(
 #ifdef WATER_COMPOSITE
     // ---- the composite, in linear light ---------------------------------------------------------
     //
-    // The gamma look's terms as one premultiplied layer: the reflectance with the probe's lift,
-    // the tiers' linear chain, the glints in linear, the body's in-scatter and the bed's
-    // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
-    let probe_boost = max(water_reflect.probe_box_max.x, 0.0);
-    let f_w = saturate(mix(f_surf, min(f_surf * probe_boost, PROBE_REFLECT_CEIL), probe_share));
+    // The gamma look's terms as one premultiplied layer: one reflectance for every tier, the tiers'
+    // linear chain graded above, the glints in linear, the body's in-scatter and the bed's transmittance,
+    // the edge's coverage, the foam over it, then the gamma fog law on the layer.
     // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
     // so the peak over black is the gamma look's; the moon's weight is raised likewise.
     let gw = water_reflect.look.composite.y;
@@ -3403,12 +3446,19 @@ fn stylised_water(
         return vec4<f32>(water_enc(body_light.in_scatter), 1.0);
     } else if (view_id == WV_ALBEDO) {
         return vec4<f32>(optics.a_g, 1.0);
+    } else if (view_id == WV_GRADE) {
+        let keep = select(1.0, grade_keep(rho_g), eye_above);
+        return vec4<f32>(surf.rho_a, occ.rho_c, keep, 1.0);
+    } else if (view_id == WV_REFL_UNGRADED) {
+        return vec4<f32>(water_enc(refl_l), 1.0);
+    } else if (view_id == WV_REFL_GRADED) {
+        return vec4<f32>(water_enc(refl_g), 1.0);
     }
 #endif
     // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
     var layer = layer_surface(
-        f_w,
-        refl_l,
+        f_surf,
+        refl_g,
         spec_l,
         body_light.in_scatter,
         vec3<f32>(optics.w_in),

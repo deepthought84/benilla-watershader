@@ -104,8 +104,9 @@ impl Default for WaterDebug {
 /// unrippled normal, and `composite_identity` and `discard` change the linear composite's layer.
 /// Those two and the body's `transmittance`, `in_scatter` and `albedo` are drawn only with
 /// `$WOW_WATER_COMPOSITE=1`; the gamma look draws as usual under them. `fresnel` shows the gamma
-/// look's reflection weight, or with the composite its reflectance.
-pub const WATER_VIEWS: [&str; 22] = [
+/// look's reflection weight, or with the composite its reflectance. The grading's `grade`,
+/// `refl_ungraded` and `refl_graded` are the composite's too.
+pub const WATER_VIEWS: [&str; 25] = [
     "off",
     "mirror1",
     "mirror2",
@@ -128,6 +129,9 @@ pub const WATER_VIEWS: [&str; 22] = [
     "transmittance",
     "in_scatter",
     "albedo",
+    "grade",
+    "refl_ungraded",
+    "refl_graded",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.
