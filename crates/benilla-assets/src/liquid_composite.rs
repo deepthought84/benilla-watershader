@@ -170,6 +170,33 @@ fn grade_reflection(r: V3, sky: V3, p_near: V3, rho: f32, s: f32, c_near: f32, c
     )
 }
 
+/// The two-stage grading as the shader runs it: affine in the reflection `r`, `max(a·r + b, 0)`,
+/// with the near pivot `mix(r, floor, known)` expanded; `(a, b)`.
+fn grade_affine(
+    sky: V3,
+    floor: V3,
+    known: f32,
+    rho: f32,
+    s: f32,
+    c_near: f32,
+    c_far: f32,
+) -> (f32, V3) {
+    let k = grade_keep(s, c_near, c_far, rho);
+    let k_n = (1.0 - s * c_near).clamp(0.0, 1.0);
+    let k_f = if k_n <= 1e-4 { 0.0 } else { k / k_n.max(1e-4) };
+    let a = k_f * (k_n + (1.0 - k_n) * (1.0 - known));
+    let b = add(
+        scale(floor, k_f * (1.0 - k_n) * known),
+        scale(sky, 1.0 - k_f),
+    );
+    (a, b)
+}
+
+/// The affine map applied: `max(a·r + b, 0)`.
+fn grade_apply((a, b): (f32, V3), r: V3) -> V3 {
+    zip(add(scale(r, a), b), [0.0; 3], f32::max)
+}
+
 /// How the blender's arithmetic is modelled: plain f32, or a half-float target whose sources and
 /// result round through `f16` (the framebuffer's own values are f16 already).
 #[derive(Clone, Copy, Debug)]
@@ -577,10 +604,24 @@ fn the_shaders_fresnel_is_the_mirrors() {
     }
 }
 
+/// The grading's numbers at the owner's band midpoints (C_NEAR 0.2, C_FAR 0.3): the reach of a
+/// rough share 0.3 and a distance share 0.4 is 0.58, and at s = 1 the contrast kept is 0.8 at
+/// reach 0 and 0.5 at reach 1.
+#[test]
+fn the_grading_keeps_the_band_midpoints() {
+    let (c_near, c_far) = (0.2, 0.3);
+    assert!((grade_rho(0.3, 0.4) - 0.58).abs() <= 1e-6);
+    assert!((grade_keep(1.0, c_near, c_far, 0.0) - 0.8).abs() <= 1e-6);
+    assert!((grade_keep(1.0, c_near, c_far, 1.0) - 0.5).abs() <= 1e-6);
+    assert_eq!(grade_keep(0.0, c_near, c_far, 1.0), 1.0);
+    assert_eq!(grade_keep(4.0, c_near, c_far, 1.0), 0.0);
+}
+
 /// At s = 0 the grading is the identity. Where the floor's ray escaped (the near pivot is the open
 /// sky) it keeps `K` of the reflection's distance from the sky; where the march has no verdict
 /// (the pivot is the reflection) only the far stage acts, `K / k_n`; at reach 0 only the near stage
-/// acts: the reflection is pulled toward the occluder by `1 − k_n`, never toward the sky.
+/// acts: the reflection is pulled toward the occluder by `1 − k_n`. The shader's affine form is
+/// the two stages with the near pivot `mix(r, floor, known)` expanded.
 #[test]
 fn the_grading_keeps_k_and_pulls_shaded_water_toward_its_occluder() {
     let (c_near, c_far) = (0.2, 0.3);
@@ -613,27 +654,39 @@ fn the_grading_keeps_k_and_pulls_shaded_water_toward_its_occluder() {
         let near = grade_reflection(r, sky, occ, 0.0, s, c_near, c_far);
         let want = add(occ, scale(zip(r, occ, |a, b| a - b), k_n));
         assert!(max_diff(near, want) <= 1e-5, "s {s}: the near stage alone");
+        let known = rng.unit();
+        let p_near = add(scale(r, 1.0 - known), scale(occ, known));
+        let staged = grade_reflection(r, sky, p_near, rho, s, c_near, c_far);
+        let affine = grade_apply(grade_affine(sky, occ, known, rho, s, c_near, c_far), r);
+        assert!(
+            max_diff(staged, affine) <= 1e-5,
+            "s {s}, rho {rho}, known {known}"
+        );
+        let identity = grade_apply(grade_affine(sky, occ, known, rho, 0.0, c_near, c_far), r);
+        assert!(max_diff(identity, r) <= 1e-6);
     }
-    // Under a deck: a dark reflection of the underside, a bright sky. The near pivot keeps it dark;
-    // a single pivot on the sky would lift it toward the sky.
-    let (under, sky) = ([0.03, 0.03, 0.025], [0.6, 0.7, 0.9]);
-    let graded = grade_reflection(under, sky, under, 0.0, 1.0, c_near, c_far);
-    assert!(max_diff(graded, under) <= 1e-6);
-    let single = zip(
-        add(
-            sky,
-            scale(
-                zip(under, sky, |a, b| a - b),
-                grade_keep(1.0, c_near, c_far, 0.0),
-            ),
-        ),
-        [0.0; 3],
-        f32::max,
-    );
-    assert!(dot(single, LUMA_709) > 2.0 * dot(graded, LUMA_709));
 }
 
-/// The shader's grading is this mirror's, line for line.
+/// Under a deck, at the reach the Booty's under-deck water measures (rho 0.57) and a hit verdict:
+/// the reflection is the dark underside and the near stage leaves it there, but the far stage
+/// keeps only `K / k_n` = 0.79 of it about the open sky, so 21 % of the sky enters and the dark
+/// reflection reads several times brighter. This pins what the two-stage law does, which is the
+/// under-deck gate's open question for P1-30, not a look to keep.
+#[test]
+fn the_far_stage_lifts_under_deck_water_toward_the_sky() {
+    let (c_near, c_far, s, rho) = (0.2, 0.3, 1.0, 0.57);
+    let (under, sky) = ([0.03, 0.03, 0.025], [0.6, 0.7, 0.9]);
+    let graded = grade_apply(grade_affine(sky, under, 1.0, rho, s, c_near, c_far), under);
+    let k_f = grade_keep(s, c_near, c_far, rho) / (1.0 - s * c_near);
+    assert!((k_f - 0.786).abs() <= 1e-3);
+    let want = add(scale(under, k_f), scale(sky, 1.0 - k_f));
+    assert!(max_diff(graded, want) <= 1e-6);
+    assert!(dot(graded, LUMA_709) > 4.0 * dot(under, LUMA_709));
+}
+
+/// The shader's grading is this mirror's, line for line, and wired as the composite takes it: the
+/// map built from the floor's verdict, applied to the tier chain only with the eye above and s
+/// above 0, and the graded chain is what the surface layer reflects at the one Fresnel `f_surf`.
 #[test]
 fn the_shaders_grading_is_the_mirrors() {
     let wgsl = include_str!("shaders/liquid.wgsl");
@@ -642,9 +695,13 @@ fn the_shaders_grading_is_the_mirrors() {
         "return clamp(1.0 - g.x * (g.z + g.y * rho), 0.0, 1.0);",
         "let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);",
         "let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);",
-        "let r1 = p_near + k_n * (r - p_near);",
-        "return max(sky + k_f * (r1 - sky), vec3<f32>(0.0));",
-        "let p_near = mix(refl_l, occ.rgb + occ.v * sky, occ.known);",
+        "let a = k_f * (k_n + (1.0 - k_n) * (1.0 - known));",
+        "let b = k_f * (1.0 - k_n) * known * floor + (1.0 - k_f) * sky;",
+        "return vec4<f32>(b, a);",
+        "let graded = eye_above && water_reflect.look.grade.x > 0.0;",
+        "grade_ab = grade_affine(sky, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));",
+        "refl_g = max(grade_ab.w * refl_l + grade_ab.xyz, vec3<f32>(0.0));",
+        "var layer = layer_surface(\n        f_surf,\n        refl_g,\n",
     ] {
         assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
     }

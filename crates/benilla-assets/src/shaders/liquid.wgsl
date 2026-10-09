@@ -2263,25 +2263,20 @@ fn floor_occ_mix(a: FloorOcc, b: FloorOcc, t: f32) -> FloorOcc {
 /// point along the flat reflection, so a still camera gets a still answer and no silhouette
 /// flickers with the ripple; only the occluder's colour tap follows the rippled lookup point (`n`
 /// slides it, as it slides the mirrors' and the probe's), shifted on screen by as much as the ripple
-/// moves it. Between the two, both run and crossfade ([`occl_plane_weight`]).
+/// moves it. Between the two, both run and crossfade ([`occl_plane_weight`]). The plane's answer
+/// is read after the march and the eye's distance taken again there, so neither is carried
+/// through the march's loop.
 fn floor_occlusion(
     world_pos: vec3<f32>,
     n: vec3<f32>,
     flat_n: vec3<f32>,
     to_view: vec3<f32>,
-    d_eye: f32,
 ) -> FloorOcc {
     let p_look = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
     let uv_look = ndc_to_uv(position_world_to_ndc(p_look).xy);
     let wp = occl_plane_weight(world_pos.y);
-    var plane = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
-    if (wp > 0.0) {
-        let o = textureSampleLevel(water_occl, scene_samp, uv_look, 0.0);
-        let c = textureSampleLevel(floor_occ, scene_samp, uv_look, 0.0);
-        plane = FloorOcc(c.rgb, o.r, c.a, o.a);
-        if (wp >= 1.0) {
-            return plane;
-        }
+    if (wp >= 1.0) {
+        return floor_occ_plane(uv_look);
     }
     let m = floor_march(
         world_pos + vec3<f32>(0.0, 0.05, 0.0),
@@ -2290,7 +2285,20 @@ fn floor_occlusion(
         FLOOR_MARCH_STEPS,
     );
     let shift = uv_look - ndc_to_uv(position_world_to_ndc(world_pos).xy);
-    return floor_occ_mix(floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift), plane, wp);
+    let d_eye = distance(view.world_position.xyz, world_pos);
+    let marched = floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift);
+    var plane = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    if (wp > 0.0) {
+        plane = floor_occ_plane(uv_look);
+    }
+    return floor_occ_mix(marched, plane, wp);
+}
+
+/// The compute pass's plane answer at `uv_look`, read bilinearly.
+fn floor_occ_plane(uv_look: vec2<f32>) -> FloorOcc {
+    let o = textureSampleLevel(water_occl, scene_samp, uv_look, 0.0);
+    let c = textureSampleLevel(floor_occ, scene_samp, uv_look, 0.0);
+    return FloorOcc(c.rgb, o.r, c.a, o.a);
 }
 
 #ifdef WATER_COMPOSITE
@@ -2440,18 +2448,20 @@ fn grade_keep(rho: f32) -> f32 {
     return clamp(1.0 - g.x * (g.z + g.y * rho), 0.0, 1.0);
 }
 
-/// The reflection `r` graded in two stages: the near stage keeps `k_n = 1 − s·C_NEAR` of it about
-/// `p_near`, the occluded floor where the floor's march has a verdict (the occluder where it hit,
-/// the sky where it escaped), so water under a deck is pulled toward the deck's underside, never
-/// the sky; the far stage keeps the rest of `K` about the open `sky`. `k_n·k_f = K`, and s = 0 is
-/// the identity.
-fn grade_reflection(r: vec3<f32>, sky: vec3<f32>, p_near: vec3<f32>, rho: f32) -> vec3<f32> {
+/// The grading in two stages, as the affine map `r ↦ max(a·r + b, 0)` it is on the reflection `r`,
+/// returned `(b, a)`: the near stage keeps `k_n = 1 − s·C_NEAR` of `r` about
+/// `p_near = mix(r, floor, known)`, the occluded floor where the floor's march has a verdict (the
+/// occluder where it hit, the sky where it escaped), so water under a deck is pulled toward the
+/// deck's underside; the far stage keeps the rest of `K` about the open `sky`. `k_n·k_f = K`, and
+/// s = 0 is the identity. Two terms instead of the sky and the verdict keep the tier chain light.
+fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<f32> {
     let g = water_reflect.look.grade;
     let k = grade_keep(rho);
     let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);
     let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);
-    let r1 = p_near + k_n * (r - p_near);
-    return max(sky + k_f * (r1 - sky), vec3<f32>(0.0));
+    let a = k_f * (k_n + (1.0 - k_n) * (1.0 - known));
+    let b = k_f * (1.0 - k_n) * known * floor + (1.0 - k_f) * sky;
+    return vec4<f32>(b, a);
 }
 
 // ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
@@ -2750,7 +2760,6 @@ fn stylised_water(
     let n_slide = surf.n_lo;
 #endif
     let to_view = normalize(view.world_position.xyz - world_pos);
-    let d_eye = distance(view.world_position.xyz, world_pos);
 
     // Body: the zone's own swatch, deepening with V. sqrt, not linear — absorption in real water is
     // exponential, and the square root keeps the shallows a distinct band instead of a thin gradient.
@@ -3108,7 +3117,7 @@ fn stylised_water(
     }
 #endif
     if (floor_occlusion_wanted(floor_share, world_pos)) {
-        occ = floor_occlusion(world_pos, n_slide, flat_n, to_view, d_eye);
+        occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
     let floor_g = select(sky_g, water_enc(occ.rgb + occ.v * sky), eye_above);
@@ -3122,6 +3131,15 @@ fn stylised_water(
     if (!eye_above) {
         floor_l = water_dec(sky_g);
     }
+    // The grading's map, built while the floor's verdict and the open sky are at hand
+    // ([`grade_affine`]): the near pivot is the occluded floor where the march reached a verdict,
+    // the reflection itself where it did not. From below the surface, or at strength 0, nothing is
+    // graded.
+    let graded = eye_above && water_reflect.look.grade.x > 0.0;
+    var grade_ab = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (graded) {
+        grade_ab = grade_affine(sky, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));
+    }
     var refl_l = floor_l;
     if (w_p > 0.0) {
         refl_l = mix(refl_l, water_dec(probe_rgb), w_p);
@@ -3132,14 +3150,9 @@ fn stylised_water(
     if (w_s > 0.0) {
         refl_l = mix(refl_l, water_dec(ssr.rgb), w_s);
     }
-    // Graded here, while the floor's verdict and the open sky are at hand ([`grade_reflection`]):
-    // the near pivot is the occluded floor where the march reached a verdict, the reflection itself
-    // where it did not. From below the surface, or at strength 0, nothing is graded.
-    let rho_g = grade_rho(surf.rho_a, occ.rho_c);
     var refl_g = refl_l;
-    if (eye_above && water_reflect.look.grade.x > 0.0) {
-        let p_near = mix(refl_l, occ.rgb + occ.v * sky, occ.known);
-        refl_g = grade_reflection(refl_l, sky, p_near, rho_g);
+    if (graded) {
+        refl_g = max(grade_ab.w * refl_l + grade_ab.xyz, vec3<f32>(0.0));
     }
 #endif
     // How much of `refl` came from the CUBE PROBE, so the Fresnel weight can be lifted where — and
@@ -3425,9 +3438,9 @@ fn stylised_water(
 #ifdef WATER_COMPOSITE
     // ---- the composite, in linear light ---------------------------------------------------------
     //
-    // The gamma look's terms as one premultiplied layer: one reflectance for every tier, the tiers'
-    // linear chain graded above, the glints in linear, the body's in-scatter and the bed's transmittance,
-    // the edge's coverage, the foam over it, then the gamma fog law on the layer.
+    // The gamma look's terms as one premultiplied layer: one reflectance for every tier, the
+    // tiers' linear chain graded above, the glints in linear, the body's in-scatter and the bed's
+    // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
     // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
     // so the peak over black is the gamma look's; the moon's weight is raised likewise.
     let gw = water_reflect.look.composite.y;
@@ -3447,7 +3460,7 @@ fn stylised_water(
     } else if (view_id == WV_ALBEDO) {
         return vec4<f32>(optics.a_g, 1.0);
     } else if (view_id == WV_GRADE) {
-        let keep = select(1.0, grade_keep(rho_g), eye_above);
+        let keep = select(1.0, grade_keep(grade_rho(surf.rho_a, occ.rho_c)), eye_above);
         return vec4<f32>(surf.rho_a, occ.rho_c, keep, 1.0);
     } else if (view_id == WV_REFL_UNGRADED) {
         return vec4<f32>(water_enc(refl_l), 1.0);
