@@ -21,6 +21,7 @@ Files a scene reads from <dir> (only the ones its rows need):
     <scene>-ref.png             the Reference twin (and <scene>-ref-000.png ... its burst)
     <scene>@<view>.png          a WATER_VIEW debug capture (and <scene>@<view>-000.png ...)
     <scene>~<variant>.png       an A/B variant, e.g. ~noreflect for mirrors off
+    <scene>~unbanded@albedo.png the albedo view with the bands off ($WOW_WATER_BAND_PUSH=0)
     <scene>.poses.csv           a moving burst's camera per shot: shot,ex,ey,ez,lx,ly,lz (WoW yd)
 
 Region file, scripts/water_regions/<scene>.toml, one per golden water scene: pixel boxes only,
@@ -476,24 +477,13 @@ def ls_slopes(y: np.ndarray, w: int) -> np.ndarray:
     return np.convolve(y, (k / (k @ k))[::-1], mode="valid")
 
 
-def band_step(view, box, still=None, window=None, hard=4.0):
-    """Soft bands, on the albedo view, over water: the steepest least-squares slope of luma down
-    a column over `window` rows, over the box's mean |∂Y/∂y| on water (its unbanded ramp). The
-    window defaults to the rows that mean slope takes to climb 8 codes (4 to 128), so 8-bit steps
-    average out; a column's run of water rows shorter than 2 windows + 3 rows is skipped. Water is
-    where the view differs from `still` (the final frame; water_mask), else the whole box.
-    Analytic 2.2 for 3 bands at push 0.5, edge 0.22, 1 unbanded. A hard band is ∞: a rise within
-    2 rows of ≥ `hard` codes and over 4 times what the window above or below climbs in 2 rows,
-    plus a code per end for rounding. Pass ≤ 3."""
-    Y = crop(luma(view), box).astype(np.float64)
-    m = crop(water_mask(view, still), box) if still is not None else np.ones(Y.shape, dtype=bool)
-    both = m[1:] & m[:-1]
-    d = np.abs(np.diff(Y, axis=0))
-    mean = float(d[both].mean()) if both.any() else 0.0
-    if mean <= 0:
-        return {"value": None, "window": None, "runs": 0}
-    w = int(window) if window else int(np.clip(math.ceil(8.0 / mean), 4, 128))
-    worst, runs = 0.0, 0
+def band_scan(Y, m, w, hard, base=None):
+    """band_step's walk down each column's runs of water rows (a run shorter than 2 windows + 3
+    rows is skipped): the steepest least-squares slope over `w` rows, the runs measured, and the
+    hard rises as (column, row) in the box, first found first. With `base` (the unbanded view's
+    luma over the same box) a rise counts only by what it climbs over base's largest 2-row rise
+    within 2 rows of it."""
+    worst, runs, jumps = 0.0, 0, []
     for c in range(Y.shape[1]):
         edges = np.flatnonzero(np.diff(np.concatenate([[0], m[:, c].astype(np.int8), [0]])))
         for a, b in zip(edges[::2], edges[1::2]):
@@ -504,14 +494,66 @@ def band_step(view, box, still=None, window=None, hard=4.0):
             i = np.arange(w, n - w - 2)
             rise = np.abs(y[i + 2] - y[i])
             around = np.maximum(np.abs(y[i] - y[i - w]), np.abs(y[i + 2 + w] - y[i + 2])) / w
-            jump = (rise >= hard) & (rise > 2.0 + 4.0 * 2.0 * around)
-            if jump.any():
-                k = int(i[np.argmax(jump)])
-                at = int(box[1] + a + k + 1 + np.argmax(np.abs(np.diff(y[k : k + 3]))))
-                return {"value": math.inf, "column": int(box[0]) + c, "row": at, "window": w}
+            if base is not None:
+                u = np.pad(np.abs(base[a + 2 : b, c] - base[a : b - 2, c]), 2, mode="edge")
+                rise = rise - np.max([u[i + d] for d in range(5)], axis=0)
+            for k in i[(rise >= hard) & (rise > 2.0 + 4.0 * 2.0 * around)]:
+                jumps.append((c, int(a + k + 1 + np.argmax(np.abs(np.diff(y[k : k + 3]))))))
             worst = max(worst, float(np.abs(ls_slopes(y, w)).max()))
             runs += 1
-    return {"value": worst / mean if runs else None, "window": w, "runs": runs}
+    return worst, runs, jumps
+
+
+def band_step(view, box, still=None, unbanded=None, window=None, hard=4.0):
+    """Soft bands, on the albedo view, over water: the steepest least-squares slope of luma down
+    a column over `window` rows, over the box's mean |∂Y/∂y| on water (its unbanded ramp). The
+    window defaults to the rows that mean slope takes to climb 8 codes (4 to 128), so 8-bit steps
+    average out; a column's run of water rows shorter than 2 windows + 3 rows is skipped. Water is
+    where the view differs from `still` (the final frame; water_mask), else the whole box.
+    Analytic 2.2 for 3 bands at push 0.5, edge 0.22, 1 unbanded. A hard band is ∞: a rise within
+    2 rows of ≥ `hard` codes and over 4 times what the window above or below climbs in 2 rows,
+    plus a code per end for rounding. Pass ≤ 3.
+    With `unbanded` (the same view captured with the bands off, $WOW_WATER_BAND_PUSH=0) the value
+    is the banded score over the unbanded one, each on the view's water and its own mean slope,
+    the window the unbanded view's: what the bands add to the scene's own edges (seabed
+    silhouettes, shores). A hard rise counts by what it climbs over the unbanded view's rise at
+    the same rows (± 2): an edge both views hold is the scene's. Pass ≤ 1.1 (R-E3)."""
+    m_full = water_mask(view, still) if still is not None else None
+    m = crop(m_full, box) if m_full is not None else np.ones(crop(view, box).shape[:2], dtype=bool)
+    both = m[1:] & m[:-1]
+
+    def mean_slope(Y):
+        d = np.abs(np.diff(Y, axis=0))
+        return float(d[both].mean()) if both.any() else 0.0
+
+    Y = crop(luma(view), box).astype(np.float64)
+    mean = mean_slope(Y)
+    if unbanded is None:
+        if mean <= 0:
+            return {"value": None, "window": None, "runs": 0}
+        w = int(window) if window else int(np.clip(math.ceil(8.0 / mean), 4, 128))
+        worst, runs, jumps = band_scan(Y, m, w, hard)
+        if jumps:
+            c, at = jumps[0]
+            return {"value": math.inf, "column": int(box[0]) + c, "row": int(box[1]) + at,
+                    "window": w}
+        return {"value": worst / mean if runs else None, "window": w, "runs": runs}
+    U = crop(luma(unbanded), box).astype(np.float64)
+    umean = mean_slope(U)
+    basis = "banded/unbanded"
+    if mean <= 0 or umean <= 0:
+        return {"value": None, "window": None, "runs": 0, "basis": basis}
+    w = int(window) if window else int(np.clip(math.ceil(8.0 / umean), 4, 128))
+    uworst, _, ujumps = band_scan(U, m, w, hard)
+    worst, runs, jumps = band_scan(Y, m, w, hard, base=U)
+    out = {"window": w, "runs": runs, "scene_steps": len(ujumps), "basis": basis}
+    if jumps:
+        c, at = jumps[0]
+        return {"value": math.inf, "column": int(box[0]) + c, "row": int(box[1]) + at, **out}
+    if not runs or uworst <= 0:
+        return {"value": None, **out}
+    banded, plain = worst / mean, uworst / umean
+    return {"value": banded / plain, "banded": banded, "unbanded": plain, **out}
 
 
 def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=None):
@@ -849,7 +891,8 @@ def halo_count(img, box, thr=12.0):
 #                                  with "view" the row must name its view, passed as `view`
 #   ("times",) / ("poses",)        the burst's clock (the log, else `every` steps of 1/60 s) / poses
 #   ("view", arg, view, required)  a WATER_VIEW capture; a row parameter `arg` names another view
-#   ("variant", arg, variant)      an A/B capture <scene>~<variant>.png
+#   ("variant", arg, variant[, required])  an A/B capture <scene>~<variant>.png; one not required
+#                                  is skipped when the region row sets `arg = false`
 
 
 class Row:
@@ -889,9 +932,13 @@ ROWS: dict[str, Row] = {
     "deep_chroma": Row(deep_chroma, STILL + DEEP_VIEWS, "higher", factor=0.8),
     "band_step": Row(
         band_step,
-        [("view", "view", "albedo", True), ("still", "still", False)],
+        [
+            ("view", "view", "albedo", True),
+            ("still", "still", False),
+            ("variant", "unbanded", "unbanded@albedo", False),
+        ],
         "lower",
-        {"max": 3.0},
+        {"max": 1.1},
     ),
     "shade_ratio": Row(
         shade_ratio,
@@ -1131,8 +1178,10 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
             elif required:
                 missing.append(f"{scene.name}{base}@{view}.png")
         elif kind == "variant":
-            _, arg, default = need
+            arg, default, required = need[1], need[2], need[3] if len(need) > 3 else True
             var = params.pop(arg, default)
+            if var is False and not required:
+                continue
             args[arg] = scene.image(f"{base}~{var}")
             if args[arg] is None:
                 missing.append(f"{scene.name}{base}~{var}.png")

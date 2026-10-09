@@ -22,3 +22,8 @@ sky_y = 468
 [[row]]
 metric = "lum_vs_ref"
 box = "water"
+# The bands (P1-27) against the albedo view with the bands off, ~unbanded@albedo: what they add
+# to the scene's own edges (R-E3).
+[[row]]
+metric = "band_step"
+box = "water"

@@ -87,7 +87,7 @@ class BandStep(unittest.TestCase):
         for img in (v, png(v)):
             r = wm.band_step(img, self.box)["value"]
             self.assertAlmostEqual(r, 2.2045, delta=0.05)
-            self.assertTrue(wm.judge(r, wm.ROWS["band_step"].gate))
+            self.assertTrue(wm.judge(r, {"max": 3.0}))
 
     def test_an_unbanded_ramp_scores_one(self):
         for col in (banded_column(0.0, 0.22), banded_column(0.0, 0.22, h=400, span=60.0)):
@@ -110,6 +110,36 @@ class BandStep(unittest.TestCase):
 
     def test_a_flat_view_has_no_ramp_to_band(self):
         self.assertIsNone(wm.band_step(flat([90, 120, 130]), [0, 0, W, H])["value"])
+
+    def test_against_the_unbanded_view_soft_bands_on_a_bare_ramp_score_their_slope(self):
+        banded, plain = view_of(banded_column(0.5, 0.22)), view_of(banded_column(0.0, 0.22))
+        r = wm.band_step(png(banded), self.box, unbanded=png(plain))
+        self.assertAlmostEqual(r["value"], 2.2045, delta=0.06)
+        self.assertEqual(r["basis"], "banded/unbanded")
+        self.assertFalse(wm.judge(r["value"], wm.ROWS["band_step"].gate))
+        same = wm.band_step(png(plain), self.box, unbanded=png(plain))["value"]
+        self.assertAlmostEqual(same, 1.0, places=6)
+        self.assertTrue(wm.judge(same, wm.ROWS["band_step"].gate))
+
+    def test_the_scenes_own_edges_are_not_bands(self):
+        # A seabed silhouette (a hard 30-code rise) and a steep shore ramp in both captures: alone
+        # each view scores ∞; the ratio is 1, and a hard band added on top still reads ∞.
+        def scene(push, hard_edge):
+            v = view_of(banded_column(push, 0.0 if hard_edge else 0.22), w=40) * 0.3
+            v[450:, :] += 30.0
+            v[600:700, 20:] += np.linspace(0, 60, 100)[:, None, None]
+            return png(v)
+
+        plain, soft, hard = scene(0.0, False), scene(0.5, False), scene(0.5, True)
+        box = [0, 0, 40, 900]
+        self.assertTrue(math.isinf(wm.band_step(plain, box)["value"]))
+        self.assertAlmostEqual(wm.band_step(plain, box, unbanded=plain)["value"], 1.0, places=6)
+        r = wm.band_step(soft, box, unbanded=plain)
+        self.assertGreater(r["scene_steps"], 0)
+        self.assertLess(r["value"], 1.1)
+        r = wm.band_step(hard, box, unbanded=plain)
+        self.assertTrue(math.isinf(r["value"]))
+        self.assertEqual(r["row"], 150)
 
 
 class DeepWater(unittest.TestCase):
@@ -660,11 +690,19 @@ max = 1.0
                 """[[row]]
 metric = "band_step"
 box = [0, 0, 40, 900]
+unbanded = false
+max = 3
 [[row]]
 metric = "band_step"
 label = "unmasked"
 box = [0, 0, 40, 900]
 still = false
+unbanded = false
+max = 3
+[[row]]
+metric = "band_step"
+label = "ratio"
+box = [0, 0, 40, 900]
 """
             )
             view = view_of(banded_column(0.5, 0.22), w=40)
@@ -677,6 +715,14 @@ still = false
             self.assertTrue(res["band_step"]["pass"])
             self.assertTrue(math.isinf(res["unmasked"]["value"]))
             self.assertFalse(res["unmasked"]["pass"])
+            self.assertIn("wg-band~unbanded@albedo.png", res["ratio"]["missing"])
+            plain = view_of(banded_column(0.0, 0.22), w=40)
+            plain[300:600, 10:30] = [30, 40, 20]
+            Image.fromarray(np.rint(plain).astype(np.uint8)).save(d / "wg-band~unbanded@albedo.png")
+            res = wm.measure(d, d, ["wg-band"])["wg-band"]
+            self.assertAlmostEqual(res["ratio"]["value"], 2.2045, delta=0.06)
+            self.assertEqual(res["ratio"]["gate"], {"max": 1.1})
+            self.assertFalse(res["ratio"]["pass"])
 
     def test_contact_rows_read_the_foam_views_contact_coverage(self):
         # The contact view's r is the distance to the contact (1 at it): full everywhere, while
