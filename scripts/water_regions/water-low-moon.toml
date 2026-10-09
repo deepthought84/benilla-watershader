@@ -19,6 +19,7 @@ box = "moon_path"
 metric = "deep_hue"
 label = "night_hue"
 box = "water"
+defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "deep_luma"
 box = "water"

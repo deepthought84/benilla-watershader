@@ -181,20 +181,26 @@ class Checks(unittest.TestCase):
             self.assertEqual(rc, 0)
             self.assertIn("identical 1, differing 0, unmatched 1", out)
 
-    def test_diff_lists_moved_relabelled_regated_and_informational_rows(self):
+    def test_diff_lists_moved_relabelled_regated_informational_and_deferred_rows(self):
         old = {"s": {"a": {"metric": "m", "value": 1.0}, "b": {"metric": "view_std", "value": 2},
                      "c": {"metric": "pop", "value": 3}, "d": {"metric": "m", "value": 4},
-                     "e": {"metric": "m", "value": 5, "gate": {"max": 10.8}}}}
+                     "e": {"metric": "m", "value": 5, "gate": {"max": 10.8}},
+                     "f": {"metric": "m", "value": 6}, "g": {"metric": "m", "value": 7,
+                                                            "defer": "P1-35"}}}
         new = {"s": {"a": {"metric": "m", "value": 1.5}, "b2": {"metric": "frame_std", "value": 2},
                      "c": {"metric": "pop", "value": 3, "gated": False},
                      "d": {"metric": "m", "value": 4},
                      "e": {"metric": "m", "value": 5,
-                           "gate": {"max": 10.8, "monotone": {"min": 1.0}}}}}
+                           "gate": {"max": 10.8, "monotone": {"min": 1.0}}},
+                     "f": {"metric": "m", "value": 6, "defer": "P1-35"},
+                     "g": {"metric": "m", "value": 7}}}
         self.assertEqual(wb.changes(old, new), [
             ("s", "a", "value 1 -> 1.5"),
             ("s", "b", "removed (view_std 2)"),
             ("s", "c", "informational"),
             ("s", "e", "gate max 10.8 -> max 10.8 monotone min 1"),
+            ("s", "f", "deferred (P1-35)"),
+            ("s", "g", "no longer deferred"),
             ("s", "b2", "added (frame_std 2)"),
         ])
 

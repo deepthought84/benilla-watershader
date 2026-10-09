@@ -40,6 +40,7 @@ box = "deep"
 [[row]]
 metric = "deep_hue"
 box = "deep"
+defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "zero_band"
 box = "wall"

@@ -145,6 +145,23 @@ class BandStep(unittest.TestCase):
 class DeepWater(unittest.TestCase):
     box = [40, 40, 280, 200]
 
+    def test_a_desaturated_in_scatter_fails_the_no_neon_chroma_ratio(self):
+        # Water where the two views differ; the bank (the frame's border) the same in both.
+        albedo = flat([60, 60, 60])
+        albedo[20:220, 20:300] = hsv_patch(160, 0.6, 0.4)
+        same = albedo.copy()
+        same[20:220, 20:300] = hsv_patch(160, 0.6, 0.7)  # brighter, the albedo's chroma
+        r = wm.chroma_ratio(png(same), png(albedo), [0, 0, W, H])
+        self.assertAlmostEqual(r["value"], 1.0, delta=0.02)
+        self.assertEqual(r["pixels"], 196 * 276)  # the water eroded by 2 px
+        self.assertTrue(wm.judge(r["value"], wm.ROWS["chroma_ratio"].gate))
+        warm = albedo.copy()
+        warm[20:220, 20:300] = hsv_patch(160, 0.45, 0.7)
+        r = wm.chroma_ratio(png(warm), png(albedo), [0, 0, W, H])
+        self.assertAlmostEqual(r["value"], 0.75, delta=0.02)
+        self.assertEqual(r["inside"], 0.0)
+        self.assertFalse(wm.judge(r["value"], wm.ROWS["chroma_ratio"].gate))
+
     def test_a_hue_shifted_patch_fails_deep_hue(self):
         albedo = flat(hsv_patch(200, 0.6, 0.5))
         same = wm.deep_hue(albedo, self.box, albedo=albedo)
@@ -766,6 +783,41 @@ min = 120
             save(flat(hsv_patch(100, 0.5, 0.5), w=100, h=100), d / "wg-hue@in_scatter.png")
             res = wm.measure(d, d, ["wg-hue"])["wg-hue"]
             self.assertFalse(res["body_hue"]["pass"])
+
+    def test_a_deferred_row_reports_its_miss_without_failing(self):
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-defer.toml").write_text(
+                """[box]
+water = [0, 0, 100, 100]
+[[row]]
+metric = "luma_sd"
+label = "kept"
+box = "water"
+min = 5
+defer = "P1-35"
+[[row]]
+metric = "luma_sd"
+box = "water"
+"""
+            )
+            save(flat([90, 110, 120], w=100, h=100), d / "wg-defer.png")
+            out = d / "out.json"
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                rc = wm.main([str(d), "--regions", str(d), "--json", str(out)])
+            self.assertEqual(rc, 0)
+            self.assertIn("DEFER", printed.getvalue())
+            res = json.loads(out.read_text())["wg-defer"]
+            self.assertEqual((res["kept"]["pass"], res["kept"]["defer"]), (False, "P1-35"))
+            # Worse than its baseline: deferred too; the undeferred row's miss counts.
+            base = json.loads(out.read_text())
+            base["wg-defer"]["kept"]["value"] = base["wg-defer"]["luma_sd"]["value"] = 3.0
+            (d / "base.json").write_text(json.dumps(base))
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                rc = wm.main([str(d), "--regions", str(d), "--baseline", str(d / "base.json")])
+            self.assertEqual(rc, 1)
+            self.assertIn("DEFER WORSE", printed.getvalue())
+            self.assertEqual(printed.getvalue().count("WORSE"), 2)
 
     def test_contact_rows_read_the_foam_views_contact_coverage(self):
         # The contact view's r is the distance to the contact (1 at it): full everywhere, while

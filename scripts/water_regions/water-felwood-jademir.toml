@@ -6,9 +6,11 @@ scene = "water-felwood-jademir"
 [box]
 water = [0, 650, 1600, 900]
 far = [1300, 470, 1600, 480]
+# P1-27 holds the deep hue within 10° of the albedo view; judged at P1-35 (R-E3).
 [[row]]
 metric = "deep_hue"
 box = "water"
+defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "deep_luma"
 box = "water"

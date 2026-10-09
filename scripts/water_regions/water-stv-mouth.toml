@@ -3,9 +3,11 @@
 scene = "water-stv-mouth"
 [box]
 water = [0, 500, 400, 640]
+# P1-27 holds the deep hue within 10° of the albedo view; judged at P1-35 (R-E3).
 [[row]]
 metric = "deep_hue"
 box = "water"
+defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "luma_sd"
 box = "water"

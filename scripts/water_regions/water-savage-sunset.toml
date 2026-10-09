@@ -18,6 +18,7 @@ sky = "sky"
 metric = "deep_hue"
 label = "sunset_hue"
 box = "deep"
+defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "deep_luma"
 box = "deep"

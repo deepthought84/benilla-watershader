@@ -46,6 +46,10 @@ informational: it reports its number with no absolute gate and no verdict agains
 number with no better direction (a bare hue) has no verdict against a baseline either, and only
 the region row's own `max`, `min` or `near` gates it.
 
+`defer = "<why>"` records a row as a known miss: it is measured and judged as any other, but a
+failed gate or a worse baseline verdict prints "DEFER" with the reason and does not count as a
+failure.
+
 `on = "<view>"` measures a row that reads the still on that WATER_VIEW capture instead
 (<scene>@<view>.png), e.g. a hue on the in-scatter view; its `basis` starts "on <view>".
 """
@@ -561,6 +565,29 @@ def band_step(view, box, still=None, unbanded=None, window=None, hard=4.0):
     return {"value": banded / plain, "banded": banded, "unbanded": plain, **out}
 
 
+def chroma_ratio(view, other, box, min_chroma=0.05):
+    """Per-pixel chroma, (max − min)/max of the codes, of one WATER_VIEW capture over another's on
+    water (where the two views differ, view_water, eroded 2 px), over the pixels whose `other`
+    chroma is above `min_chroma`: the median ratio, its 1st and 99th percentiles and the share
+    inside 0.8-1.2. R26's no-neon gate reads the in-scatter view over the albedo view: the lift
+    keeps the hue and the chroma, pass 0.8-1.2."""
+    a, b = crop(view, box).astype(np.float64), crop(other, box).astype(np.float64)
+    m = crop(water_mask(view, other), box)
+
+    def chroma_px(c):
+        mx, mn = c.max(axis=-1), c.min(axis=-1)
+        return np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-9), 0.0)
+
+    ca, cb = chroma_px(a), chroma_px(b)
+    m &= cb > min_chroma
+    if not m.any():
+        return {"value": None, "pixels": 0}
+    r = ca[m] / cb[m]
+    return {"value": float(np.median(r)), "p1": float(np.percentile(r, 1)),
+            "p99": float(np.percentile(r, 99)),
+            "inside": float(((r >= 0.8) & (r <= 1.2)).mean()), "pixels": int(m.sum())}
+
+
 def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=None):
     """Shadowed over lit water in linear luminance (box means; the in-scatter view, which holds
     enc(in_scatter), where given, else the final frame), beside the same ratio on the bank in the
@@ -945,6 +972,12 @@ ROWS: dict[str, Row] = {
         "lower",
         {"max": 1.1},
     ),
+    "chroma_ratio": Row(
+        chroma_ratio,
+        [("view", "view", "in_scatter", True), ("view", "other", "albedo", True)],
+        None,
+        {"min": 0.8, "max": 1.2},
+    ),
     "shade_ratio": Row(
         shade_ratio,
         STILL + [("view", "in_scatter", "in_scatter", False)],
@@ -1102,7 +1135,7 @@ BOX_PARAMS = {"box", "object", "sky", "object_refl", "sky_refl", "water", "bank"
               "water_shade", "water_lit", "bank_shade", "bank_lit", "num", "den"}
 # Region-row keys that are not the function's parameters.
 META = {"metric", "label", "max", "min", "near", "require", "slack", "factor", "lane", "gate",
-        "every", "on"}
+        "every", "on", "defer"}
 
 
 def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
@@ -1248,6 +1281,8 @@ def measure(directory: pathlib.Path, regions_dir: pathlib.Path, scenes: list[str
                 gate = (gate or dict(ROWS[spec["metric"]].gate or {})) | spec.get("require", {})
             res.update(metric=spec["metric"], gate=gate)
             res.update(slack=spec.get("slack"), factor=spec.get("factor"))
+            if "defer" in spec:
+                res["defer"] = spec["defer"]
             res["pass"] = judge(res.get("value"), gate, res)
             rows[label] = res
         results[f"{scene.name}{lane}"] = rows
@@ -1293,14 +1328,19 @@ def report(results: dict, baseline: dict | None) -> int:
             verdict = {True: "PASS", False: "FAIL", None: "-"}[r["pass"]]
             if r.get("gated") is False and not r["gate"]:
                 verdict = "info"
+            deferred = r.get("defer") is not None
+            if deferred and r["pass"] is False:
+                verdict = "DEFER"
             gate = gate_text(r["gate"])
             base = ""
             if baseline is not None:
                 br = baseline.get(scene, {}).get(label, {})
                 ok, tag = versus(r, br)
+                if deferred and ok is False:
+                    tag = f"DEFER {tag}"
                 base = f"  base {fmt(br.get('value'))} {tag}"
-                failures += ok is False
-            failures += r["pass"] is False
+                failures += ok is False and not deferred
+            failures += r["pass"] is False and not deferred
             why = r.get("error") or (f"needs {', '.join(r['missing'])}" if r.get("missing") else "")
             value = fmt(r.get("value"))
             print(f"  {label:22s} {value:>10s}  {verdict:4s} {gate:14s}{base}  {extra}{why}")
