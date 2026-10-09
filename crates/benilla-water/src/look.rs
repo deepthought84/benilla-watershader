@@ -144,20 +144,27 @@ fn grazing_limit() -> f32 {
 }
 
 /// The body's knobs at their defaults, unless `$WOW_WATER_DEEP_CEILING=<0-1>` sets where the deep
-/// stop sits on the zone's line (1 the swatch's last row) or `$WOW_WATER_BAND_PUSH=<0-1>` how far
-/// the three bands pull the ramp (0 unbanded); each read once, to measure it.
+/// stop sits on the zone's line (1 the swatch's last row), `$WOW_WATER_BAND_PUSH=<0-1>` how far
+/// the three bands pull the ramp (0 unbanded) or `$WOW_WATER_TURB=<0-4>` the turbidity's scale on
+/// both kinds; each read once, to measure it.
 fn body_look() -> BodyLook {
-    static FORCED: OnceLock<(Option<f32>, Option<f32>)> = OnceLock::new();
-    let (ceiling, push) = *FORCED.get_or_init(|| {
+    static FORCED: OnceLock<(Option<f32>, Option<f32>, Option<f32>)> = OnceLock::new();
+    let (ceiling, push, turb) = *FORCED.get_or_init(|| {
+        let turb = std::env::var("WOW_WATER_TURB")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| (0.0..=4.0).contains(v));
         (
             unit_lever("WOW_WATER_DEEP_CEILING"),
             unit_lever("WOW_WATER_BAND_PUSH"),
+            turb,
         )
     });
     let look = BodyLook::default();
     BodyLook {
         deep_ceiling: ceiling.unwrap_or(look.deep_ceiling),
         band_push: push.unwrap_or(look.band_push),
+        turb_scale: turb.map_or(look.turb_scale, |t| look.turb_scale.map(|s| s * t)),
         ..look
     }
 }

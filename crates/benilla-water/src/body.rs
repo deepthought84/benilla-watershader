@@ -205,15 +205,18 @@ fn absorption(d: [f32; 3], k_phys: f32) -> [f32; 3] {
     anchored(geometric_mix(swatch_shape(d), SIGMA_CLEAR_LAKE, k_phys))
 }
 
-/// The clear lake's absorption luminance, the turbidity's hue reference: 0.1113 per yard.
-pub fn sbar_clear() -> f32 {
-    luma(anchored(SIGMA_CLEAR_LAKE))
+/// How yellow water whose absorption is `sigma` is: its blue absorption over its green, which
+/// dissolved and suspended matter raise and a blue row lowers. Scale-free, so the anchor on pure
+/// water does not move it.
+pub fn yellowness(sigma: [f32; 3]) -> f32 {
+    sigma[2] / sigma[1].max(1e-6)
 }
 
 /// A kind's optics from its swatch (`WowLighting::water_colors_noon`): the absorption from the
 /// deepest row the reference draws, and the turbidity from the clear lake's, scaled by how much
-/// less transparent the shallow alpha is than its kind's modal one and by how much more the
-/// swatch's hue absorbs than the clear lake.
+/// less transparent the shallow alpha is than its kind's modal one and by how much yellower the
+/// swatch's absorption is than the clear lake's: a blue row comes out clearer than the clear lake,
+/// a green, brown or yellow one murkier.
 pub fn kind_optics(
     shallow: [f32; 3],
     deep: [f32; 3],
@@ -225,7 +228,7 @@ pub fn kind_optics(
     let kind = usize::from(ocean);
     let f_alpha = (1.0 - shallow_alpha.clamp(0.0, 254.0 / 255.0)).ln()
         / (1.0 - MODAL_SHALLOW_ALPHA[kind]).ln();
-    let f_hue = luma(sigma_abs) / sbar_clear();
+    let f_hue = yellowness(sigma_abs) / yellowness(SIGMA_CLEAR_LAKE);
     KindOptics {
         sigma_abs,
         sigma_turb: TURB_REF * look.turb_scale[kind] * f_alpha * f_hue,
@@ -494,7 +497,7 @@ mod tests {
         let look = BodyLook::default();
         for (ocean, alpha) in [(false, 0.5), (true, 0.75)] {
             let o = kind_optics([0.3, 0.4, 0.4], [0.1, 0.2, 0.25], alpha, ocean, &look);
-            let want = TURB_REF * luma(o.sigma_abs) / sbar_clear();
+            let want = TURB_REF * yellowness(o.sigma_abs) / yellowness(SIGMA_CLEAR_LAKE);
             assert!((o.sigma_turb / want - 1.0).abs() < 1e-5, "{o:?}");
         }
         // A 0.85 river is murkier: ln(0.15)/ln(0.5) = 2.74.
@@ -503,10 +506,33 @@ mod tests {
         assert!((murky.sigma_turb / modal.sigma_turb - 2.737).abs() < 1e-3);
     }
 
-    /// The clear lake's absorption luminance, the turbidity's hue reference.
+    /// The clear lake's blue over green absorption, the turbidity's hue reference, and a black row
+    /// (the clear lake's shape) at the modal alpha has the reference turbidity.
     #[test]
-    fn the_clear_lakes_absorption_luminance_is_pinned() {
-        assert!((sbar_clear() - 0.1113).abs() < 1e-3, "{}", sbar_clear());
+    fn the_clear_lake_has_the_reference_turbidity() {
+        assert!((yellowness(SIGMA_CLEAR_LAKE) - 0.7645).abs() < 1e-3);
+        assert!((yellowness(anchored(SIGMA_CLEAR_LAKE)) - 0.7645).abs() < 1e-3);
+        let o = kind_optics([0.2, 0.3, 0.3], [0.0; 3], 0.5, false, &BodyLook::default());
+        assert!((o.sigma_turb / TURB_REF - 1.0).abs() < 1e-4, "{o:?}");
+    }
+
+    /// A blue deep row is clearer than the clear lake, however dull its blue; a teal one about as
+    /// clear; a green or yellow-brown one murkier, the yellower the murkier (Loch Modan's, Elwynn's,
+    /// Felwood's and the Swamp of Sorrows' noon rows).
+    #[test]
+    fn blue_water_is_clear_and_yellow_water_murky() {
+        let look = BodyLook::default();
+        let turb = |s: [f32; 3], d: [f32; 3]| {
+            let b = |c: [f32; 3]| c.map(|x| x / 255.0);
+            kind_optics(b(s), b(d), 0.5, false, &look).sigma_turb / TURB_REF
+        };
+        let blue = turb([95.0, 80.0, 56.0], [64.0, 78.0, 110.0]);
+        let teal = turb([79.0, 93.0, 20.0], [51.0, 82.0, 85.0]);
+        let green = turb([94.0, 91.0, 25.0], [96.0, 101.0, 50.0]);
+        let yellow = turb([160.0, 125.0, 18.0], [84.0, 68.0, 18.0]);
+        assert!(blue < 0.8, "{blue}");
+        assert!((0.9..1.4).contains(&teal), "{teal}");
+        assert!(green > 2.0 && yellow > green, "{green} {yellow}");
     }
 
     /// The body's light has the terrain's open-sky luminance, whatever its chroma.
