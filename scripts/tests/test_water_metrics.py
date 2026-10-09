@@ -784,6 +784,51 @@ min = 120
             res = wm.measure(d, d, ["wg-hue"])["wg-hue"]
             self.assertFalse(res["body_hue"]["pass"])
 
+    def test_within_holds_a_row_between_two_shares_of_its_baseline(self):
+        row = wm.ROWS["refl_contrast"]
+        self.assertTrue(wm.against(0.15, 0.2391, row))  # lower is better: any softening passes
+        for value, inside in ((0.1434, False), (0.1435, True), (0.2391, True), (0.2392, False)):
+            self.assertEqual(wm.against(value, 0.2391, row, within=[0.6, 1.0]), inside, value)
+        self.assertTrue(wm.against(-1.5, -2.0, row, within=[0.6, 1.0]))
+        self.assertTrue(wm.against(1.0, 1.0, wm.ROWS["glint_peak"], within=[0.9, 1.1]))
+        # A row's numpy number gets a plain verdict, which the exit status counts.
+        self.assertIs(wm.against(np.float32(0.5), 0.2391, row), False)
+        self.assertIs(wm.against(np.float32(0.5), 0.2391, row, within=[0.6, 1.0]), False)
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-within.toml").write_text(
+                """[box]
+object = [0, 0, 10, 10]
+sky = [10, 0, 20, 10]
+object_refl = [0, 20, 10, 30]
+sky_refl = [10, 20, 20, 30]
+[[row]]
+metric = "refl_contrast"
+object = "object"
+sky = "sky"
+object_refl = "object_refl"
+sky_refl = "sky_refl"
+within = [0.6, 1.0]
+"""
+            )
+            img = flat([100, 100, 100], w=20, h=30)
+            img[0:10, 0:10], img[0:10, 10:20] = 50, 150  # direct contrast 0.5
+            img[20:30, 0:10], img[20:30, 10:20] = 80, 120  # reflected 0.2: ratio 0.4
+            save(img, d / "wg-within.png")
+            out = d / "out.json"
+            with contextlib.redirect_stdout(io.StringIO()):
+                wm.main([str(d), "--regions", str(d), "--json", str(out)])
+            base = json.loads(out.read_text())
+            self.assertEqual(base["wg-within"]["refl_contrast"]["within"], [0.6, 1.0])
+            for refl, rc, tag in (((60, 140), 1, "0.6-1x OUT"), ((85, 115), 0, "0.6-1x ok"),
+                                  ((90, 110), 1, "0.6-1x OUT")):  # 1.0, 0.75, 0.5 x baseline
+                img[20:30, 0:10], img[20:30, 10:20] = refl
+                save(img, d / "wg-within.png")
+                with contextlib.redirect_stdout(io.StringIO()) as printed:
+                    got = wm.main([str(d), "--regions", str(d), "--baseline", str(out)])
+                self.assertEqual(got, rc, refl)
+                self.assertIn(tag, printed.getvalue())
+
     def test_a_deferred_row_reports_its_miss_without_failing(self):
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)

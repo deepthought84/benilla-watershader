@@ -12,12 +12,14 @@ bank = [320, 435, 880, 450]          # the island's grass above it
 shore_wide = [300, 440, 900, 480]
 water = [200, 480, 1400, 650]
 open_water = [1000, 560, 1500, 700]
+# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out.
 [[row]]
 metric = "refl_contrast"
 object = "crown"
 sky = "sky"
 object_refl = "crown_refl"
 sky_refl = "sky_refl"
+within = [0.6, 1.0]
 [[row]]
 metric = "trunk_wander"
 box = "trunk_refl"

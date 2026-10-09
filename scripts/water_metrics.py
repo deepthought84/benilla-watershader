@@ -41,10 +41,12 @@ A row passes against an absolute gate (the catalogue's, or the region row's `max
 `near = [target, tolerance]`; `require = { <number> = { min = v } }` gates a supporting number the
 row reports the same way) and, with --baseline, against the same row of the baseline run in the
 row's better direction (captures are hermetic, so no tolerance unless the row names one: `slack`
-in value units, `factor` as a fraction of the baseline). A region row with `gate = false` is
-informational: it reports its number with no absolute gate and no verdict against a baseline. A
-number with no better direction (a bare hue) has no verdict against a baseline either, and only
-the region row's own `max`, `min` or `near` gates it.
+in value units, `factor` as a fraction of the baseline), or, where the region row gives
+`within = [lo, hi]`, inside lo-hi times the baseline whatever the direction (R-E4's refl_contrast
+in 0.6-1.0x: softer than the baseline's mirror, never washed out). A region row with
+`gate = false` is informational: it reports its number with no absolute gate and no verdict
+against a baseline. A number with no better direction (a bare hue) has no verdict against a
+baseline either, and only the region row's own `max`, `min` or `near` gates it.
 
 `defer = "<why>"` records a row as a known miss: it is measured and judged as any other, but a
 failed gate or a worse baseline verdict prints "DEFER" with the reason and does not count as a
@@ -1065,16 +1067,22 @@ def gate_text(gate: dict) -> str:
     )
 
 
-def against(value, base, row: Row, slack=None, factor=None) -> bool | None:
+def against(value, base, row: Row, slack=None, factor=None, within=None) -> bool | None:
     """The row against its baseline value in its better direction: no tolerance unless `slack`
-    (absolute) or `factor` (share of the baseline) says otherwise."""
-    if value is None or base is None or row.better is None:
+    (absolute) or `factor` (share of the baseline) says otherwise. With `within` [lo, hi] the value
+    lies between lo and hi times the baseline instead, either side of it."""
+    if value is None or base is None:
+        return None
+    if within is not None:
+        lo, hi = sorted((within[0] * base, within[1] * base))
+        return bool(lo <= value <= hi)
+    if row.better is None:
         return None
     slack = row.slack if slack is None else slack
     factor = row.factor if factor is None else factor
     if row.better == "lower":
-        return value <= (base / factor if factor else base + slack)
-    return value >= (base * factor if factor else base - slack)
+        return bool(value <= (base / factor if factor else base + slack))
+    return bool(value >= (base * factor if factor else base - slack))
 
 
 # ---- scenes: files, region files, running the rows ----------------------------------------------
@@ -1135,7 +1143,7 @@ BOX_PARAMS = {"box", "object", "sky", "object_refl", "sky_refl", "water", "bank"
               "water_shade", "water_lit", "bank_shade", "bank_lit", "num", "den"}
 # Region-row keys that are not the function's parameters.
 META = {"metric", "label", "max", "min", "near", "require", "slack", "factor", "lane", "gate",
-        "every", "on", "defer"}
+        "every", "on", "defer", "within"}
 
 
 def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
@@ -1281,6 +1289,8 @@ def measure(directory: pathlib.Path, regions_dir: pathlib.Path, scenes: list[str
                 gate = (gate or dict(ROWS[spec["metric"]].gate or {})) | spec.get("require", {})
             res.update(metric=spec["metric"], gate=gate)
             res.update(slack=spec.get("slack"), factor=spec.get("factor"))
+            if "within" in spec:
+                res["within"] = list(spec["within"])
             if "defer" in spec:
                 res["defer"] = spec["defer"]
             res["pass"] = judge(res.get("value"), gate, res)
@@ -1297,7 +1307,8 @@ def fmt(v) -> str:
     return str(v)
 
 
-SHOWN = {"value", "metric", "gate", "pass", "slack", "factor", "gated", "missing", "error"}
+SHOWN = {"value", "metric", "gate", "pass", "slack", "factor", "gated", "missing", "error",
+         "within"}
 
 
 def versus(r: dict, br: dict) -> tuple[bool | None, str]:
@@ -1311,7 +1322,10 @@ def versus(r: dict, br: dict) -> tuple[bool | None, str]:
     if r.get("basis") != br.get("basis"):
         return False, f"n/c (basis {br.get('basis')} -> {r.get('basis')})"
     ok = against(r.get("value"), br.get("value"), ROWS[r["metric"]], r.get("slack"),
-                 r.get("factor"))
+                 r.get("factor"), r.get("within"))
+    if r.get("within") is not None:
+        lo, hi = r["within"]
+        return ok, f"{fmt(lo)}-{fmt(hi)}x " + {True: "ok", False: "OUT", None: "-"}[ok]
     return ok, {True: "ok", False: "WORSE", None: "-"}[ok]
 
 

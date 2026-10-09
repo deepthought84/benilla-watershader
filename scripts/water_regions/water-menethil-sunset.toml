@@ -10,12 +10,14 @@ deck_refl = [410, 525, 450, 540]     # both mirrored about the pier's waterline
 sky_refl = [410, 553, 450, 568]
 glint = [450, 500, 1100, 850]
 water = [0, 750, 400, 900]
+# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out.
 [[row]]
 metric = "refl_contrast"
 object = "deck"
 sky = "sky"
 object_refl = "deck_refl"
 sky_refl = "sky_refl"
+within = [0.6, 1.0]
 [[row]]
 metric = "glint_peak"
 box = "glint"

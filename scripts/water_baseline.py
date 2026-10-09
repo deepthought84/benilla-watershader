@@ -368,8 +368,8 @@ def selfcheck(a: pathlib.Path, b: pathlib.Path) -> int:
 
 def changes(old: dict, new: dict) -> list[tuple[str, str, str]]:
     """(scene lane, label, what changed) for every row whose value, metric, basis, gate,
-    informational standing or deferral differs between two tables, or that only one of them
-    holds."""
+    baseline share (`within`), informational standing or deferral differs between two tables, or
+    that only one of them holds."""
     out = []
     for scene in sorted(set(old) | set(new)):
         o, n = old.get(scene, {}), new.get(scene, {})
@@ -393,6 +393,9 @@ def changes(old: dict, new: dict) -> list[tuple[str, str, str]]:
                 what.append(f"gate {old_gate} -> {wm.gate_text(b.get('gate') or {}) or 'none'}")
             if (a.get("gated") is False) != (b.get("gated") is False):
                 what.append("informational" if b.get("gated") is False else "gated")
+            if a.get("within") != b.get("within"):
+                w = b.get("within")
+                what.append(f"within {fmt(w[0])}-{fmt(w[1])}x" if w else "no longer within")
             if a.get("defer") != b.get("defer"):
                 what.append(f"deferred ({b['defer']})" if b.get("defer") else "no longer deferred")
             if what:

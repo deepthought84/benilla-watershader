@@ -9,12 +9,14 @@ hut_refl = [1145, 503, 1180, 523]    # the roof's reflection, a faint warm patch
 grass_refl = [1080, 503, 1130, 523]  # the water beside it, the same rows
 water = [100, 480, 1500, 680]
 near_bank = [400, 700, 1600, 800]
+# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out.
 [[row]]
 metric = "refl_contrast"
 object = "hut"
 sky = "grass"
 object_refl = "hut_refl"
 sky_refl = "grass_refl"
+within = [0.6, 1.0]
 [[row]]
 metric = "luma_sd"
 box = "water"

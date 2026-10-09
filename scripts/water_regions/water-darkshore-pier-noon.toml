@@ -9,12 +9,14 @@ foot_refl = [630, 590, 710, 640]     # its reflection under the waterline
 sky_refl = [1100, 590, 1300, 640]    # open water at the same depth
 foot_waterline = [600, 555, 740, 595]
 water = [0, 650, 1600, 900]
+# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out.
 [[row]]
 metric = "refl_contrast"
 object = "foot"
 sky = "sky"
 object_refl = "foot_refl"
 sky_refl = "sky_refl"
+within = [0.6, 1.0]
 [[row]]
 metric = "contact_cov"
 label = "foot_contact"
