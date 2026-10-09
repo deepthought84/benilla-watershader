@@ -724,14 +724,9 @@ const MOON_SPEC_WEIGHT: f32 = 0.55;
 const MOON_SPEC_POWER: f32 = 34.0;
 const MOON_SPEC_COLOR: vec3<f32> = vec3<f32>(0.62, 0.70, 0.86);
 
-/// How far along the swatch's shallow→deep ramp the body is allowed to travel.
-///
-/// Under 1 on purpose. The 1.12 water palettes were authored for a surface with no reflection and
-/// no glitter on it, and several zones' deep row is nearly black — Stranglethorn's is why the
-/// report named Booty Bay. Multiplied by `lit` and then fogged, that row reads as tar rather than
-/// as deep water. Capping the ramp keeps the lift inside the ZONE'S OWN pair of colours: deep water
-/// is still the deep end of Booty Bay's green, one step back up its own ramp, and never a wash of
-/// grey mixed in from outside the palette.
+/// How far along the swatch's shallow→deep ramp the gamma body travels: the composite's body takes
+/// the same cap from the deep-ceiling lane `look.body.spare.y` (`BodyLook::deep_ceiling`), which
+/// says why it is under 1.
 const BODY_DEPTH_MAX: f32 = 0.72;
 
 /// How hard the ripples are carved into the water's own body, as a ± fraction of its colour.
@@ -2425,7 +2420,7 @@ struct BodyIn {
     unlit: bool,
     // ADT water, which the terrain's shadow covers.
     adt: bool,
-    // The terrain's lit for a flat surface (gamma), the body's light until the sky and sun light it.
+    // The illuminant (gamma): the terrain's light law, ambient plus sun diffuse, on the mesh normal.
     lit_interim: vec3<f32>,
 };
 
@@ -2523,8 +2518,8 @@ fn water_body_optics(
 }
 
 /// The body's in-scatter: the albedo under the illuminant, the lift on it in gamma, the ripple's
-/// shading. The illuminant is the terrain's lit until the sky and sun light the body; `vis` is the
-/// screen-space visibility (1 until then), `wave_tilt` the facet's tilt along the sun's bearing.
+/// shading. The illuminant is `bi.lit_interim` (1 on an unlit interior); `vis` is the screen-space
+/// visibility, which this light does not read, `wave_tilt` the facet's tilt along the sun's bearing.
 fn water_body_light(
     o: BodyOptics,
     world_pos: vec3<f32>,
@@ -2697,8 +2692,8 @@ fn stylised_water(
     // shore. It is a look choice, not a depth model: the world's own numbers still decide, they are
     // just read on a curve that treats shallow water as water.
     //
-    // The ramp is also CAPPED short of the deep row — see [`BODY_DEPTH_MAX`], which is the "too
-    // dark, look at Booty Bay" report.
+    // The ramp is also CAPPED short of the deep row by [`BODY_DEPTH_MAX`]; `BodyLook::deep_ceiling`
+    // says why.
     // The wake rides the depth ramp with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
     // **How far along the swatch the body has travelled**, and there are two answers.
     //

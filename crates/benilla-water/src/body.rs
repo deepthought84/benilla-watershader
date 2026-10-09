@@ -73,8 +73,14 @@ pub struct BodyLook {
     pub refract_max_frac: f32,
     /// Whether the probe's baked fog is re-applied at the mirror's distance.
     pub probe_refog: bool,
-    /// Where the deep stop sits between the swatch's first and last rows: `liquid.wgsl`'s
-    /// `BODY_DEPTH_MAX`.
+    /// Where the deep stop sits on the zone's line from swatch row 0 to row 63 (the mid stop at
+    /// half of it); the gamma body's `BODY_DEPTH_MAX` in `liquid.wgsl` is the same cap.
+    ///
+    /// Under 1 on purpose. The 1.12 water palettes were authored for a surface with no reflection
+    /// and no glitter on it, and several zones' deep row is nearly black (Stranglethorn's, at Booty
+    /// Bay). Lit and fogged, that row reads as tar rather than as deep water. Capping the ramp keeps
+    /// deep water inside the zone's own pair of colours, one step back up its own ramp, and never a
+    /// wash of grey from outside the palette.
     pub deep_ceiling: f32,
 }
 
@@ -693,11 +699,12 @@ mod tests {
         }
     }
 
-    /// The shader's lift, stops and transport are this module's: `body_lift` line for line, the
-    /// stops on the zone's line at the ceiling and half of it (rows 0 and 63, no ocean tail, as
-    /// [`deep_stop`]), and the bed's transmittance and the in-scatter's weight from one turbidity.
+    /// The shader keeps these lines of the body: `body_lift`'s return as [`body_lift`] has it, the
+    /// stops read from rows 0 and 63 (no ocean tail, as [`deep_stop`]) at the ceiling lane and half
+    /// of it, and `t_bed` and `w_in` from one `t_turb`. A text pin: the path length, `x`, the bands,
+    /// the ramp and the stops' argument order are not checked here.
     #[test]
-    fn the_shaders_body_is_the_mirrors() {
+    fn the_shader_keeps_the_body_lift_stop_and_transport_lines() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
         for line in [
             "return lift * a_g / max(max(a_g.r, max(a_g.g, a_g.b)), max(lift, 1e-4));",
