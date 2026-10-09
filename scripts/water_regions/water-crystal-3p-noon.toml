@@ -3,13 +3,15 @@
 # static burst.
 scene = "water-crystal-3p-noon"
 [box]
-hut = [1150, 335, 1205, 360]         # a hut's roof on the far strip; its legs meet the water at y 430
-grass = [1000, 250, 1100, 280]       # the grass behind it
-hut_refl = [1145, 503, 1180, 523]    # the roof's reflection, a faint warm patch below the legs
-grass_refl = [1080, 503, 1130, 523]  # the water beside it, the same rows
+hut = [1265, 265, 1305, 292]         # the right-hand hut's roof, on the island's far side
+grass = [1330, 265, 1370, 292]       # the grass right of it
+hut_refl = [1242, 518, 1282, 542]    # the roof's reflection, a light arc below the island
+grass_refl = [1292, 518, 1332, 542]  # the water right of it, the same rows
 water = [100, 480, 1500, 680]
 near_bank = [400, 700, 1600, 800]
-# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out.
+# P1-30's objective (R-E4): softer than the baseline's mirror, never washed out. The reflection
+# boxes sit ~22 px left of the roof's: the world's verticals converge 11.5° down. Over a 2 s
+# static burst the row moves with wave phase by sd 3% of its value (min to max about 12%).
 [[row]]
 metric = "refl_contrast"
 object = "hut"
