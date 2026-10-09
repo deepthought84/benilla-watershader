@@ -42,7 +42,12 @@ A row passes against an absolute gate (the catalogue's, or the region row's `max
 row reports the same way) and, with --baseline, against the same row of the baseline run in the
 row's better direction (captures are hermetic, so no tolerance unless the row names one: `slack`
 in value units, `factor` as a fraction of the baseline). A region row with `gate = false` is
-informational: it reports its number with no absolute gate and no verdict against a baseline.
+informational: it reports its number with no absolute gate and no verdict against a baseline. A
+number with no better direction (a bare hue) has no verdict against a baseline either, and only
+the region row's own `max`, `min` or `near` gates it.
+
+`on = "<view>"` measures a row that reads the still on that WATER_VIEW capture instead
+(<scene>@<view>.png), e.g. a hue on the in-scatter view; its `basis` starts "on <view>".
 """
 
 from __future__ import annotations
@@ -1097,7 +1102,7 @@ BOX_PARAMS = {"box", "object", "sky", "object_refl", "sky_refl", "water", "bank"
               "water_shade", "water_lit", "bank_shade", "bank_lit", "num", "den"}
 # Region-row keys that are not the function's parameters.
 META = {"metric", "label", "max", "min", "near", "require", "slack", "factor", "lane", "gate",
-        "every"}
+        "every", "on"}
 
 
 def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
@@ -1106,6 +1111,8 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
     name = spec["metric"]
     row = ROWS[name]
     base = "-ref" if spec.get("lane") == "ref" else lane
+    on = spec.get("on")
+    still = f"{base}@{on}" if on else base
     params = {k: v for k, v in spec.items() if k not in META}
     def named(v):
         if not isinstance(v, str):
@@ -1127,11 +1134,11 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
             arg, required = need[1], need[2] if len(need) > 2 else True
             if not required and params.pop(arg, None) is False:
                 continue
-            img = scene.image(base)
+            img = scene.image(still)
             if img is not None:
                 args[arg] = img
             elif required:
-                missing.append(f"{scene.name}{base}.png")
+                missing.append(f"{scene.name}{still}.png")
         elif kind == "ref":
             args["ref"] = scene.image("-ref")
             if args["ref"] is None:
@@ -1187,7 +1194,10 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
                 missing.append(f"{scene.name}{base}~{var}.png")
     if missing:
         return {"value": None, "missing": missing}
-    return row.fn(**args, **params)
+    res = row.fn(**args, **params)
+    if on:
+        res["basis"] = f"on {on}; {res['basis']}" if res.get("basis") else f"on {on}"
+    return res
 
 
 def load_regions(path: pathlib.Path) -> dict:
@@ -1229,9 +1239,11 @@ def measure(directory: pathlib.Path, regions_dir: pathlib.Path, scenes: list[str
             except (KeyError, ValueError, TypeError) as e:
                 res = {"value": None, "error": str(e)}
             gate = {k: spec[k] for k in ("max", "min", "near") if k in spec}
-            if spec.get("gate") is False or res.get("gated") is False:
+            if spec.get("gate") is False:
                 gate = {}
                 res["gated"] = False
+            elif res.get("gated") is False:
+                gate = gate | spec.get("require", {})
             else:
                 gate = (gate or dict(ROWS[spec["metric"]].gate or {})) | spec.get("require", {})
             res.update(metric=spec["metric"], gate=gate)
@@ -1279,7 +1291,7 @@ def report(results: dict, baseline: dict | None) -> int:
                 f"{k} {fmt(v)}" for k, v in r.items() if k not in SHOWN and v is not None
             )
             verdict = {True: "PASS", False: "FAIL", None: "-"}[r["pass"]]
-            if r.get("gated") is False:
+            if r.get("gated") is False and not r["gate"]:
                 verdict = "info"
             gate = gate_text(r["gate"])
             base = ""

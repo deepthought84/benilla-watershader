@@ -299,7 +299,7 @@ def markdown(directory: pathlib.Path, merged: dict, perf: dict) -> str:
             why = r.get("error") or ("needs " + ", ".join(r["missing"]) if r.get("missing") else "")
             gate = wm.gate_text(r.get("gate") or {})
             verdict = {True: "pass", False: "FAIL", None: "-"}[r.get("pass")]
-            if r.get("gated") is False:
+            if r.get("gated") is False and not r.get("gate"):
                 verdict = "info"
             burst = " (burst)" if r.get("source") == "bursts" else ""
             md.append(f"| {label} | {r.get('metric')} | {fmt(r.get('value'))} | {gate} {verdict} | "

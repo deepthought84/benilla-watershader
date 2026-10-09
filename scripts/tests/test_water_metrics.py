@@ -724,6 +724,49 @@ box = [0, 0, 40, 900]
             self.assertEqual(res["ratio"]["gate"], {"max": 1.1})
             self.assertFalse(res["ratio"]["pass"])
 
+    def test_a_row_measured_on_a_view_and_a_bare_hue_judged_by_its_own_gate(self):
+        # The still's water is warm (a reflection); the in-scatter view holds the body's hue.
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-hue.toml").write_text(
+                """[box]
+water = [0, 0, 100, 100]
+[[row]]
+metric = "deep_hue"
+label = "hue"
+box = "water"
+[[row]]
+metric = "deep_hue"
+label = "body_hue"
+box = "water"
+on = "in_scatter"
+albedo = false
+min = 120
+"""
+            )
+            save(flat(hsv_patch(60, 0.5, 0.5), w=100, h=100), d / "wg-hue.png")
+            res = wm.measure(d, d, ["wg-hue"])["wg-hue"]
+            self.assertIn("wg-hue@in_scatter.png", res["body_hue"]["missing"])
+            save(flat(hsv_patch(130, 0.5, 0.5), w=100, h=100), d / "wg-hue@in_scatter.png")
+            out = d / "out.json"
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                wm.main([str(d), "wg-hue", "--regions", str(d), "--json", str(out)])
+            res = json.loads(out.read_text())["wg-hue"]
+            self.assertAlmostEqual(res["hue"]["value"], 60.0, delta=1.0)
+            self.assertEqual((res["hue"]["gated"], res["hue"]["pass"]), (False, None))
+            self.assertAlmostEqual(res["body_hue"]["value"], 130.0, delta=1.0)
+            self.assertEqual(res["body_hue"]["basis"], "on in_scatter; hue; mask none")
+            self.assertEqual(res["body_hue"]["gate"], {"min": 120})
+            self.assertTrue(res["body_hue"]["pass"])
+            self.assertIn("PASS min 120", printed.getvalue())
+            # A bare hue has no better direction: against any baseline it gets no verdict.
+            base = json.loads(out.read_text())
+            base["wg-hue"]["body_hue"]["value"] = 170.0
+            self.assertEqual(wm.versus(res["body_hue"], base["wg-hue"]["body_hue"]), (None, "-"))
+            save(flat(hsv_patch(100, 0.5, 0.5), w=100, h=100), d / "wg-hue@in_scatter.png")
+            res = wm.measure(d, d, ["wg-hue"])["wg-hue"]
+            self.assertFalse(res["body_hue"]["pass"])
+
     def test_contact_rows_read_the_foam_views_contact_coverage(self):
         # The contact view's r is the distance to the contact (1 at it): full everywhere, while
         # the foam view's g, c_contact, stands in 30 of 100 columns.
