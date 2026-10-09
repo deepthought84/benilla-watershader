@@ -103,7 +103,8 @@ impl Default for WaterDebug {
 /// off. A view paints one quantity over the water; `flat` is a mode instead, the whole look on the
 /// unrippled normal, and `composite_identity` and `discard` change the linear composite's layer.
 /// Those two and the body's `transmittance`, `in_scatter` and `albedo` are drawn only with
-/// `$WOW_WATER_COMPOSITE=1`; the gamma look draws as usual under them.
+/// `$WOW_WATER_COMPOSITE=1`; the gamma look draws as usual under them. `fresnel` shows the gamma
+/// look's reflection weight, or with the composite its reflectance.
 pub const WATER_VIEWS: [&str; 22] = [
     "off",
     "mirror1",

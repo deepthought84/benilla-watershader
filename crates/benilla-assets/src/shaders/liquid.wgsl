@@ -2384,6 +2384,44 @@ fn water_output(
 #endif
 }
 
+// ---- the reflectance (FND-2) --------------------------------------------------------------------
+//
+// Schlick on the filtered normal, lowered by the share of a rough lobe the split-sum env-BRDF says
+// still reflects, and floored at what water reflects head-on. `liquid_composite` mirrors it.
+
+/// Water's reflectance head-on: `((n − 1)/(n + 1))²` for n = 1.333 is 0.0204.
+const F0_WATER: f32 = 0.02;
+
+/// Karis' analytic fit of the split-sum environment BRDF ("Physically Based Shading on Mobile",
+/// 2014) at reflectance `f0`, cosine `n_dot_v` and perceptual roughness `rough`.
+fn env_brdf_approx(f0: f32, n_dot_v: f32, rough: f32) -> f32 {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = rough * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+    return f0 * ab.x + ab.y;
+}
+
+/// Where the fit's `min(r.x², exp2(−9.28μ))` changes arm for GGX `alpha`: `−log2((1 − √α)²)/9.28`
+/// (0.0829 at the calm α0, 0.1208 at the fully unresolved surface's α).
+fn fresnel_kink(alpha: f32) -> f32 {
+    let rough = sqrt(clamp(alpha, 0.0, 1.0));
+    return clamp(-log2(max((1.0 - rough) * (1.0 - rough), 1e-6)) / 9.28, 0.0, 1.0);
+}
+
+/// The reflectance of water with GGX roughness `alpha` at cosine `n_dot_v`: Schlick times the fit's
+/// ratio of the rough lobe to the calm one, which is exact Schlick on a calm surface. Below the
+/// kink the ratio falls toward grazing, a dim band under the horizon, so the cosine is held there:
+/// the result never rises away from grazing, and peaks at 0.504 at α0, 0.365 at the unresolved α.
+fn water_fresnel(n_dot_v: f32, alpha: f32) -> f32 {
+    let rough = sqrt(clamp(alpha, 0.0, 1.0));
+    let mu = clamp(max(n_dot_v, fresnel_kink(alpha)), 1e-4, 1.0);
+    let schlick = F0_WATER + (1.0 - F0_WATER) * pow(1.0 - mu, 5.0);
+    let k = env_brdf_approx(F0_WATER, mu, rough) / env_brdf_approx(F0_WATER, mu, 0.0);
+    return max(saturate(schlick * k), F0_WATER);
+}
+
 // ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
 //
 // The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
@@ -2757,6 +2795,11 @@ fn stylised_water(
     // bright sky still painted over it, the body was robbed to pay for it, and a river read as flat
     // while a coast, where the tier is looking at the sky anyway, read as correct.
     let fres = mix(0.02, 0.45, fresnel);
+#ifdef WATER_COMPOSITE
+    // The linear composite's share: [`water_fresnel`] on the filtered normal at the surface's
+    // roughness, under the grazing limit `look.composite.x` (1 for none).
+    let f_surf = min(water_fresnel(dot(n, to_view), surf.alpha), water_reflect.look.composite.x);
+#endif
     let layered = water_reflect.flags.w > 0.5;
     var rgb = mix(body, sky_g, fres);
 
@@ -3017,7 +3060,11 @@ fn stylised_water(
     let w_floor = (1.0 - w_p) * (1.0 - w_m) * (1.0 - w_s);
     var occ = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
     var occ_marched = 0.0;
+#ifdef WATER_COMPOSITE
+    var floor_share = w_floor * f_surf;
+#else
     var floor_share = w_floor * fres;
+#endif
 #ifdef WATER_VIEW
     // The occlusion view shows what the floor gets wherever a march may run, the tiers over it or not.
     if (water_view_id() == WV_FLOOR_OCC) {
@@ -3291,7 +3338,11 @@ fn stylised_water(
             let column = max(vec3<f32>(sb.gap_z, sb.vertical, sb.path), vec3<f32>(0.0)) / 8.0;
             v = select(vec3<f32>(0.0), column, sb.known);
         } else if (view_id == WV_FRESNEL) {
+#ifdef WATER_COMPOSITE
+            v = vec3<f32>(f_surf);
+#else
             v = vec3<f32>(fres);
+#endif
         } else if (view_id == WV_ROUGHNESS || view_id == WV_ROUGHNESS_ANISO) {
             // α between the calm surface (0) and the fully unresolved one (1).
             let a0 = water_reflect.look.surf.x;
@@ -3329,11 +3380,11 @@ fn stylised_water(
 #ifdef WATER_COMPOSITE
     // ---- the composite, in linear light ---------------------------------------------------------
     //
-    // The gamma look's terms as one premultiplied layer: the reflection weight with the probe's
-    // lift, the tiers' linear chain, the glints in linear, the body's in-scatter and the bed's
+    // The gamma look's terms as one premultiplied layer: the reflectance with the probe's lift,
+    // the tiers' linear chain, the glints in linear, the body's in-scatter and the bed's
     // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
     let probe_boost = max(water_reflect.probe_box_max.x, 0.0);
-    let f_w = saturate(mix(fres, min(fres * probe_boost, PROBE_REFLECT_CEIL), probe_share));
+    let f_w = saturate(mix(f_surf, min(f_surf * probe_boost, PROBE_REFLECT_CEIL), probe_share));
     // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
     // so the peak over black is the gamma look's; the moon's weight is raised likewise.
     let gw = water_reflect.look.composite.y;

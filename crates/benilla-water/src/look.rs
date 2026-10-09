@@ -37,6 +37,9 @@ const FEATURE_FADE_PX: (f32, f32) = (2.0, 4.0);
 /// peak over black.
 const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
 
+/// The reflectance's ceiling at grazing angles: the gamma look's `mix(0.02, 0.45, fresnel)` peak.
+const GRAZING_LIMIT: f32 = 0.45;
+
 /// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
 const HIGH_RIPPLE_ANISO: u16 = 4;
 
@@ -111,6 +114,14 @@ fn unit_lever(var: &str) -> Option<f32> {
     (0.0..=1.0).contains(&v).then_some(v)
 }
 
+/// The grazing limit, 0.45, unless `$WOW_WATER_GRAZE=<0-1>` (read once; 1 for none) sets it.
+fn grazing_limit() -> f32 {
+    static FORCED: OnceLock<Option<f32>> = OnceLock::new();
+    FORCED
+        .get_or_init(|| unit_lever("WOW_WATER_GRAZE"))
+        .unwrap_or(GRAZING_LIMIT)
+}
+
 /// The body's knobs at their defaults, unless `$WOW_WATER_DEEP_CEILING=<0-1>` sets where the deep
 /// stop sits on the zone's line (1 the swatch's last row) or `$WOW_WATER_BAND_PUSH=<0-1>` how far
 /// the three bands pull the ramp (0 unbanded); each read once, to measure it.
@@ -156,8 +167,8 @@ pub(crate) fn ripple_aniso(tier: u8) -> u16 {
 /// The owner's and the developer's knobs for the look rows, at their defaults.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub(crate) struct WaterLook {
-    /// The reflection weight's ceiling at grazing angles, 1 for none: 0.45, the ceiling of
-    /// `liquid.wgsl`'s fixed `mix(0.02, 0.45, fresnel)`, which does not read this row.
+    /// The linear composite's reflectance ceiling at grazing angles, 1 for none: 0.45, the
+    /// ceiling of the gamma look's fixed `mix(0.02, 0.45, fresnel)`.
     pub(crate) grazing_limit: f32,
     /// The glint lobes' weight in linear light: the gamma weight 0.22 raised to 2.2, so the peak
     /// over black is unchanged.
@@ -191,7 +202,7 @@ pub(crate) struct WaterLook {
 impl Default for WaterLook {
     fn default() -> Self {
         Self {
-            grazing_limit: 0.45,
+            grazing_limit: grazing_limit(),
             glint_weight_lin: glint_weight_lin(),
             glow_test: 0.0,
             grade_strength: 0.0,

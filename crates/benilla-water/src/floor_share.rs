@@ -48,7 +48,7 @@ const SLOPE_TRUSTED: f32 = 0.03;
 const SLOPE_MARGIN: f32 = 0.005;
 
 /// A probe slot's reach, or the probe tier's gate, at least this counts as full: the floor's share
-/// `(1 − w_p)·fres` then stays under `liquid.wgsl`'s 1/1024 at the largest Fresnel weight, 0.45.
+/// `(1 − w_p)·F` then stays under `liquid.wgsl`'s 1/1024 at any reflectance F up to 1.
 const FULL: f32 = 1.0 - 1.0e-4;
 
 /// How wide a patch of a surface's water is, in yards: about one liquid cell (4.17 yd).

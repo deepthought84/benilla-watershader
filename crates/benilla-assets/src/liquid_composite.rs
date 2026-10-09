@@ -530,3 +530,26 @@ fn the_shaders_composite_is_the_mirrors() {
         assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
     }
 }
+
+/// The shader's reflectance is this mirror's: the fit's coefficients, its kink, the held cosine and
+/// the floor, line for line.
+#[test]
+fn the_shaders_fresnel_is_the_mirrors() {
+    let wgsl = include_str!("shaders/liquid.wgsl");
+    assert_eq!(F0_WATER, 0.02);
+    for line in [
+        "const F0_WATER: f32 = 0.02;",
+        "let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);",
+        "let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);",
+        "let a004 = min(r.x * r.x, exp2(-9.28 * n_dot_v)) * r.x + r.y;",
+        "let ab = vec2<f32>(-1.04, 1.04) * a004 + r.zw;",
+        "return f0 * ab.x + ab.y;",
+        "return clamp(-log2(max((1.0 - rough) * (1.0 - rough), 1e-6)) / 9.28, 0.0, 1.0);",
+        "let mu = clamp(max(n_dot_v, fresnel_kink(alpha)), 1e-4, 1.0);",
+        "let schlick = F0_WATER + (1.0 - F0_WATER) * pow(1.0 - mu, 5.0);",
+        "let k = env_brdf_approx(F0_WATER, mu, rough) / env_brdf_approx(F0_WATER, mu, 0.0);",
+        "return max(saturate(schlick * k), F0_WATER);",
+    ] {
+        assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+    }
+}
