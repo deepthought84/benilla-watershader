@@ -345,6 +345,19 @@ class Ratios(unittest.TestCase):
         md, mr = (200 - 63) / 263, 40 / 260
         self.assertAlmostEqual(r["direct"], md, places=5)
         self.assertAlmostEqual(r["value"], mr / md, places=5)
+        # An inverted reflection: the reflected crown lighter than the reflected sky.
+        img[50:60, 0:10], img[50:60, 20:30] = 150, 110
+        r = wm.refl_contrast(img, *boxes)
+        self.assertAlmostEqual(r["reflected"], -mr, places=5)
+        self.assertAlmostEqual(r["value"], -mr / md, places=5)
+        self.assertIs(wm.against(r["value"], mr / md, wm.ROWS["refl_contrast"], within=[0.6, 1.0]),
+                      False)
+        # The same with a light object: the sign follows the direct pair's, not the order of the
+        # boxes.
+        img[0:10, 0:10], img[0:10, 20:30] = 200, 63
+        self.assertAlmostEqual(wm.refl_contrast(img, *boxes)["value"], mr / md, places=5)
+        img[50:60, 0:10], img[50:60, 20:30] = 110, 150
+        self.assertAlmostEqual(wm.refl_contrast(img, *boxes)["value"], -mr / md, places=5)
 
     def test_a_seam_step_stays_inside_the_image(self):
         img = flat([100, 100, 100])
@@ -821,7 +834,8 @@ within = [0.6, 1.0]
             base = json.loads(out.read_text())
             self.assertEqual(base["wg-within"]["refl_contrast"]["within"], [0.6, 1.0])
             for refl, rc, tag in (((60, 140), 1, "0.6-1x OUT"), ((85, 115), 0, "0.6-1x ok"),
-                                  ((90, 110), 1, "0.6-1x OUT")):  # 1.0, 0.75, 0.5 x baseline
+                                  ((90, 110), 1, "0.6-1x OUT"),
+                                  ((120, 80), 1, "0.6-1x OUT")):  # 2, 0.75, 0.5, -1 x baseline
                 img[20:30, 0:10], img[20:30, 10:20] = refl
                 save(img, d / "wg-within.png")
                 with contextlib.redirect_stdout(io.StringIO()) as printed:

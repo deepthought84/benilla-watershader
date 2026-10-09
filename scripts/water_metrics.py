@@ -185,11 +185,15 @@ def chroma(rgb) -> float:
 
 def refl_contrast(img, object, sky, object_refl, sky_refl):
     """Michelson contrast of the reflected object against the reflected sky, over the same of the
-    direct object against the direct sky (box means of luma). The phase gate: never above
-    baseline."""
+    direct object against the direct sky (box means of luma). Negative where the reflection is
+    inverted: the reflected object lighter than the reflected sky where the direct one is darker,
+    or the other way round, so a row held within a share of a positive baseline fails it. The
+    phase gate: never above baseline."""
     L = luma(img)
-    md = michelson(crop(L, object).mean(), crop(L, sky).mean())
-    mr = michelson(crop(L, object_refl).mean(), crop(L, sky_refl).mean())
+    o, s = crop(L, object).mean(), crop(L, sky).mean()
+    o_r, s_r = crop(L, object_refl).mean(), crop(L, sky_refl).mean()
+    md = michelson(o, s)
+    mr = michelson(o_r, s_r) * (-1.0 if (o - s) * (o_r - s_r) < 0 else 1.0)
     return {"value": mr / md if md > 0 else math.inf, "direct": md, "reflected": mr}
 
 
