@@ -2467,10 +2467,10 @@ fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<
 // ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
 //
 // The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
-// `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the view ray's length through the water plus the
-// way down from the surface to the bed along the refracted lighting sun. The colour is the zone's
-// swatch ramp (`look.body`'s rows from Light.dbc) read at the turbidity's optical depth, in three
-// soft bands. `benilla_water::body` derives σ from the swatch on the CPU.
+// `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the refracted view ray's length from the surface
+// down to the bed's depth plus the way down to the bed along the refracted lighting sun. The colour
+// is the zone's swatch ramp (`look.body`'s rows from Light.dbc) read at the turbidity's optical
+// depth, in three soft bands. `benilla_water::body` derives σ from the swatch on the CPU.
 
 /// Fresh water's index of refraction and its inverse.
 const WATER_IOR: f32 = 1.333;
@@ -2573,13 +2573,15 @@ fn water_body_optics(
     // From below the surface the column is not this pass's to draw: the deep body, opaque.
     let below = view.world_position.y < world_pos.y;
     o.known = sb.known && !below;
-    // μ_d the lighting sun refracted into the water, μ_v the view (for the authored fallback).
+    // μ_d the lighting sun refracted into the water, μ_v the view ray refracted into it: the bed's
+    // light reaches the eye along the refracted ray, which is never steeper than the critical
+    // angle, so a grazing view crosses at most 1/0.66 yd of water per yard of depth.
     let mu_s = max(-normalize(wow_light.light_sun.xyz).y, 0.0);
     let mu_d = max(sqrt(1.0 - (1.0 - mu_s * mu_s) * INV_IOR * INV_IOR), MU_D_MIN);
     let ci = saturate(dot(flat_n, to_view));
     let mu_v = max(sqrt(1.0 - (1.0 - ci * ci) * INV_IOR * INV_IOR), MU_D_MIN);
     o.z = select(bi.fallback_z, max(sb.vertical, 0.0), o.known);
-    o.l_view = select(bi.fallback_z / mu_v, sb.path, o.known);
+    o.l_view = o.z / mu_v;
     o.l_opt = min(o.l_view + o.z / mu_d, 4096.0);
     let tau_t = bi.sig_turb * o.l_opt;
     let t_turb = exp(-tau_t);

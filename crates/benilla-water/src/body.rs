@@ -727,8 +727,9 @@ mod tests {
 
     /// The shader keeps these lines of the body: `body_lift`'s return as [`body_lift`] has it, the
     /// stops read from rows 0 and 63 (no ocean tail, as [`deep_stop`]) at the ceiling lane and half
-    /// of it, and `t_bed` and `w_in` from one `t_turb`. A text pin: the path length, `x`, the bands,
-    /// the ramp and the stops' argument order are not checked here.
+    /// of it, `t_bed` and `w_in` from one `t_turb`, and the view's path through the water along the
+    /// refracted ray to the bed's depth. A text pin: `x`, the bands, the ramp and the stops'
+    /// argument order are not checked here.
     #[test]
     fn the_shader_keeps_the_body_lift_stop_and_transport_lines() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
@@ -741,6 +742,7 @@ mod tests {
             "mix(r0, r63, dc),",
             "o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);",
             "o.w_in = select(1.0, 1.0 - t_turb, o.known);",
+            "o.l_view = o.z / mu_v;",
         ] {
             assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
         }
