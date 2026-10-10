@@ -530,6 +530,7 @@ pub(super) fn spawn_menagerie(
         lanes.liquid_caps.glow,
         lanes.liquid_caps.dual_source,
         lanes.liquid_caps.painted,
+        lanes.liquid_caps.composite,
     );
     for mat in liquid_variants(&mut lanes.liquid, shipped) {
         for mesh in [&liquid_mesh, &liquid_color_mesh] {

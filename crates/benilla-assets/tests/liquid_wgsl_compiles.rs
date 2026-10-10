@@ -20,13 +20,14 @@ use std::path::Path;
 
 use benilla_assets::materials::LiquidKey;
 
-/// Every key the tripwire covers: the union of [`LiquidKey::shipped`] over its arguments, and each
-/// stylised one with each combination of the debug variants' bits and the linear composite's
-/// (`$WOW_WATER_COMPOSITE`), which the debug panel and the environment allow at once.
+/// Every key the tripwire covers: the union of [`LiquidKey::shipped`] over its arguments, the
+/// linear composite's (`$WOW_WATER_COMPOSITE`) among them, and each stylised one with each
+/// combination of the debug variants' bits, which the debug panel and the environment allow at
+/// once.
 fn covered_keys() -> Vec<LiquidKey> {
     let mut keys = Vec::new();
-    for triple in 0..8 {
-        for key in LiquidKey::shipped(triple & 1 != 0, triple & 2 != 0, triple & 4 != 0) {
+    for set in 0..16 {
+        for key in LiquidKey::shipped(set & 1 != 0, set & 2 != 0, set & 4 != 0, set & 8 != 0) {
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -47,10 +48,10 @@ fn covered_keys() -> Vec<LiquidKey> {
             ]
             .map(|bits| {
                 let (y, w) = k.path_lanes();
-                let caps = (bits >> LiquidKey::CAPS_SHIFT) as f32;
+                let caps = (w as u16) | (bits >> LiquidKey::CAPS_SHIFT);
                 LiquidKey::from_lanes(
                     bevy::math::Vec4::ZERO,
-                    bevy::math::Vec4::new(0.0, y, 0.0, w + caps),
+                    bevy::math::Vec4::new(0.0, y, 0.0, f32::from(caps)),
                 )
             })
         })
@@ -77,8 +78,8 @@ fn liquid_wgsl_compiles_for_every_liquid_pipeline() {
     let keys = covered_keys();
     assert_eq!(
         keys.len(),
-        22 + 140,
-        "22 shipped keys and 140 debug and composite variants of the stylised 20"
+        42 + 120,
+        "42 shipped keys and 120 debug variants of the stylised 40"
     );
     let mut by_defs: HashMap<Vec<&str>, Vec<LiquidKey>> = HashMap::new();
     for key in keys {

@@ -101,8 +101,8 @@ fn register_caps(app: &mut App) {
 
 /// Ask the stylised liquid pipelines for the variants this plugin's switches need and the ripple
 /// map for the tier's anisotropy: the quality tier, the debug views while one is chosen, the
-/// screen-space march while its switch is on, the linear composite while it is asked for
-/// (`$WOW_WATER_COMPOSITE`). A no-op unless the answer changes, so the materials
+/// screen-space march while its switch is on, the linear composite unless the gamma look is asked
+/// for (`$WOW_WATER_COMPOSITE=0`). A no-op unless the answer changes, so the materials
 /// are touched only then. The depth pyramid's readers are asked each frame
 /// (`floor_share::drive_floor_readers`).
 fn drive_pipeline_caps(

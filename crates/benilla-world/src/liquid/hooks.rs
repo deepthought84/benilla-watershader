@@ -260,7 +260,8 @@ pub struct WaterPipelineCaps {
     pub tier: u8,
     /// The screen-space march as a debug variant.
     pub ssr: bool,
-    /// The linear composite while it is a variant.
+    /// The linear composite; a water plugin asks for it unless the gamma look is wanted for an
+    /// A/B.
     pub composite: bool,
     /// The highlight excess stored for the glow.
     pub glow: bool,

@@ -455,12 +455,20 @@ impl LiquidKey {
 
     /// The keys a player reaches without a debug switch: the reference lane, magma and slime, and
     /// stylised water at each tier, carrying [`Self::GLOW`] from Medium up when `glow`,
-    /// [`Self::DUAL_SOURCE`] when `dual` and [`Self::PAINTED`] when `painted`. The pipeline warm
-    /// pass compiles these; [`Self::VIEW`] and [`Self::SSR`] are debug variants, compiled on first
-    /// use.
-    pub fn shipped(glow: bool, dual: bool, painted: bool) -> impl Iterator<Item = LiquidKey> {
+    /// [`Self::DUAL_SOURCE`] when `dual`, [`Self::PAINTED`] when `painted` and
+    /// [`Self::COMPOSITE`] when `composite`. The pipeline warm pass compiles these; [`Self::VIEW`]
+    /// and [`Self::SSR`] are debug variants, compiled on first use.
+    pub fn shipped(
+        glow: bool,
+        dual: bool,
+        painted: bool,
+        composite: bool,
+    ) -> impl Iterator<Item = LiquidKey> {
         let stylised = (0..3u16).map(move |tier| {
             let mut k = Self::STYLISED | tier << Self::TIER_SHIFT;
+            if composite {
+                k |= Self::COMPOSITE;
+            }
             if glow && tier >= 1 {
                 k |= Self::GLOW;
             }
@@ -1888,18 +1896,19 @@ mod tests {
         }
     }
 
-    /// The warm set: five keys for every argument triple (the reference lane, magma and slime,
-    /// stylised water at each tier), the glow bit from Medium up, the other two wherever asked,
+    /// The warm set: five keys for every argument set (the reference lane, magma and slime,
+    /// stylised water at each tier), the glow bit from Medium up, the other three wherever asked,
     /// no debug bit, and each one read back from the lanes [`LiquidKey::path_lanes`] writes.
     #[test]
     fn the_shipped_keys_are_every_lane_at_every_tier() {
         use super::LiquidKey as K;
         use bevy::math::Vec4;
         let mut union = std::collections::HashSet::new();
-        for triple in 0..8 {
-            let (glow, dual, painted) = (triple & 1 != 0, triple & 2 != 0, triple & 4 != 0);
-            let keys: Vec<K> = K::shipped(glow, dual, painted).collect();
-            assert_eq!(keys.len(), 5, "{triple:03b}");
+        for set in 0..16 {
+            let (glow, dual, painted, composite) =
+                (set & 1 != 0, set & 2 != 0, set & 4 != 0, set & 8 != 0);
+            let keys: Vec<K> = K::shipped(glow, dual, painted, composite).collect();
+            assert_eq!(keys.len(), 5, "{set:04b}");
             assert_eq!(keys[0], K::default(), "the reference lane first");
             assert!(keys[1].has(K::FULLBRIGHT) && !keys[1].composite());
             for (tier, k) in (0u8..).zip(&keys[2..]) {
@@ -1908,7 +1917,9 @@ mod tests {
                 assert_eq!(k.has(K::GLOW), glow && tier >= 1, "{k:?}");
                 assert_eq!(k.has(K::DUAL_SOURCE), dual, "{k:?}");
                 assert_eq!(k.has(K::PAINTED), painted, "{k:?}");
-                assert!(!k.has(K::VIEW) && !k.has(K::SSR) && !k.has(K::COMPOSITE));
+                assert_eq!(k.has(K::COMPOSITE), composite, "{k:?}");
+                assert!(k.premultiplied() == composite, "{k:?}");
+                assert!(!k.has(K::VIEW) && !k.has(K::SSR));
             }
             for k in &keys {
                 let kind = Vec4::new(f32::from(k.has(K::FULLBRIGHT)), 0.0, 0.0, 6.0);
@@ -1917,8 +1928,9 @@ mod tests {
             }
             union.extend(keys);
         }
-        // The reference lane, magma and slime, and 4 + 8 + 8 stylised keys (Low has no glow).
-        assert_eq!(union.len(), 22);
+        // The reference lane, magma and slime, and 4 + 8 + 8 stylised keys (Low has no glow), each
+        // with and without the linear composite.
+        assert_eq!(union.len(), 42);
     }
 
     /// The per-stage count reads visibility, binding arrays and write access, and names each

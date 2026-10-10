@@ -40,6 +40,11 @@ const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
 /// The reflectance's ceiling at grazing angles: the gamma look's `mix(0.02, 0.45, fresnel)` peak.
 const GRAZING_LIMIT: f32 = 0.45;
 
+/// The reflection grading's strength `s`, calibrated on the High tier: near reflections (Crystal
+/// Lake's huts) soften to about the gamma look's contrast, open-sky ones keep the linear
+/// composite's physical strength.
+const GRADE_STRENGTH: f32 = 0.8;
+
 /// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
 const HIGH_RIPPLE_ANISO: u16 = 4;
 
@@ -85,11 +90,11 @@ fn floor_occlusion() -> bool {
     !*OFF.get_or_init(|| std::env::var("WOW_WATER_FLOOR_OCC").is_ok_and(|v| v.trim() == "0"))
 }
 
-/// Whether the stylised pipelines take the linear composite (`WATER_COMPOSITE`): off, unless
-/// `$WOW_WATER_COMPOSITE=1` (read once) asks for the variant.
+/// Whether the stylised pipelines take the linear composite (`WATER_COMPOSITE`): on, unless
+/// `$WOW_WATER_COMPOSITE=0` (read once) asks for the gamma look, for an A/B.
 pub(crate) fn composite_variant() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| v.trim() == "1"))
+    static OFF: OnceLock<bool> = OnceLock::new();
+    !*OFF.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| v.trim() == "0"))
 }
 
 /// The glints' linear weight: `SPEC_WEIGHT` 0.22 raised to the gamma, so the peak over black is the
@@ -114,25 +119,27 @@ fn unit_lever(var: &str) -> Option<f32> {
     (0.0..=1.0).contains(&v).then_some(v)
 }
 
-/// The grading's strength, 0, unless `$WOW_WATER_GRADE=<s>` (read once, finite, at least 0) sets
-/// it, to measure it. Only the composite variant grades: without it the lever is ignored, so it
-/// cannot force the floor's readers on under the shipped look.
+/// The grading's strength, [`GRADE_STRENGTH`], unless `$WOW_WATER_GRADE=<s>` (read once, finite,
+/// at least 0) sets it, to measure it. Only the linear composite grades: under the gamma look
+/// (`$WOW_WATER_COMPOSITE=0`) it is 0 and the lever is ignored, so it cannot force the floor's
+/// readers on there.
 fn grade_strength() -> f32 {
     static FORCED: OnceLock<Option<f32>> = OnceLock::new();
-    FORCED
-        .get_or_init(|| {
-            let s = std::env::var("WOW_WATER_GRADE")
-                .ok()?
-                .trim()
-                .parse::<f32>()
-                .ok()?;
-            if s > 0.0 && !composite_variant() {
-                warn!("water: WOW_WATER_GRADE={s} ignored: only WOW_WATER_COMPOSITE=1 grades");
-                return None;
-            }
-            (s >= 0.0 && s.is_finite()).then_some(s)
-        })
-        .unwrap_or(0.0)
+    let forced = *FORCED.get_or_init(|| {
+        let s = std::env::var("WOW_WATER_GRADE")
+            .ok()?
+            .trim()
+            .parse::<f32>()
+            .ok()?;
+        if !composite_variant() {
+            warn!("water: WOW_WATER_GRADE={s} ignored: the gamma look has no grading");
+        }
+        (s >= 0.0 && s.is_finite()).then_some(s)
+    });
+    if !composite_variant() {
+        return 0.0;
+    }
+    forced.unwrap_or(GRADE_STRENGTH)
 }
 
 /// The grazing limit, 0.45, unless `$WOW_WATER_GRAZE=<0-1>` (read once; 1 for none) sets it.
@@ -203,7 +210,8 @@ pub(crate) struct WaterLook {
     pub(crate) glint_weight_lin: f32,
     /// A glow excess forced onto every water pixel, for testing the glow path; 0.
     pub(crate) glow_test: f32,
-    /// The reflection grading's strength `s`; 0, no grading. The linear composite reads it.
+    /// The reflection grading's strength `s`, [`GRADE_STRENGTH`]; 0 under the gamma look. The
+    /// linear composite reads it.
     pub(crate) grade_strength: f32,
     /// The grading's near share `C_NEAR`, 0.2.
     pub(crate) grade_c_near: f32,
@@ -458,7 +466,7 @@ mod tests {
             (super::GLINT_WEIGHT_LIN - 0.22f32.powf(2.2)).abs() < 1e-8,
             "the gamma weight 0.22 raised to the gamma"
         );
-        assert_eq!(row(LOOK_GRADE), [0.0, 0.3, 0.2, 0.0]);
+        assert_eq!(row(LOOK_GRADE), [0.8, 0.3, 0.2, 0.0]);
         assert_eq!(row(LOOK_SHORE), [0.35, 0.61, 1.0, 1.0]);
         assert_eq!(row(LOOK_SHORE_KIND), [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(row(LOOK_SURF), [0.0548, 1.0, 2.0, 4.0]);
