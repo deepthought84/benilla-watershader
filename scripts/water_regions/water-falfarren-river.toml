@@ -1,6 +1,8 @@
 # wg-falfarren: the Falfarren River under Ashenvale's canopy, the far bank's hedge above the
 # waterline (y 590-610). Flake: the near-left water at x0-571 y611-899 lands in two or three
-# states, so the water boxes start right of it. Burst rows read a 2 s static burst.
+# states, so the water boxes start right of it; the whole water and the bank, x0-1599 y189-899,
+# also lands in two states up to 19 codes apart, and the Reference twin's canopy at x242-276
+# y166-214 in two up to 10 apart. Burst rows read a 2 s static burst.
 scene = "water-falfarren-river"
 [box]
 water = [600, 680, 1400, 850]

@@ -1,6 +1,7 @@
 # wg-darkshore-pier-noon: the Darkshore sea under a dock, the dock's foot standing in the water
-# (x 620-720, waterline y 575), the horizon at y 415. Flake: the Reference twin's x0-935 y174-434
-# moves by up to 5 codes run to run.
+# (x 620-720, waterline y 575), the horizon at y 415. Flake: the Reference twin's x0-939 y173-436
+# moves by up to 37 codes run to run, and the shot's own x0-939 y173-675, sky and water to the
+# left of the dock, by up to 33.
 scene = "water-darkshore-pier-noon"
 [box]
 foot = [630, 510, 710, 560]          # the dock's foot above the water
