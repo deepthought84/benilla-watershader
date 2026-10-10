@@ -660,6 +660,58 @@ fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32) -> f32 
         assert!((c - (1.0 - (-1.0f32).exp())).abs() < 1e-4, "{c}");
     }
 
+    /// The floor march law's `floor_rho_c`, as the shared text carries it.
+    const RHO_C_WGSL: &str = "\
+const FLOOR_CONTACT_REACH: f32 = 64.0;
+
+/// How far behind the water the reflected thing lies, as the grading reads it: `D²/(D² + R²)` at
+/// the distance `D` from the reflecting point and [`FLOOR_CONTACT_REACH`] `R`, whatever the eye's
+/// distance, so a post or a deck the ray meets within 25 yd reads under 0.14 and the far shore
+/// 300 yd off 0.96.
+fn floor_rho_c(travelled: f32) -> f32 {
+    let d2 = travelled * travelled;
+    return d2 / (d2 + FLOOR_CONTACT_REACH * FLOOR_CONTACT_REACH);
+}";
+
+    /// [`RHO_C_WGSL`] in Rust, `R` 64 yd.
+    fn floor_rho_c(travelled: f32) -> f32 {
+        let d2 = travelled * travelled;
+        d2 / (d2 + 64.0 * 64.0)
+    }
+
+    /// **A reflected thing's distance share is measured from the water, not from the eye.** The
+    /// grading keeps contacts crisp: a pier's leg or a deck's underside, which a grazing ray meets
+    /// 8-26 yd from the water (the median at Menethil's waterlines, Darkshore's pier foot and
+    /// Booty Bay's under-deck), reads near 0 however far the eye stands, and the far shore near 1
+    /// (Loch Modan's island, past 350 yd). Every verdict (hit, escape, unknown) takes it at the
+    /// distance it was reached, so it rises smoothly between.
+    #[test]
+    fn the_contact_share_is_near_zero_at_the_waterline_and_far_off_is_far() {
+        let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        assert!(
+            march_law(liquid).contains(RHO_C_WGSL),
+            "the law's floor_rho_c is not the text this test mirrors"
+        );
+        assert!(march_law(liquid).contains("let rho = floor_rho_c(m.travelled);"));
+        assert_eq!(floor_rho_c(0.0), 0.0);
+        assert!(floor_rho_c(8.0) < 0.016);
+        assert!(floor_rho_c(25.0) < 0.14);
+        assert!((floor_rho_c(64.0) - 0.5).abs() < 1e-6);
+        assert!((floor_rho_c(192.0) - 0.9).abs() < 1e-6);
+        assert!(floor_rho_c(300.0) > 0.95);
+        assert!(floor_rho_c(1.0e6) <= 1.0);
+        let mut last = 0.0;
+        for i in 1..5000 {
+            let r = floor_rho_c(i as f32 * 0.1);
+            assert!(
+                r > last && r - last < 0.01,
+                "at {} yd: {last} -> {r}",
+                i as f32 * 0.1
+            );
+            last = r;
+        }
+    }
+
     /// The dispatch covers the texels under the rectangle's pixels, and no more than the image.
     #[test]
     fn the_occlusion_dispatch_covers_the_rectangle() {

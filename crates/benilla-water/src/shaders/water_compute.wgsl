@@ -326,9 +326,9 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
 }
 
 /// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
-/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies as a
-/// share of the eye's distance (0 at a contact, toward 1 far off), `known` 1 where the march
-/// reached a verdict.
+/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies
+/// ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known` 1 where the march reached a
+/// verdict.
 struct FloorOcc {
     rgb: vec3<f32>,
     v: f32,
@@ -336,14 +336,28 @@ struct FloorOcc {
     known: f32,
 };
 
-/// The march's verdict as the floor takes it. `rho_c = D/(d_eye + D)` at the distance `D` the
-/// verdict was reached: a hit at `D`, an escape or an unknown past it, all say the reflected thing
-/// is at least `D` behind the water, so it is continuous from a contact to the far field. The
-/// occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of the lookup
-/// point on screen. An unknown verdict the frame's end covers is that share occluded and known,
-/// its colour the frame's there, read at full resolution.
-fn floor_from_march(m: FloorMarch, d_eye: f32, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
-    let rho = m.travelled / max(d_eye + m.travelled, 1e-4);
+/// The reach, in yards behind the water, at which a reflected thing counts as half far
+/// ([`floor_rho_c`]): a grazing ray climbs 8-26 yd to a pier's leg or a deck's underside, and the
+/// far shore lies hundreds of yards off.
+const FLOOR_CONTACT_REACH: f32 = 64.0;
+
+/// How far behind the water the reflected thing lies, as the grading reads it: `D²/(D² + R²)` at
+/// the distance `D` from the reflecting point and [`FLOOR_CONTACT_REACH`] `R`, whatever the eye's
+/// distance, so a post or a deck the ray meets within 25 yd reads under 0.14 and the far shore
+/// 300 yd off 0.96.
+fn floor_rho_c(travelled: f32) -> f32 {
+    let d2 = travelled * travelled;
+    return d2 / (d2 + FLOOR_CONTACT_REACH * FLOOR_CONTACT_REACH);
+}
+
+/// The march's verdict as the floor takes it. `rho_c` ([`floor_rho_c`]) is taken at the distance
+/// `D` the verdict was reached: a hit at `D`, an escape or an unknown past it, all say the
+/// reflected thing is at least `D` behind the water, so it is continuous from a contact to the far
+/// field. The occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of
+/// the lookup point on screen. An unknown verdict the frame's end covers is that share occluded
+/// and known, its colour the frame's there, read at full resolution.
+fn floor_from_march(m: FloorMarch, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
+    let rho = floor_rho_c(m.travelled);
     if (m.state == FLOOR_HIT) {
         return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, min_level)), 0.0, rho, 1.0);
     }
@@ -403,7 +417,7 @@ fn occl_plane(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let p = pick.xyz;
     let m = floor_march(p + vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(dir.x, -dir.y, dir.z), FLOOR_MARCH_LEVEL, FLOOR_MARCH_STEPS);
-    let o = floor_from_march(m, distance(p, eye), FLOOR_MARCH_LEVEL, vec2<f32>(0.0));
+    let o = floor_from_march(m, FLOOR_MARCH_LEVEL, vec2<f32>(0.0));
     textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, o.v, 1.0, o.known));
     textureStore(floor_occ, vec2<i32>(q), vec4<f32>(o.rgb, o.rho_c));
 }

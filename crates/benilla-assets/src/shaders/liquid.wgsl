@@ -1343,9 +1343,9 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
 }
 
 /// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
-/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies as a
-/// share of the eye's distance (0 at a contact, toward 1 far off), `known` 1 where the march
-/// reached a verdict.
+/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies
+/// ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known` 1 where the march reached a
+/// verdict.
 struct FloorOcc {
     rgb: vec3<f32>,
     v: f32,
@@ -1353,14 +1353,28 @@ struct FloorOcc {
     known: f32,
 };
 
-/// The march's verdict as the floor takes it. `rho_c = D/(d_eye + D)` at the distance `D` the
-/// verdict was reached: a hit at `D`, an escape or an unknown past it, all say the reflected thing
-/// is at least `D` behind the water, so it is continuous from a contact to the far field. The
-/// occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of the lookup
-/// point on screen. An unknown verdict the frame's end covers is that share occluded and known,
-/// its colour the frame's there, read at full resolution.
-fn floor_from_march(m: FloorMarch, d_eye: f32, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
-    let rho = m.travelled / max(d_eye + m.travelled, 1e-4);
+/// The reach, in yards behind the water, at which a reflected thing counts as half far
+/// ([`floor_rho_c`]): a grazing ray climbs 8-26 yd to a pier's leg or a deck's underside, and the
+/// far shore lies hundreds of yards off.
+const FLOOR_CONTACT_REACH: f32 = 64.0;
+
+/// How far behind the water the reflected thing lies, as the grading reads it: `D²/(D² + R²)` at
+/// the distance `D` from the reflecting point and [`FLOOR_CONTACT_REACH`] `R`, whatever the eye's
+/// distance, so a post or a deck the ray meets within 25 yd reads under 0.14 and the far shore
+/// 300 yd off 0.96.
+fn floor_rho_c(travelled: f32) -> f32 {
+    let d2 = travelled * travelled;
+    return d2 / (d2 + FLOOR_CONTACT_REACH * FLOOR_CONTACT_REACH);
+}
+
+/// The march's verdict as the floor takes it. `rho_c` ([`floor_rho_c`]) is taken at the distance
+/// `D` the verdict was reached: a hit at `D`, an escape or an unknown past it, all say the
+/// reflected thing is at least `D` behind the water, so it is continuous from a contact to the far
+/// field. The occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of
+/// the lookup point on screen. An unknown verdict the frame's end covers is that share occluded
+/// and known, its colour the frame's there, read at full resolution.
+fn floor_from_march(m: FloorMarch, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
+    let rho = floor_rho_c(m.travelled);
     if (m.state == FLOOR_HIT) {
         return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, min_level)), 0.0, rho, 1.0);
     }
@@ -2264,8 +2278,7 @@ fn floor_occ_mix(a: FloorOcc, b: FloorOcc, t: f32) -> FloorOcc {
 /// flickers with the ripple; only the occluder's colour tap follows the rippled lookup point (`n`
 /// slides it, as it slides the mirrors' and the probe's), shifted on screen by as much as the ripple
 /// moves it. Between the two, both run and crossfade ([`occl_plane_weight`]). The plane's answer
-/// is read after the march and the eye's distance taken again there, so neither is carried
-/// through the march's loop.
+/// is read after the march, so it is not carried through the march's loop.
 fn floor_occlusion(
     world_pos: vec3<f32>,
     n: vec3<f32>,
@@ -2285,8 +2298,7 @@ fn floor_occlusion(
         FLOOR_MARCH_STEPS,
     );
     let shift = uv_look - ndc_to_uv(position_world_to_ndc(world_pos).xy);
-    let d_eye = distance(view.world_position.xyz, world_pos);
-    let marched = floor_from_march(m, d_eye, FLOOR_MARCH_LEVEL, shift);
+    let marched = floor_from_march(m, FLOOR_MARCH_LEVEL, shift);
     var plane = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
     if (wp > 0.0) {
         plane = floor_occ_plane(uv_look);
@@ -2449,18 +2461,20 @@ fn grade_keep(rho: f32) -> f32 {
 }
 
 /// The grading in two stages, as the affine map `r ↦ max(a·r + b, 0)` it is on the reflection `r`,
-/// returned `(b, a)`: the near stage keeps `k_n = 1 − s·C_NEAR` of `r` about
-/// `p_near = mix(r, floor, known)`, the occluded floor where the floor's march has a verdict (the
-/// occluder where it hit, the sky where it escaped), so water under a deck is pulled toward the
-/// deck's underside; the far stage keeps the rest of `K` about the open `sky`. `k_n·k_f = K`, and
-/// s = 0 is the identity. Two terms instead of the sky and the verdict keep the tier chain light.
+/// returned `(b, a)`. Both stages pivot on what the reflection is of: where the floor's march
+/// reached a verdict, on the occluded `floor` (the occluder where it hit, the sky where it
+/// escaped), keeping `K = k_n·k_f` of `r`, so water under a deck is pulled toward the deck's
+/// underside and never toward the sky; where it did not, the near stage (`k_n = 1 − s·C_NEAR`)
+/// has no pivot and the far stage keeps `k_f` of `r` about the open `sky`. `known` crossfades the
+/// two, and s = 0 is the identity. Two terms instead of the sky and the verdict keep the tier chain
+/// light.
 fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<f32> {
     let g = water_reflect.look.grade;
     let k = grade_keep(rho);
     let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);
     let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);
-    let a = k_f * (k_n + (1.0 - k_n) * (1.0 - known));
-    let b = k_f * (1.0 - k_n) * known * floor + (1.0 - k_f) * sky;
+    let a = mix(k_f, k, known);
+    let b = mix((1.0 - k_f) * sky, (1.0 - k) * floor, known);
     return vec4<f32>(b, a);
 }
 
@@ -3136,9 +3150,8 @@ fn stylised_water(
         floor_l = water_dec(sky_g);
     }
     // The grading's map, built while the floor's verdict and the open sky are at hand
-    // ([`grade_affine`]): the near pivot is the occluded floor where the march reached a verdict,
-    // the reflection itself where it did not. From below the surface, or at strength 0, nothing is
-    // graded.
+    // ([`grade_affine`]): the pivot is the occluded floor where the march reached a verdict, the
+    // open sky where it did not. From below the surface, or at strength 0, nothing is graded.
     let graded = eye_above && water_reflect.look.grade.x > 0.0;
     var grade_ab = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     if (graded) {
