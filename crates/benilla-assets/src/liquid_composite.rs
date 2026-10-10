@@ -170,9 +170,10 @@ fn grade_reflection(r: V3, p_far: V3, p_near: V3, rho: f32, s: f32, c_near: f32,
     )
 }
 
-/// The two-stage grading as the shader runs it: affine in the reflection `r`, `max(a·r + b, 0)`,
-/// with both pivots on the occluded `floor` where the march has a verdict, the near one on `r` and
-/// the far one on the open `sky` where it has none, crossfaded by `known`; `(a, b)`.
+/// The two-stage grading as the shader runs it: affine in the reflection `r`, `max(a·r + b, 0)`;
+/// `(a, b)`. The occluded `floor` is `known·P + (1 − known)·sky`, `P` the floor of the share with a
+/// verdict (an unknown share carries no occluder and the whole sky), so the far pivot is `floor`
+/// itself and the near pivot `mix(r, P, known)` is `floor + (1 − known)·(r − sky)`, expanded.
 fn grade_affine(
     sky: V3,
     floor: V3,
@@ -187,8 +188,8 @@ fn grade_affine(
     let k_f = if k_n <= 1e-4 { 0.0 } else { k / k_n.max(1e-4) };
     let a = k_f + (k - k_f) * known;
     let b = add(
-        scale(sky, (1.0 - k_f) * (1.0 - known)),
-        scale(floor, (1.0 - k) * known),
+        scale(floor, 1.0 - k),
+        scale(sky, -(k_f - k) * (1.0 - known)),
     );
     (a, b)
 }
@@ -621,9 +622,9 @@ fn the_grading_keeps_the_band_midpoints() {
 /// At s = 0 the grading is the identity. Where the floor's march has a verdict both stages pivot
 /// on the occluded floor and keep `K` of the reflection's distance from it (an escaped ray's floor
 /// is the open sky); where it has none the near stage has no pivot and only the far stage acts,
-/// `K / k_n` about the sky; at reach 0 with a verdict only the near stage acts. The shader's affine
-/// form is the two stages with the pivots `mix(r, floor, known)` and `mix(sky, floor, known)`
-/// expanded.
+/// `K / k_n` about the sky; at reach 0 with a verdict only the near stage acts. At a partial
+/// verdict the floor is `known·P + (1 − known)·sky`, and the shader's affine form is the two stages
+/// with the far pivot that floor and the near pivot `mix(r, P, known)`.
 #[test]
 fn the_grading_keeps_k_about_what_the_reflection_is_of() {
     let (c_near, c_far) = (0.2, 0.3);
@@ -655,7 +656,7 @@ fn the_grading_keeps_k_about_what_the_reflection_is_of() {
             "s {s}, rho {rho}: about the sky"
         );
         if k_n > 1e-4 {
-            let unknown = grade_apply(grade_affine(sky, occ, 0.0, rho, s, c_near, c_far), r);
+            let unknown = grade_apply(grade_affine(sky, sky, 0.0, rho, s, c_near, c_far), r);
             assert!(
                 max_diff(unknown, about(sky, k / k_n)) <= 1e-5,
                 "s {s}, rho {rho}: the far stage alone"
@@ -667,37 +668,104 @@ fn the_grading_keeps_k_about_what_the_reflection_is_of() {
             "s {s}: the near stage alone"
         );
         let known = rng.unit();
+        let floor = add(scale(occ, known), scale(sky, 1.0 - known));
         let p_near = add(scale(r, 1.0 - known), scale(occ, known));
-        let p_far = add(scale(sky, 1.0 - known), scale(occ, known));
-        let staged = grade_reflection(r, p_far, p_near, rho, s, c_near, c_far);
-        let affine = grade_apply(grade_affine(sky, occ, known, rho, s, c_near, c_far), r);
+        let staged = grade_reflection(r, floor, p_near, rho, s, c_near, c_far);
+        let affine = grade_apply(grade_affine(sky, floor, known, rho, s, c_near, c_far), r);
         assert!(
             max_diff(staged, affine) <= 1e-5,
             "s {s}, rho {rho}, known {known}"
         );
-        let identity = grade_apply(grade_affine(sky, occ, known, rho, 0.0, c_near, c_far), r);
+        let identity = grade_apply(grade_affine(sky, floor, known, rho, 0.0, c_near, c_far), r);
         assert!(max_diff(identity, r) <= 1e-6);
     }
 }
 
+/// A partly covered floor, as an unknown verdict the frame's end covers by `c` returns it
+/// (`rgb = c·frame`, `v = 1 − c`, `known = c`, the shape the quarter-resolution plane's bilinear
+/// read gives every silhouette too): the floor is `c·frame + (1 − c)·sky`, and with the near stage
+/// off the grading keeps `K` of the reflection about exactly that. With both stages on it is the
+/// staged law with the far pivot that floor and the near pivot `mix(r, frame, c)`. A far pivot
+/// `mix(sky, floor, known)` would count the cover twice and let `c(1 − c)(1 − K)` of the sky's
+/// lead over the occluder in: under a canopy at half cover that is a dark reflection lifted by
+/// a tenth of the sky.
+#[test]
+fn the_grading_counts_partial_cover_once() {
+    let (c_near, c_far) = (0.2, 0.3);
+    let mut rng = Lcg(0x5EED_0011);
+    for _ in 0..20_000 {
+        let (r, sky, frame) = (rng.v3(0.0, 1.2), rng.v3(0.0, 1.2), rng.v3(0.0, 1.2));
+        let (c, rho, s) = (rng.unit(), rng.unit(), rng.range(0.0, 2.4));
+        let (rgb, v, known) = (scale(frame, c), 1.0 - c, c);
+        let floor_l = add(rgb, scale(sky, v));
+        let pivot = add(scale(frame, c), scale(sky, 1.0 - c));
+        assert!(max_diff(floor_l, pivot) <= 1e-6);
+        let k = grade_keep(s, 0.0, c_far, rho);
+        let one_stage = grade_apply(grade_affine(sky, floor_l, known, rho, s, 0.0, c_far), r);
+        let want = zip(
+            add(pivot, scale(zip(r, pivot, |a, b| a - b), k)),
+            [0.0; 3],
+            f32::max,
+        );
+        assert!(
+            max_diff(one_stage, want) <= 1e-5,
+            "c {c}, s {s}: about c·frame + (1 − c)·sky"
+        );
+        let p_near = add(scale(r, 1.0 - c), scale(frame, c));
+        let staged = grade_reflection(r, pivot, p_near, rho, s, c_near, c_far);
+        let affine = grade_apply(grade_affine(sky, floor_l, known, rho, s, c_near, c_far), r);
+        assert!(max_diff(staged, affine) <= 1e-5, "c {c}, s {s}, rho {rho}");
+    }
+    let (canopy, sky, c, rho, s) = ([0.05; 3], [0.8; 3], 0.5, 0.25, 1.65);
+    let floor_l = add(scale(canopy, c), scale(sky, 1.0 - c));
+    let k = grade_keep(s, c_near, c_far, rho);
+    let graded = grade_apply(grade_affine(sky, floor_l, c, rho, s, c_near, c_far), canopy);
+    let twice = grade_reflection(
+        canopy,
+        add(scale(sky, 1.0 - c), scale(floor_l, c)),
+        add(scale(canopy, 1.0 - c), scale(floor_l, c)),
+        rho,
+        s,
+        c_near,
+        c_far,
+    );
+    let lift = dot(twice, LUMA_709) - dot(graded, LUMA_709);
+    let want = c * (1.0 - c) * (1.0 - k) * (0.8 - 0.05);
+    assert!((lift - want).abs() <= 1e-5, "lift {lift}, want {want}");
+    assert!(lift > 0.06, "lift {lift}");
+}
+
 /// Under a deck, at the reach the Booty's under-deck water measured (rho 0.57) and a hit verdict:
-/// the reflection is the dark underside, a little off the floor's coarser read of it, and the
-/// grading pulls it toward that read, so it is no brighter than 1.05x itself at any strength up to
-/// 2.4. A far stage about the open sky (the single-pivot law) lets a fifth of the sky in at s = 1
-/// and reads several times brighter.
+/// the reflection is the dark underside and the floor the coarser read of it, and the grading
+/// pulls the one toward the other, never toward the sky, at any strength up to 2.4: with the
+/// floor a hair off the underside it reads no brighter than 1.05x itself, and with the floor
+/// clearly brighter or darker it lies between the two, channel by channel. The mutation it
+/// guards against, a far stage about the open sky, reads more than 4x.
 #[test]
 fn the_grading_keeps_under_deck_water_dark() {
     let (c_near, c_far, rho) = (0.2, 0.3, 0.57);
-    let (under, floor, sky) = ([0.03, 0.03, 0.025], [0.031, 0.03, 0.026], [0.6, 0.7, 0.9]);
-    for i in 0..=24 {
-        let s = i as f32 * 0.1;
-        let graded = grade_apply(grade_affine(sky, floor, 1.0, rho, s, c_near, c_far), under);
-        assert!(
-            dot(graded, LUMA_709) <= 1.05 * dot(under, LUMA_709),
-            "s {s}: {graded:?}"
-        );
+    let (under, sky) = ([0.03, 0.03, 0.025], [0.6, 0.7, 0.9]);
+    let close = [0.031, 0.03, 0.026];
+    for floor in [close, [0.08, 0.075, 0.07], [0.01, 0.012, 0.008]] {
+        for i in 0..=24 {
+            let s = i as f32 * 0.1;
+            let graded = grade_apply(grade_affine(sky, floor, 1.0, rho, s, c_near, c_far), under);
+            for ch in 0..3 {
+                let (lo, hi) = (under[ch].min(floor[ch]), under[ch].max(floor[ch]));
+                assert!(
+                    graded[ch] >= lo - 1e-6 && graded[ch] <= hi + 1e-6,
+                    "s {s}, floor {floor:?}: {graded:?}"
+                );
+            }
+            if floor == close {
+                assert!(
+                    dot(graded, LUMA_709) <= 1.05 * dot(under, LUMA_709),
+                    "s {s}: {graded:?}"
+                );
+            }
+        }
     }
-    let sky_pivot = grade_reflection(under, sky, floor, rho, 1.0, c_near, c_far);
+    let sky_pivot = grade_reflection(under, sky, close, rho, 1.0, c_near, c_far);
     assert!(dot(sky_pivot, LUMA_709) > 4.0 * dot(under, LUMA_709));
 }
 
@@ -713,7 +781,7 @@ fn the_shaders_grading_is_the_mirrors() {
         "let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);",
         "let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);",
         "let a = mix(k_f, k, known);",
-        "let b = mix((1.0 - k_f) * sky, (1.0 - k) * floor, known);",
+        "let b = (1.0 - k) * floor - (k_f - k) * (1.0 - known) * sky;",
         "return vec4<f32>(b, a);",
         "let graded = eye_above && water_reflect.look.grade.x > 0.0;",
         "grade_ab = grade_affine(sky, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));",

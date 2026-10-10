@@ -2465,16 +2465,18 @@ fn grade_keep(rho: f32) -> f32 {
 /// reached a verdict, on the occluded `floor` (the occluder where it hit, the sky where it
 /// escaped), keeping `K = k_n·k_f` of `r`, so water under a deck is pulled toward the deck's
 /// underside and never toward the sky; where it did not, the near stage (`k_n = 1 − s·C_NEAR`)
-/// has no pivot and the far stage keeps `k_f` of `r` about the open `sky`. `known` crossfades the
-/// two, and s = 0 is the identity. Two terms instead of the sky and the verdict keep the tier chain
-/// light.
+/// has no pivot and the far stage keeps `k_f` of `r` about the open `sky`. An unknown share
+/// carries no occluder and the whole sky, so `floor = known·P + (1 − known)·sky` with `P` the
+/// floor of the share with a verdict: the far pivot is `floor` itself and the near pivot
+/// `mix(r, P, known) = floor + (1 − known)·(r − sky)`, which counts a partial cover once. s = 0 is
+/// the identity. Two terms instead of the sky and the verdict keep the tier chain light.
 fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<f32> {
     let g = water_reflect.look.grade;
     let k = grade_keep(rho);
     let k_n = clamp(1.0 - g.x * g.z, 0.0, 1.0);
     let k_f = select(k / max(k_n, 1e-4), 0.0, k_n <= 1e-4);
     let a = mix(k_f, k, known);
-    let b = mix((1.0 - k_f) * sky, (1.0 - k) * floor, known);
+    let b = (1.0 - k) * floor - (k_f - k) * (1.0 - known) * sky;
     return vec4<f32>(b, a);
 }
 
