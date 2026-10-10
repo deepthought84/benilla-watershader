@@ -40,9 +40,8 @@ const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
 /// The reflectance's ceiling at grazing angles: the gamma look's `mix(0.02, 0.45, fresnel)` peak.
 const GRAZING_LIMIT: f32 = 0.45;
 
-/// The reflection grading's strength `s`, calibrated on the High tier: near reflections (Crystal
-/// Lake's huts) soften to about the gamma look's contrast, open-sky ones keep the linear
-/// composite's physical strength.
+/// The reflection grading's strength `s`: near reflections (a shore's huts, a pier) soften to about
+/// the gamma look's contrast, open-sky ones keep the linear composite's physical strength.
 const GRADE_STRENGTH: f32 = 0.8;
 
 /// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
@@ -91,10 +90,19 @@ fn floor_occlusion() -> bool {
 }
 
 /// Whether the stylised pipelines take the linear composite (`WATER_COMPOSITE`): on, unless
-/// `$WOW_WATER_COMPOSITE=0` (read once) asks for the gamma look, for an A/B.
+/// `$WOW_WATER_COMPOSITE` (read once) is an off word, [`lever_off`], which asks for the gamma look,
+/// for an A/B.
 pub(crate) fn composite_variant() -> bool {
     static OFF: OnceLock<bool> = OnceLock::new();
-    !*OFF.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| v.trim() == "0"))
+    !*OFF.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| lever_off(&v)))
+}
+
+/// Whether an on/off lever's value turns it off: `0`, `false`, `off` or `no`, in any case.
+fn lever_off(v: &str) -> bool {
+    let v = v.trim();
+    ["0", "false", "off", "no"]
+        .iter()
+        .any(|w| v.eq_ignore_ascii_case(w))
 }
 
 /// The glints' linear weight: `SPEC_WEIGHT` 0.22 raised to the gamma, so the peak over black is the
@@ -131,7 +139,7 @@ fn grade_strength() -> f32 {
             .trim()
             .parse::<f32>()
             .ok()?;
-        if !composite_variant() {
+        if !composite_variant() && s != 0.0 {
             warn!("water: WOW_WATER_GRADE={s} ignored: the gamma look has no grading");
         }
         (s >= 0.0 && s.is_finite()).then_some(s)
@@ -443,7 +451,13 @@ mod tests {
             tier: 1,
             ..LookInputs::default()
         };
-        let lanes = look_lanes(&WaterLook::default(), &inputs);
+        // The composite's strength comes from the constant, not `grade_strength()`, so
+        // `$WOW_WATER_COMPOSITE` and `$WOW_WATER_GRADE` do not reach the test.
+        let look = WaterLook {
+            grade_strength: super::GRADE_STRENGTH,
+            ..WaterLook::default()
+        };
+        let lanes = look_lanes(&look, &inputs);
         let row =
             |at: usize| -> [f32; 4] { lanes[at - LOOK_LANES.start..][..4].try_into().unwrap() };
         assert_eq!(row(LOOK_QUALITY), [1.0, 0.0, 0.0, 0.0]);
@@ -467,6 +481,7 @@ mod tests {
             "the gamma weight 0.22 raised to the gamma"
         );
         assert_eq!(row(LOOK_GRADE), [0.8, 0.3, 0.2, 0.0]);
+        assert!(lever_off(" Off ") && lever_off("0") && lever_off("FALSE") && !lever_off("1"));
         assert_eq!(row(LOOK_SHORE), [0.35, 0.61, 1.0, 1.0]);
         assert_eq!(row(LOOK_SHORE_KIND), [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(row(LOOK_SURF), [0.0548, 1.0, 2.0, 4.0]);

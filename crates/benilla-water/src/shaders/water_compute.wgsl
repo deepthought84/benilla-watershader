@@ -66,10 +66,10 @@ const LAW_MAX_STEPS: i32 = 12;
 
 // The march's lowest level and step budget per tier, one budget for the fragment's march and the
 // compute pass's, so the two give one verdict where they crossfade. Low and Medium walk from the
-// coarser level 3, whose cells are twice as wide, in 10 steps: the fewest of 6, 8, 10 that reach a
-// pier's deck from its reflection (Menethil) as High's 12 from level 2 do, so the grading pivots
-// on the same thing at every tier. The cost is the steps': about 0.035 ms a step over a full
-// screen of floor-served water at rs2.
+// coarser level 3, whose cells are twice as wide, in 10 steps: from there they reach what High's
+// 12 steps from level 2 reach, a pier's deck seen in its reflection among it, so the grading
+// pivots on the same thing at every tier. Each step costs about 0.035 ms over a full screen of
+// floor-served water at rs2.
 #ifdef WATER_TIER_HIGH
 const FLOOR_MARCH_LEVEL: i32 = 2;
 const FLOOR_MARCH_STEPS: i32 = 12;
