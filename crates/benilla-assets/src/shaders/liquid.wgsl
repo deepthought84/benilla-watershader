@@ -2484,9 +2484,10 @@ fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<
 //
 // The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
 // `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the refracted view ray's length from the surface
-// down to the bed's depth plus the way down to the bed along the refracted lighting sun. The colour
-// is the zone's swatch ramp (`look.body`'s rows from Light.dbc) read at the turbidity's optical
-// depth, in three soft bands. `benilla_water::body` derives σ from the swatch on the CPU.
+// down to the bed's depth plus the way down to the bed along the refracted lighting sun, the depth
+// on ADT water at most the authored column's. The colour is the zone's swatch ramp (`look.body`'s
+// rows from Light.dbc) read at the turbidity's optical depth, in three soft bands.
+// `benilla_water::body` derives σ from the swatch on the CPU.
 
 /// Fresh water's index of refraction and its inverse.
 const WATER_IOR: f32 = 1.333;
@@ -2510,7 +2511,8 @@ struct BodyIn {
     sig_turb: f32,
     // The lift: `look.body.look.w` × the frame sheet's mean alpha; 0 on unlit interiors.
     lift: f32,
-    // The authored depth in yards, for a bed that is not known.
+    // The authored depth in yards: the column of a bed that is not known, and on ADT water the
+    // most water a known bed's light crosses.
     fallback_z: f32,
     // A WMO interior pool: lit by 1, as the reference draws it.
     unlit: bool,
@@ -2524,7 +2526,8 @@ struct BodyIn {
 struct BodyOptics {
     // The bed was found behind the pixel, seen from above.
     known: bool,
-    // The water's height above the bed, the view ray's path to it and the optical path, yards.
+    // The water's height above the bed, the view ray's path to it and the optical path, yards;
+    // both paths cross at most the authored column on ADT water.
     z: f32,
     l_view: f32,
     l_opt: f32,
@@ -2599,8 +2602,12 @@ fn water_body_optics(
     let ci = saturate(dot(flat_n, to_view));
     let mu_v = max(sqrt(1.0 - (1.0 - ci * ci) * INV_IOR * INV_IOR), MU_D_MIN);
     o.z = select(bi.fallback_z, max(sb.vertical, 0.0), o.known);
-    o.l_view = o.z / mu_v;
-    o.l_opt = min(o.l_view + o.z / mu_d, 4096.0);
+    // On ADT water the light crosses at most the authored column, the MCLQ depth byte in yards:
+    // 1.12 draws a bed through as much water as the byte says, so a bed the artists left visible
+    // under a deep lake stays visible. A WMO's byte is an opacity, not a depth.
+    let z_path = select(o.z, min(o.z, bi.fallback_z), bi.adt);
+    o.l_view = z_path / mu_v;
+    o.l_opt = min(o.l_view + z_path / mu_d, 4096.0);
     let tau_t = bi.sig_turb * o.l_opt;
     let t_turb = exp(-tau_t);
     o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);

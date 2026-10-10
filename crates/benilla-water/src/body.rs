@@ -12,6 +12,15 @@ use bevy::math::{Vec3, Vec4};
 /// The body rows' floats: ten `vec4`s, `liquid.wgsl`'s `WaterBody`.
 pub const BODY_FLOATS: usize = 40;
 
+/// Yards per unit of the authored depth coordinate `V`, river then ocean, `liquid.wgsl`'s
+/// `REF_RIVER_V_YD` and `REF_OCEAN_V_YD`: the river LUT's span (`0x810380`), and 255 over the
+/// ocean's 1.72 bytes per yard.
+pub const AUTHORED_YD_PER_V: [f32; 2] = [4.6667, 148.26];
+
+/// The cosine of the critical angle, `liquid.wgsl`'s `MU_D_MIN`: a ray refracted into water lies
+/// within it.
+pub const MU_REFRACTED_MIN: f32 = 0.6612;
+
 /// The water's display gamma, `liquid.wgsl`'s `WATER_GAMMA`: a pure power law.
 const WATER_GAMMA: f32 = 2.2;
 
@@ -233,6 +242,23 @@ pub fn kind_optics(
         sigma_abs,
         sigma_turb: TURB_REF * look.turb_scale[kind] * f_alpha * f_hue,
     }
+}
+
+/// The optical path in yards to a bed `z_bed` yards under the surface, `liquid.wgsl`'s `l_opt`:
+/// down the view ray refracted to `mu_v` and down the sun refracted to `mu_d`. On ADT water
+/// (`adt`) the column is at most `z_auth`, the authored depth (`V` × [`AUTHORED_YD_PER_V`]), as
+/// 1.12 draws a bed through as much water as its depth byte says; a WMO's byte is an opacity.
+pub fn optical_path(z_bed: f32, z_auth: f32, mu_v: f32, mu_d: f32, adt: bool) -> f32 {
+    let z = z_bed.max(0.0);
+    let z = if adt { z.min(z_auth) } else { z };
+    (z / mu_v + z / mu_d).min(4096.0)
+}
+
+/// The share of a bed's light per channel that crosses `path` yards of water with `optics`,
+/// `liquid.wgsl`'s `t_bed`.
+pub fn bed_transmittance(optics: &KindOptics, path: f32) -> [f32; 3] {
+    let t_turb = (-optics.sigma_turb * path).exp();
+    optics.sigma_abs.map(|s| (-s * path).exp() * t_turb)
 }
 
 /// The dome's irradiance on a level surface over π, linear: the cosine-weighted mean of its stops
@@ -727,9 +753,9 @@ mod tests {
 
     /// The shader keeps these lines of the body: `body_lift`'s return as [`body_lift`] has it, the
     /// stops read from rows 0 and 63 (no ocean tail, as [`deep_stop`]) at the ceiling lane and half
-    /// of it, `t_bed` and `w_in` from one `t_turb`, and the view's path through the water along the
-    /// refracted ray to the bed's depth. A text pin: `x`, the bands, the ramp and the stops'
-    /// argument order are not checked here.
+    /// of it, `t_bed` and `w_in` from one `t_turb`, and the optical path as [`optical_path`] has it:
+    /// along the refracted rays to the bed's depth, on ADT water at most the authored column. A
+    /// text pin: `x`, the bands, the ramp and the stops' argument order are not checked here.
     #[test]
     fn the_shader_keeps_the_body_lift_stop_and_transport_lines() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
@@ -742,9 +768,82 @@ mod tests {
             "mix(r0, r63, dc),",
             "o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);",
             "o.w_in = select(1.0, 1.0 - t_turb, o.known);",
-            "o.l_view = o.z / mu_v;",
+            "let z_path = select(o.z, min(o.z, bi.fallback_z), bi.adt);",
+            "o.l_view = z_path / mu_v;",
+            "o.l_opt = min(o.l_view + z_path / mu_d, 4096.0);",
+            "let tau_t = bi.sig_turb * o.l_opt;",
+            "depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),",
+            "w.path.x < 0.5,",
         ] {
             assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
+    }
+
+    /// The authored column caps a deep lake's path: a bed 45 yd down under a river column authored
+    /// at byte 6 (V 6/42, 0.67 yd) shows through as the 1.12 lake does, where the true column passes
+    /// almost nothing (Loch Modan's noon row, a grazing view, the sun 60° up). A column authored at
+    /// V = 1 is the river LUT's 4.67 yd, which still passes a little.
+    #[test]
+    fn a_deep_lake_bed_shows_through_its_authored_column() {
+        let b = |c: [f32; 3]| c.map(|x| x / 255.0);
+        let loch = kind_optics(
+            b([95.0, 80.0, 56.0]),
+            b([64.0, 78.0, 110.0]),
+            0.5,
+            false,
+            &BodyLook::default(),
+        );
+        let mu_d = 0.85;
+        let t = |path: f32| luma(bed_transmittance(&loch, path));
+        let z_auth = 6.0 / 42.0 * AUTHORED_YD_PER_V[0];
+        let capped = optical_path(45.0, z_auth, MU_REFRACTED_MIN, mu_d, true);
+        let uncapped = optical_path(45.0, z_auth, MU_REFRACTED_MIN, mu_d, false);
+        assert!((capped - z_auth * (1.0 / MU_REFRACTED_MIN + 1.0 / mu_d)).abs() < 1e-4);
+        assert!(t(capped) > 0.4, "{} {loch:?}", t(capped));
+        assert!(t(uncapped) < 1e-3, "{}", t(uncapped));
+        let full = optical_path(45.0, AUTHORED_YD_PER_V[0], MU_REFRACTED_MIN, mu_d, true);
+        assert!((0.01..0.05).contains(&t(full)), "{}", t(full));
+    }
+
+    /// A bed shallower than its authored column keeps its own path, a deep ocean column authored
+    /// deep keeps its depth, and a WMO's water, whose byte is an opacity, is never capped.
+    #[test]
+    fn the_cap_leaves_shallow_beds_deep_oceans_and_wmo_water_alone() {
+        let (mu_v, mu_d) = (0.8, 0.9);
+        let free = |z: f32| z / mu_v + z / mu_d;
+        // A 1.5 yd bed under a river byte of 21 (V 0.5, 2.33 yd).
+        let river = 0.5 * AUTHORED_YD_PER_V[0];
+        assert_eq!(optical_path(1.5, river, mu_v, mu_d, true), free(1.5));
+        // A 40 yd sea bed under an ocean byte of 69 (40.1 yd).
+        let ocean = 69.0 / 255.0 * AUTHORED_YD_PER_V[1];
+        assert!((ocean - 40.12).abs() < 0.01, "{ocean}");
+        assert_eq!(optical_path(40.0, ocean, mu_v, mu_d, true), free(40.0));
+        // A deeper sea bed is held at the authored 40.1 yd, still opaque at the clear lake's rate.
+        let held = optical_path(90.0, ocean, mu_v, mu_d, true);
+        assert!((held - free(ocean)).abs() < 1e-3, "{held}");
+        let clear = KindOptics {
+            sigma_abs: anchored(SIGMA_CLEAR_LAKE),
+            sigma_turb: TURB_REF,
+        };
+        assert!(luma(bed_transmittance(&clear, held)) < 1e-4);
+        // WMO water: the byte is no depth.
+        assert_eq!(optical_path(9.0, 0.3, mu_v, mu_d, false), free(9.0));
+        // A bed above the surface and a zero column cross no water.
+        assert_eq!(optical_path(-1.0, river, mu_v, mu_d, true), 0.0);
+        assert_eq!(optical_path(3.0, 0.0, mu_v, mu_d, true), 0.0);
+    }
+
+    /// The CPU's authored yards per `V` and critical cosine are the shader's.
+    #[test]
+    fn the_authored_column_constants_are_the_shaders() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        let [river, ocean] = AUTHORED_YD_PER_V;
+        for line in [
+            format!("const REF_RIVER_V_YD: f32 = {river};"),
+            format!("const REF_OCEAN_V_YD: f32 = {ocean};"),
+            format!("const MU_D_MIN: f32 = {MU_REFRACTED_MIN};"),
+        ] {
+            assert!(wgsl.contains(&line), "liquid.wgsl lost `{line}`");
         }
     }
 
