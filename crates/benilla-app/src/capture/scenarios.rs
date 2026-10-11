@@ -1081,6 +1081,48 @@ pub(super) const ON_DEMAND: &[Scenario] = &[
         minute: 720,
         ui: None,
     },
+    // Under a lake: 3 yd below Lake Everstill's surface, Redridge, 22 yd south of its north
+    // shore by Lakeshire (9 yd deep), facing 0 at the shore, 15° up at the surface from below.
+    // The eye stands on the loaded surface ([`scene_dive`]); the z here only seats it until then.
+    Scenario {
+        name: "water-redridge-under",
+        map: Some(MAP_AZEROTH),
+        eye: [-9318.8, -2185.4, 53.2],
+        look: [-9222.21, -2185.4, 79.08],
+        minute: 720,
+        ui: None,
+    },
+    // Through the surface: the Savage Coast sea 75 yd out along `water-savage-coast`'s view
+    // (15 yd deep), facing on along it, level; a burst dives the eye from 2 yd over the loaded
+    // surface to 3 yd under it ([`scene_dive`]).
+    Scenario {
+        name: "water-savage-dive",
+        map: Some(MAP_AZEROTH),
+        eye: [-12599.7, 31.4, 2.0],
+        look: [-12573.52, 127.91, 2.0],
+        minute: 720,
+        ui: None,
+    },
+    // The reflection's repeat cameras, as `vista` seats them (the eye 2 yd over the feet, looking
+    // 500 yd out): the Stranglethorn coast at sunset from feet (-12395.0, -318.7, 12.5), facing
+    // 165, 4° down, grazing; and Lake Nazferiti from its south end at the water, feet (-12090,
+    // -370, 10.1), facing 0 along it, 3° down.
+    Scenario {
+        name: "water-stv-sunset-repeat",
+        map: Some(MAP_AZEROTH),
+        eye: [-12395.0, -318.7, 14.5],
+        look: [-12876.79, -189.61, -20.38],
+        minute: 1180,
+        ui: None,
+    },
+    Scenario {
+        name: "water-nazferiti-repeat",
+        map: Some(MAP_AZEROTH),
+        eye: [-12090.0, -370.0, 12.1],
+        look: [-11590.69, -370.0, -14.07],
+        minute: 720,
+        ui: None,
+    },
     //
     // The cameras below stand where the water assessment's live stills stood: a `.tele` spot's feet
     // as its `.gps` answer gives them, or a shore spot computed from the planar map, the eye 2 yd
@@ -1419,6 +1461,18 @@ pub(super) fn scene_pan(name: &str) -> Option<[f32; 2]> {
     }
 }
 
+/// A golden water scene whose eye stands on the water surface under it, found at run time in the
+/// loaded liquid (`capture::shot_pose`): `[first, last]` yd over the surface, below it when
+/// negative, swept linearly over a burst; a still stands at `first`. The scene's own eye z only
+/// seats the camera until the surface loads, and the shot fails if it never does.
+pub(super) fn scene_dive(name: &str) -> Option<[f32; 2]> {
+    match name {
+        "water-redridge-under" => Some([-3.0, -3.0]),
+        "water-savage-dive" => Some([2.0, -3.0]),
+        _ => None,
+    }
+}
+
 /// The `name-close` subject: the `name-water` wolf's name, orbited at any distance. World text is
 /// the only consumer that draws the glyph sheet at other than 1:1, so a glyph-cell sampling defect
 /// shows only in a magnified name.
@@ -1602,5 +1656,20 @@ mod water_scene_tests {
             names.len() - 7,
             "only those seven scenes carry either"
         );
+    }
+
+    /// The dives are golden water scenes, and only they stand on the surface; the under-lake still
+    /// stays under it, and the dive starts over it and ends under it.
+    #[test]
+    fn the_dives_name_golden_scenes_and_cross_or_stay_under_the_surface() {
+        let names: Vec<&str> = water_scene_names().collect();
+        let dives: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| scene_dive(n).is_some())
+            .collect();
+        assert_eq!(dives, ["water-redridge-under", "water-savage-dive"]);
+        assert!(scene_dive("water-redridge-under").is_some_and(|[a, b]| a < 0.0 && b < 0.0));
+        assert!(scene_dive("water-savage-dive").is_some_and(|[a, b]| a > 0.0 && b < 0.0));
     }
 }

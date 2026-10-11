@@ -35,7 +35,9 @@
 //! A scene's burst writes `<stem>.poses.csv` beside its shots, each shot's camera eye and look-at
 //! in raw WoW coords. `$WOW_CAPTURE_PAN=<yaw>[,<pitch>]`, or a scene's own pan
 //! ([`scenarios::scene_pan`]), sweeps the view that many degrees either side of the scene's over
-//! the burst ([`pan_pose`]), the eye fixed.
+//! the burst ([`pan_pose`]), the eye fixed. A dive scene ([`scenarios::scene_dive`]) stands its eye
+//! on the water surface found under it in the loaded liquid, and its burst sweeps the eye's height
+//! over that surface ([`shot_pose`]).
 //!
 //! ## Running one capture by hand
 //! Run through Cargo, never a bare `target/debug/benilla`, which may be stale:
@@ -444,13 +446,57 @@ fn pan_pose(
     (Vec3::from(eye) + dir * len).to_array()
 }
 
+/// Burst shot `shot` of `shots`: the camera's eye and look-at, raw WoW coords. A dive scene's eye
+/// stands its [`scenarios::scene_dive`] height over the water `surface` under it, swept linearly
+/// from the first to the last over a burst, and the look-at moves with it, so the view keeps its
+/// direction; until the surface is found, the scene's own eye. Then the pan ([`pan_pose`]).
+fn shot_pose(
+    scenario: &Scenario,
+    pan: Option<[f32; 2]>,
+    dive: Option<[f32; 2]>,
+    surface: Option<f32>,
+    shot: u32,
+    shots: u32,
+) -> ([f32; 3], [f32; 3]) {
+    let (mut eye, mut look) = (scenario.eye, scenario.look);
+    if let (Some([first, last]), Some(z)) = (dive, surface) {
+        let s = if shots > 1 {
+            shot as f32 / (shots - 1) as f32
+        } else {
+            0.0
+        };
+        let dz = z + first + (last - first) * s - eye[2];
+        eye[2] += dz;
+        look[2] += dz;
+    }
+    (eye, pan_pose(eye, look, pan, shot, shots))
+}
+
+/// A dive scene's water surface: the loaded liquid's height under its eye
+/// ([`benilla_world::world_point::WorldPoint::water_surface_at`]), read each frame until a surface answers, then kept. Logged
+/// once, so the capture's log says where the eye stood.
+fn find_dive_surface(mut ctx: ResMut<CaptureCtx>, world: benilla_world::world_point::WorldPoint) {
+    let (Some(scenario), Some([first, last]), None) = (ctx.scenario, ctx.dive, ctx.surface) else {
+        return;
+    };
+    let Some(z) = world.water_surface_at(benilla_world::world_point::Subject::Eye, scenario.eye)
+    else {
+        return;
+    };
+    info!(
+        "capture: {}: the water surface at ({:.1}, {:.1}) is z {z:.3}; the eye stands {first:+} \
+         to {last:+} yd over it",
+        scenario.name, scenario.eye[0], scenario.eye[1],
+    );
+    ctx.surface = Some(z);
+}
+
 /// `<stem>.poses.csv` beside a burst's shots: `shot,ex,ey,ez,lx,ly,lz`, each shot's camera eye and
 /// look-at in raw WoW coords, which the pan rows of `scripts/water_metrics.py` reproject through.
 fn write_poses(ctx: &CaptureCtx, scenario: &Scenario) -> std::io::Result<()> {
     let mut csv = String::from("shot,ex,ey,ez,lx,ly,lz\n");
-    let e = scenario.eye;
     for shot in 0..ctx.burst {
-        let l = pan_pose(e, scenario.look, ctx.pan, shot, ctx.burst);
+        let (e, l) = shot_pose(scenario, ctx.pan, ctx.dive, ctx.surface, shot, ctx.burst);
         csv.push_str(&format!(
             "{shot},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}\n",
             e[0], e[1], e[2], l[0], l[1], l[2]
@@ -620,6 +666,10 @@ struct CaptureCtx {
     burst_every: u32,
     /// [`burst_pan`] on a burst, else `None`.
     pan: Option<[f32; 2]>,
+    /// [`scenarios::scene_dive`]: the eye's height over the water surface, first and last shot.
+    dive: Option<[f32; 2]>,
+    /// A dive scene's water surface under its eye, WoW Z, once [`find_dive_surface`] finds it.
+    surface: Option<f32>,
     /// A golden water scene's settle met a one-colour frame and built on (logged once).
     waited_flat: bool,
     /// The frames of the stable runs a golden water scene spent on its clear colour, which extend
@@ -994,6 +1044,8 @@ impl Plugin for CapturePlugin {
                 burst: burst_shots(),
                 burst_every: burst_every(),
                 pan: burst_pan(shot_name).filter(|_| burst_shots() > 1),
+                dive: scenario.and_then(|s| scenarios::scene_dive(s.name)),
+                surface: None,
                 waited_flat: false,
                 flat_credit: 0,
                 shot: 0,
@@ -1011,7 +1063,12 @@ impl Plugin for CapturePlugin {
                 frames: 0,
                 bailed: false,
             })
-            .add_systems(Update, pin_scene.in_set(WorldStage::Present))
+            .add_systems(
+                Update,
+                (find_dive_surface, pin_scene)
+                    .chain()
+                    .in_set(WorldStage::Present),
+            )
             // Before `UnitFeed`: the seed stands in for wire data live play delivers on earlier
             // frames, so the same frame's feeds and the one-shot `MERCHANT_SHOW` paint must see it.
             .add_systems(
@@ -1152,16 +1209,17 @@ fn pin_scene(
                 * Quat::from_rotation_x(-req.el_deg.to_radians());
             (look + orbit * (Vec3::Z * req.dist), look)
         }
-        _ => (
-            wow_to_bevy(scenario.eye),
-            wow_to_bevy(pan_pose(
-                scenario.eye,
-                scenario.look,
+        _ => {
+            let (eye, look) = shot_pose(
+                &scenario,
                 ctx.pan,
+                ctx.dive,
+                ctx.surface,
                 ctx.shot,
                 ctx.burst,
-            )),
-        ),
+            );
+            (wow_to_bevy(eye), wow_to_bevy(look))
+        }
     };
     for mut t in &mut cam {
         *t = Transform::from_translation(eye).looking_at(look, Vec3::Y);
@@ -1416,6 +1474,17 @@ fn drive_capture(
                 );
                 Phase::ProbeWarmup(0)
             } else {
+                // A dive's eye stands on its surface: without one the shot shows the wrong place.
+                if ctx.dive.is_some() && ctx.surface.is_none() {
+                    error!(
+                        "capture: FAILED — {} found no water surface under its eye; no image \
+                         written",
+                        ctx.name
+                    );
+                    ctx.bailed = true;
+                    exit.write(AppExit::error());
+                    return;
+                }
                 let path = ctx.shot_path();
                 commands
                     .spawn(Screenshot::primary_window())
@@ -1885,6 +1954,41 @@ mod tests {
         // A quarter of the way along: a quarter of the sweep, −20° to −10°.
         let q = pan_pose(eye, look, pan, 2, 9);
         assert!((heading(q) + 10.0).abs() < 1e-3, "{}", heading(q));
+    }
+
+    /// A dive stands the eye on the surface found, at its first height for a still, swept to its
+    /// last over a burst, the look-at moved with it; before the surface is found, the scene's own.
+    #[test]
+    fn a_dive_stands_the_eye_on_the_surface_and_sweeps_its_height() {
+        let scenario = Scenario {
+            name: "dive",
+            map: None,
+            eye: [10.0, 20.0, 5.0],
+            look: [110.0, 20.0, 15.0],
+            minute: 720,
+            ui: None,
+        };
+        let dive = Some([2.0, -3.0]);
+        let pose = |surface, shot, shots| shot_pose(&scenario, None, dive, surface, shot, shots);
+        assert_eq!(
+            pose(None, 3, 6),
+            (scenario.eye, scenario.look),
+            "no surface yet"
+        );
+        assert_eq!(
+            pose(Some(-1.0), 0, 0),
+            ([10.0, 20.0, 1.0], [110.0, 20.0, 11.0]),
+            "a still"
+        );
+        assert_eq!(pose(Some(-1.0), 0, 6).0[2], 1.0);
+        assert_eq!(pose(Some(-1.0), 2, 6).0[2], -1.0);
+        let (eye, look) = pose(Some(-1.0), 5, 6);
+        assert_eq!((eye[2], look[2]), (-4.0, 6.0));
+        assert_eq!(
+            shot_pose(&scenario, None, None, Some(-1.0), 5, 6),
+            (scenario.eye, scenario.look),
+            "not a dive"
+        );
     }
 
     /// A run removes the files an earlier capture to its path left: a still its own shot, a burst
