@@ -102,10 +102,9 @@ impl Default for WaterDebug {
 /// The Improved Water debug views by id (`WaterDebug::view`, `liquid.wgsl`'s `WV_*` consts); 0 is
 /// off. A view paints one quantity over the water; `flat` is a mode instead, the whole look on the
 /// unrippled normal, and `composite_identity` and `discard` change the linear composite's layer.
-/// Those two and the body's `transmittance`, `in_scatter` and `albedo` are drawn only with the
-/// linear composite; the gamma look (`$WOW_WATER_COMPOSITE=0`) draws as usual under them.
-/// `fresnel` shows the gamma look's reflection weight, or with the composite its reflectance. The
-/// grading's `grade`, `refl_ungraded` and `refl_graded` are the composite's too.
+/// The body's `transmittance`, `in_scatter` and `albedo` paint the composite's body terms;
+/// `fresnel` its reflectance; the grading's `grade`, `refl_ungraded` and `refl_graded` its
+/// reflection.
 pub const WATER_VIEWS: [&str; 25] = [
     "off",
     "mirror1",

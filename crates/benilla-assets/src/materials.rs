@@ -395,11 +395,9 @@ impl LiquidKey {
     /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High, each pushing
     /// its own `WATER_TIER_*` def ([`Self::TIER_DEFS`]).
     pub const TIER_SHIFT: u16 = 3;
-    /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3.
+    /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3. `path.w` bit 4 (key
+    /// bit 6) is spare.
     pub const SSR: u16 = 1 << 5;
-    /// The linear composite as a variant (`path.w` bit 4): `WATER_COMPOSITE` and the premultiplied
-    /// blend the remainder needs ([`LiquidExt::specialize`]).
-    pub const COMPOSITE: u16 = 1 << 6;
     /// The highlight excess stored for the glow (`path.w` bit 5): a pipeline of its own, for which
     /// [`Self::frag_defs`] pushes no def.
     pub const GLOW: u16 = 1 << 7;
@@ -414,8 +412,8 @@ impl LiquidKey {
     /// The def each tier compiles under, by [`Self::tier`].
     pub const TIER_DEFS: [&'static str; 3] =
         ["WATER_TIER_LOW", "WATER_TIER_MEDIUM", "WATER_TIER_HIGH"];
-    /// The key bits `path.w` may set: bits 2..=9.
-    pub const CAPS_MASK: u16 = 0x3FC;
+    /// The key bits `path.w` may set: bits 2..=9 but the spare bit 6.
+    pub const CAPS_MASK: u16 = 0x3BC;
 
     /// The key of a material with these `kind` and `path` lanes. Magma and slime return
     /// [`Self::FULLBRIGHT`] before any other lane is read, so both lanes share their pipeline.
@@ -455,20 +453,12 @@ impl LiquidKey {
 
     /// The keys a player reaches without a debug switch: the reference lane, magma and slime, and
     /// stylised water at each tier, carrying [`Self::GLOW`] from Medium up when `glow`,
-    /// [`Self::DUAL_SOURCE`] when `dual`, [`Self::PAINTED`] when `painted` and
-    /// [`Self::COMPOSITE`] when `composite`. The pipeline warm pass compiles these; [`Self::VIEW`]
-    /// and [`Self::SSR`] are debug variants, compiled on first use.
-    pub fn shipped(
-        glow: bool,
-        dual: bool,
-        painted: bool,
-        composite: bool,
-    ) -> impl Iterator<Item = LiquidKey> {
+    /// [`Self::DUAL_SOURCE`] when `dual` and [`Self::PAINTED`] when `painted`. The pipeline warm
+    /// pass compiles these; [`Self::VIEW`] and [`Self::SSR`] are debug variants, compiled on first
+    /// use.
+    pub fn shipped(glow: bool, dual: bool, painted: bool) -> impl Iterator<Item = LiquidKey> {
         let stylised = (0..3u16).map(move |tier| {
             let mut k = Self::STYLISED | tier << Self::TIER_SHIFT;
-            if composite {
-                k |= Self::COMPOSITE;
-            }
             if glow && tier >= 1 {
                 k |= Self::GLOW;
             }
@@ -503,16 +493,13 @@ impl LiquidKey {
         if self.has(Self::SSR) {
             defs.push("WATER_SSR");
         }
-        if self.has(Self::COMPOSITE) {
-            defs.push("WATER_COMPOSITE");
-        }
         defs
     }
 
-    /// Whether the pipeline blends premultiplied (`One, OneMinusSrcAlpha`): the linear composite
-    /// hands the blender `C − β·snapshot` with `1 − β` in alpha, so `dst' = src + β·dst`.
+    /// Whether the pipeline blends premultiplied (`One, OneMinusSrcAlpha`): stylised water's linear
+    /// composite hands the blender `C − β·snapshot` with `1 − β` in alpha, so `dst' = src + β·dst`.
     pub fn premultiplied(self) -> bool {
-        self.composite() && self.has(Self::COMPOSITE)
+        self.composite()
     }
 }
 
@@ -801,7 +788,7 @@ impl MaterialExtension for LiquidExt {
     /// boundary, so neighbouring triangles' shorelines would disagree.
     ///
     /// The [`LiquidKey`] defs go to the fragment stage before the attribute check returns, so a
-    /// mesh without our attributes takes them all the same, and so does the linear composite's
+    /// mesh without our attributes takes them all the same, and so does stylised water's
     /// premultiplied blend ([`LiquidKey::premultiplied`]); sort, phase and depth state stay
     /// `AlphaMode::Blend`'s.
     fn specialize(
@@ -1855,25 +1842,15 @@ mod tests {
             ]
         );
         assert!(!plain.frag_defs().contains(&"WATER_SSR"));
-        // The linear composite compiles its def and blends premultiplied; nothing else does.
-        let composite = key(0.0, 1.0, 16.0);
-        assert!(composite.has(LiquidKey::COMPOSITE) && composite.premultiplied());
-        assert_eq!(
-            composite.frag_defs(),
-            [
-                "WATER_STYLISED",
-                "WATER_SCENE_DEPTH",
-                "WATER_TIER_LOW",
-                "WATER_COMPOSITE"
-            ]
-        );
-        assert!(!plain.premultiplied() && !ssr.premultiplied() && !view.premultiplied());
+        // Stylised water blends premultiplied with every variant; nothing else does.
+        assert!(plain.premultiplied() && ssr.premultiplied() && view.premultiplied());
         assert!(
-            !key(1.0, 1.0, 16.0).premultiplied() && !key(0.0, 0.0, 16.0).premultiplied(),
+            !key(1.0, 1.0, 0.0).premultiplied() && !key(0.0, 0.0, 0.0).premultiplied(),
             "magma, slime and the reference lane keep the alpha blend"
         );
-        // A negative lane reads as no bits.
+        // A negative lane reads as no bits, and the spare bit as none.
         assert_eq!(key(0.0, 1.0, -3.0), plain);
+        assert_eq!(key(0.0, 1.0, 16.0), plain);
         // The tier's two bits, each tier its one def; a stale 3 reads as High.
         for (bits, tier) in [(0.0, 0), (2.0, 1), (4.0, 2), (6.0, 2)] {
             let k = key(0.0, 1.0, bits);
@@ -1897,18 +1874,17 @@ mod tests {
     }
 
     /// The warm set: five keys for every argument set (the reference lane, magma and slime,
-    /// stylised water at each tier), the glow bit from Medium up, the other three wherever asked,
+    /// stylised water at each tier), the glow bit from Medium up, the other two wherever asked,
     /// no debug bit, and each one read back from the lanes [`LiquidKey::path_lanes`] writes.
     #[test]
     fn the_shipped_keys_are_every_lane_at_every_tier() {
         use super::LiquidKey as K;
         use bevy::math::Vec4;
         let mut union = std::collections::HashSet::new();
-        for set in 0..16 {
-            let (glow, dual, painted, composite) =
-                (set & 1 != 0, set & 2 != 0, set & 4 != 0, set & 8 != 0);
-            let keys: Vec<K> = K::shipped(glow, dual, painted, composite).collect();
-            assert_eq!(keys.len(), 5, "{set:04b}");
+        for set in 0..8 {
+            let (glow, dual, painted) = (set & 1 != 0, set & 2 != 0, set & 4 != 0);
+            let keys: Vec<K> = K::shipped(glow, dual, painted).collect();
+            assert_eq!(keys.len(), 5, "{set:03b}");
             assert_eq!(keys[0], K::default(), "the reference lane first");
             assert!(keys[1].has(K::FULLBRIGHT) && !keys[1].composite());
             for (tier, k) in (0u8..).zip(&keys[2..]) {
@@ -1917,8 +1893,7 @@ mod tests {
                 assert_eq!(k.has(K::GLOW), glow && tier >= 1, "{k:?}");
                 assert_eq!(k.has(K::DUAL_SOURCE), dual, "{k:?}");
                 assert_eq!(k.has(K::PAINTED), painted, "{k:?}");
-                assert_eq!(k.has(K::COMPOSITE), composite, "{k:?}");
-                assert!(k.premultiplied() == composite, "{k:?}");
+                assert!(k.premultiplied(), "{k:?}");
                 assert!(!k.has(K::VIEW) && !k.has(K::SSR));
             }
             for k in &keys {
@@ -1928,9 +1903,8 @@ mod tests {
             }
             union.extend(keys);
         }
-        // The reference lane, magma and slime, and 4 + 8 + 8 stylised keys (Low has no glow), each
-        // with and without the linear composite.
-        assert_eq!(union.len(), 42);
+        // The reference lane, magma and slime, and 4 + 8 + 8 stylised keys (Low has no glow).
+        assert_eq!(union.len(), 22);
     }
 
     /// The per-stage count reads visibility, binding arrays and write access, and names each
@@ -2106,12 +2080,12 @@ mod tests {
                 "{key:?} lost the magma grade"
             );
         }
-        // The debug views with the march and the linear composite (`path.w` bits 0, 3 and 4)
-        // carry `WATER_VIEW`, `WATER_SSR` and `WATER_COMPOSITE`, the region's guards whose names
-        // only they declare, and `WATER_DUAL_SOURCE` the composite's second output. The floor march
-        // law's tier branches declare module-scope names too (`FLOOR_MARCH_LEVEL`,
-        // `FLOOR_MARCH_STEPS`), the same ones in every branch, so this key's tier declares them all.
-        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 25.0));
+        // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
+        // `WATER_SSR`, the region's guards whose names only they declare, and `WATER_DUAL_SOURCE`
+        // the composite's second output. The floor march law's tier branches declare module-scope
+        // names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`), the same ones in every branch, so
+        // this key's tier declares them all.
+        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
         let mut defs = water.frag_defs();
         defs.push("WATER_DUAL_SOURCE");
         let text = liquid_under(&defs);

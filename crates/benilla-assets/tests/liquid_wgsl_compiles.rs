@@ -20,14 +20,13 @@ use std::path::Path;
 
 use benilla_assets::materials::LiquidKey;
 
-/// Every key the tripwire covers: the union of [`LiquidKey::shipped`] over its arguments, the
-/// linear composite's (`$WOW_WATER_COMPOSITE`) among them, and each stylised one with each
-/// combination of the debug variants' bits, which the debug panel and the environment allow at
-/// once.
+/// Every key the tripwire covers: the union of [`LiquidKey::shipped`] over its arguments, and each
+/// stylised one with each combination of the debug variants' bits, which the debug panel and the
+/// environment allow at once.
 fn covered_keys() -> Vec<LiquidKey> {
     let mut keys = Vec::new();
-    for set in 0..16 {
-        for key in LiquidKey::shipped(set & 1 != 0, set & 2 != 0, set & 4 != 0, set & 8 != 0) {
+    for set in 0..8 {
+        for key in LiquidKey::shipped(set & 1 != 0, set & 2 != 0, set & 4 != 0) {
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -41,10 +40,6 @@ fn covered_keys() -> Vec<LiquidKey> {
                 LiquidKey::VIEW,
                 LiquidKey::SSR,
                 LiquidKey::VIEW | LiquidKey::SSR,
-                LiquidKey::COMPOSITE,
-                LiquidKey::COMPOSITE | LiquidKey::VIEW,
-                LiquidKey::COMPOSITE | LiquidKey::SSR,
-                LiquidKey::COMPOSITE | LiquidKey::VIEW | LiquidKey::SSR,
             ]
             .map(|bits| {
                 let (y, w) = k.path_lanes();
@@ -78,8 +73,8 @@ fn liquid_wgsl_compiles_for_every_liquid_pipeline() {
     let keys = covered_keys();
     assert_eq!(
         keys.len(),
-        42 + 120,
-        "42 shipped keys and 120 debug variants of the stylised 40"
+        22 + 60,
+        "22 shipped keys and 60 debug variants of the stylised 20"
     );
     let mut by_defs: HashMap<Vec<&str>, Vec<LiquidKey>> = HashMap::new();
     for key in keys {

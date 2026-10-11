@@ -92,8 +92,8 @@ fn look_reach(farclip: f32) -> f32 {
 /// The pass inherited the world lens whole (only its near plane was replaced), and the world lens
 /// reaches about 3000 yd: far beyond `farclip` on purpose, so the coarse WDL horizon can draw
 /// behind the wall (`view::within_farclip`). The mirror inherited that reach for an image that is
-/// downscaled, sampled through a rippling normal, and mixed in at [`REFLECT_MAX`] at its very
-/// strongest — a second horizon's worth of culling and draws, for a picture that cannot show it.
+/// downscaled, sampled through a rippling normal, and mixed in at the water's Fresnel share, at
+/// most the grazing limit — a second horizon's worth of culling and draws, for a picture that cannot show it.
 ///
 /// **This is a frustum bound, not a clip plane.** Bevy's perspective matrix is
 /// `perspective_infinite_reverse_rh` and does not carry `far` at all; `far` builds the [`Frustum`]
@@ -102,8 +102,8 @@ fn look_reach(farclip: f32) -> f32 {
 /// simply stops being submitted.
 ///
 /// Five hundred rather than the two or three hundred the near field would justify, because the
-/// reflection is at its *strongest* where it shows the most distant things: Fresnel runs to
-/// [`REFLECT_MAX`] at grazing angles, which is exactly the long view down a lake or out to sea. Cut
+/// reflection is at its *strongest* where it shows the most distant things: Fresnel runs to the
+/// grazing limit at grazing angles, which is exactly the long view down a lake or out to sea. Cut
 /// too close and the reflected far shore goes missing from the one shot that shows it off. Sweep it
 /// with `$WOW_MIRROR_FAR` against `$WOW_GPU_MS` before moving the default.
 const MIRROR_FAR_YARDS: f32 = 500.0;
@@ -1200,7 +1200,7 @@ pub(super) fn drive_reflection(
     data.0[20..24].copy_from_slice(&[to_moon.x, to_moon.y, to_moon.z, moon_visible.0]);
     // The flag row: `x` the mirror capture's blur radius in capture texels, `y` the debug view
     // (`WaterDebug::view`, read only by the `WATER_VIEW` variant), `z` the march's strength, `w`
-    // the old layered composite (off).
+    // spare.
     // `z` = the march's own strength: the debug panel's "screen-space reflection", off by
     // default, on Improved Water only.
     let ssr_on = f32::from(style.is_stylised() && dev.water.ssr);

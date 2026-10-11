@@ -260,9 +260,6 @@ pub struct WaterPipelineCaps {
     pub tier: u8,
     /// The screen-space march as a debug variant.
     pub ssr: bool,
-    /// The linear composite; a water plugin asks for it unless the gamma look is wanted for an
-    /// A/B.
-    pub composite: bool,
     /// The highlight excess stored for the glow.
     pub glow: bool,
     /// Per-channel transmittance through dual-source blending.
@@ -280,7 +277,6 @@ impl WaterPipelineCaps {
         for (on, bit) in [
             (self.view, K::VIEW),
             (self.ssr, K::SSR),
-            (self.composite, K::COMPOSITE),
             (self.glow, K::GLOW),
             (self.dual_source, K::DUAL_SOURCE),
             (self.painted, K::PAINTED),
@@ -401,17 +397,16 @@ mod tests {
     /// on the stylised lane only; magma and slime stay fullbright whatever `path.w` holds.
     #[test]
     fn the_caps_round_trip_through_path_w() {
-        for bools in 0u8..64 {
+        for bools in 0u8..32 {
             for tier in 0..=2 {
                 let on = |i: u8| bools & (1 << i) != 0;
                 let caps = WaterPipelineCaps {
                     view: on(0),
                     tier,
                     ssr: on(1),
-                    composite: on(2),
-                    glow: on(3),
-                    dual_source: on(4),
-                    painted: on(5),
+                    glow: on(2),
+                    dual_source: on(3),
+                    painted: on(4),
                 };
                 let lane = caps.bits() as f32;
                 let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, lane));
@@ -420,7 +415,6 @@ mod tests {
                 for (want, bit) in [
                     (caps.view, LiquidKey::VIEW),
                     (caps.ssr, LiquidKey::SSR),
-                    (caps.composite, LiquidKey::COMPOSITE),
                     (caps.glow, LiquidKey::GLOW),
                     (caps.dual_source, LiquidKey::DUAL_SOURCE),
                     (caps.painted, LiquidKey::PAINTED),

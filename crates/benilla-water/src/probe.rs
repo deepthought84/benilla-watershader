@@ -1574,9 +1574,7 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
             0.0,
             f32::from(probe.is_some_and(|p| p.armed) && probe_raw()),
         ],
-        // A pure gate now: the look knob is a Fresnel boost two rows down, because scaling the
-        // tier's own weight could not make it more visible — it already owns the composited
-        // reflection outright wherever it contributes. `y` and `z` spare.
+        // `x` the tier's strength, a gate; `y` and `z` spare.
         [
             f32::from(live),
             0.0,
@@ -1603,14 +1601,8 @@ pub(crate) fn probe_lanes(probe: Option<&WaterProbe>) -> ([f32; 4], [f32; 4], [f
             if probe_blur() { probe_lod_floor() } else { 0.0 },
             ripple_scale(),
         ],
-        // `x` = the probe tier's Fresnel boost; `y` the tap count; `z` the deepest mip the water
-        // may read; `w` spare.
-        [
-            probe_strength(),
-            probe_taps(),
-            (probe_mips() - 1) as f32,
-            0.0,
-        ],
+        // `x` spare; `y` the tap count; `z` the deepest mip the water may read; `w` spare.
+        [0.0, probe_taps(), (probe_mips() - 1) as f32, 0.0],
     )
 }
 
@@ -1628,11 +1620,6 @@ pub(crate) fn probe_march_steps() -> f32 {
 /// Whether the water paints the cube's distances (a debug view); off.
 fn probe_dist_show() -> bool {
     false
-}
-
-/// The probe tier's Fresnel boost.
-pub(crate) fn probe_strength() -> f32 {
-    1.0
 }
 
 /// A slot every fragment is pinned to, -1 for none.

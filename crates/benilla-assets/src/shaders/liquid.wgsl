@@ -280,7 +280,7 @@ struct WaterReflect {
     /// see [`sample_mirror`]); `y` = the debug view's id (`WaterDebug::view`, read only by the
     /// `WATER_VIEW` variant, [`water_view_id`]); `z` = the march's OWN strength — 0 unless the
     /// debug toggle asks for it, and pointedly independent of `params.y`, which is the mirror's;
-    /// `w` = composite the tiers the old layered way (off).
+    /// `w` spare.
     ///
     /// `x` once carried a march kill switch and was dead weight even then: the
     /// gate the shader actually reads is `z`. The row is full at four lanes and the params buffer
@@ -293,8 +293,8 @@ struct WaterReflect {
     // w = the probe debug view.
     probe_cfg: vec4<f32>,
     // `probe_box_min`: x = the slot every fragment is pinned to (-1: none), y = the angle a mip-0
-    // texel subtends, z = the blur floor, w = the surface ripple scale. `probe_box_max`: x = the
-    // probe tier's Fresnel boost, y = the tap count, z = the deepest mip, w spare.
+    // texel subtends, z = the blur floor, w = the surface ripple scale. `probe_box_max`: x spare,
+    // y = the tap count, z = the deepest mip, w spare.
     probe_box_min: vec4<f32>,
     probe_box_max: vec4<f32>,
     // x = how much of the water's ripple the CUBE lookup sees, which nothing here reads; y = the
@@ -681,40 +681,14 @@ fn plane_trust(err: f32, trusted: f32, tilt: f32) -> f32 {
     return by_height * by_slope;
 }
 
-/// How reflective the water is allowed to get at a grazing angle. Below Schlick's 1.0 on purpose —
-/// see its use.
-const REFLECT_MAX: f32 = 0.44;
-
-/// The most of the pixel the CUBE PROBE tier may take, however far its strength is pushed.
-/// Above [`REFLECT_MAX`] because this knob exists to make the tier legible, but short of 1.0 so the
-/// surface keeps some of its own body and does not read as a mirror.
-const PROBE_REFLECT_CEIL: f32 = 0.85;
-
-/// The specular lobe's exponent and weight — **the water's roughness, in the only two numbers this
-/// shader has for it.**
-///
-/// These were 160 and 0.55, and together with a near-mirror reflection they are what made the
-/// surface read as "someone poured oil into the water": a very tight lobe is a very smooth surface,
-/// and a smooth surface returns the sun as a small hard disc sitting *on* the water rather than a
-/// sheen scattered through it. Oil is smoother than water; that is the whole difference, and it is
-/// this exponent.
-///
-/// Broadened and dialled back, the highlight spreads into the ripples instead of sliding over them.
-/// A microfacet model would derive both from one roughness and from the same normal distribution
-/// the reflection uses; this is the stylised path, so it is two numbers and an eye.
-///
-/// Broadened again, from 42/0.30, against the "oily" report: at 42 the lobe still resolved into
-/// hard bright chips on the ripple crests, and a hard chip on a smooth crest is exactly the read of
-/// a film on the surface rather than light coming off the water. The other half of that report is
-/// answered by the reflection ceiling above and by the finest ripple layer's weight below — a
-/// surface looks oily when it is smooth, mirror-like and finely crinkled all at once, and all three
-/// had to come down together.
 /// How hard the ambient ripples tilt the surface ([`water_surface`]): enough to swing the reflected
 /// sun off the highlight and back within one wave, which breaks its column into a mottle.
 const NORMAL_STRENGTH: f32 = 1.35;
 
+/// The glints' lobe exponent, the water's roughness to the sun: broad enough that the highlight
+/// spreads into the ripples as a sheen instead of a small hard disc sitting on the surface, which
+/// reads as oil. The lobe's weight is the look's `composite.y` lane.
 const SPEC_POWER: f32 = 24.0;
-const SPEC_WEIGHT: f32 = 0.22;
 
 /// The moon's own glitter, relative to the sun's. Moonlight IS sunlight at about a millionth the
 /// intensity, but it lands on a scene lit at a millionth too — what actually differs on screen is
@@ -723,11 +697,6 @@ const SPEC_WEIGHT: f32 = 0.22;
 const MOON_SPEC_WEIGHT: f32 = 0.55;
 const MOON_SPEC_POWER: f32 = 34.0;
 const MOON_SPEC_COLOR: vec3<f32> = vec3<f32>(0.62, 0.70, 0.86);
-
-/// How far along the swatch's shallow→deep ramp the gamma body travels: the composite's body takes
-/// the same cap from the deep-ceiling lane `look.body.spare.y` (`BodyLook::deep_ceiling`), which
-/// says why it is under 1.
-const BODY_DEPTH_MAX: f32 = 0.72;
 
 /// How hard the ripples are carved into the water's own body, as a ± fraction of its colour.
 ///
@@ -764,22 +733,6 @@ const BODY_RIPPLE_SHADE: f32 = 0.20;
 /// a flat pale plateau rather than water. A hand's breadth closes the seam at a rock and leaves
 /// water that is merely shallow looking like water.
 const SOFT_EDGE_YARDS: f32 = 0.22;
-
-/// **Beer–Lambert extinction per yard of water, per channel.** Red is gone within a couple of
-/// yards, green carries further, blue furthest — which is the whole reason deep water is blue and
-/// why a two-colour lerp of the zone swatch could never look like water at any depth but the one it
-/// was tuned at.
-///
-/// The palette is still the zone's: these decide how fast the shallow row gives way to the deep
-/// one, not what either colour is. What changes is that the answer now comes from the real distance
-/// through the water rather than from the authored depth byte, so a hull sitting in six inches of it
-/// reads as six inches.
-const WATER_EXTINCTION: vec3<f32> = vec3<f32>(0.46, 0.16, 0.09);
-
-/// How deep the water is allowed to count as, in yards, when the scene behind it is further away
-/// than the far plane's honest answer — sky through a gap, or an unloaded chunk. Without a cap a
-/// missing background reads as infinitely deep water and the shallows go black at tile edges.
-const WATER_MAX_THICKNESS: f32 = 24.0;
 
 const SHORE_EXACT_REACH: f32 = 3.0;
 const SHORE_EXACT_TRUST: f32 = 0.75;
@@ -2316,7 +2269,6 @@ fn floor_occ_plane(uv_look: vec2<f32>) -> FloorOcc {
     return FloorOcc(c.rgb, o.r, c.a, o.a);
 }
 
-#ifdef WATER_COMPOSITE
 // ---- the linear composite (FND-2) ---------------------------------------------------------------
 //
 // The framebuffer holds gamma values and light adds in linear, so the water is built as
@@ -2357,7 +2309,7 @@ fn layer_over(colour: vec3<f32>, cover: f32, a: WaterLayer) -> WaterLayer {
 }
 
 /// [`apply_fog`]'s gamma law on the layer's own colour, weighted by its opacity: opaque water
-/// fogs as the gamma look did, clear water leaves the bed's own fog alone. Where the law leaves
+/// fogs as an opaque surface does, clear water leaves the bed's own fog alone. Where the law leaves
 /// every colour as it is (no fog, or water nearer than the fog's start) the layer is returned as
 /// it came, without the round trip through gamma.
 fn layer_fog(a: WaterLayer, world_pos: vec3<f32>, room_fog: u32) -> WaterLayer {
@@ -2650,7 +2602,6 @@ fn water_body_light(
     l.fog_g = vec3<f32>(0.0);
     return l;
 }
-#endif // WATER_COMPOSITE
 
 #ifdef WATER_VIEW
 // ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
@@ -2675,8 +2626,8 @@ const WV_SKY_FLOOR: u32 = 15u;
 const WV_SIGMA_SHAPE: u32 = 16u;
 // The composite's own views, which change the layer rather than paint over it: identity hands the
 // blender a layer that passes everything (the frame must equal the snapshot), discard returns 0
-// (the frame is untouched). Only the linear composite (`WATER_COMPOSITE`) draws them, and the
-// body's: enc(t_bed), enc(in-scatter) and the albedo at the pixel's ramp coordinate.
+// (the frame is untouched). Then the body's: enc(t_bed), enc(in-scatter) and the albedo at the
+// pixel's ramp coordinate.
 const WV_COMPOSITE_IDENTITY: u32 = 17u;
 const WV_DISCARD: u32 = 18u;
 const WV_TRANSMITTANCE: u32 = 19u;
@@ -2704,7 +2655,6 @@ fn stylised_water(
     // What is behind this fragment ([`scene_behind`]); where it is not known, every term below
     // falls back to the authored depth byte.
     sb: SceneBehind,
-    depth: f32,
     shore: f32,
     shore_offset: vec2<f32>,
     // The heightfield's smooth normal (zero where the mesh has none).
@@ -2714,13 +2664,9 @@ fn stylised_water(
     planar: vec4<f32>,
     /// The current, world XZ yards a second — see `ATTRIBUTE_WOW_FLOW`.
     flow: vec2<f32>,
-    shallow: vec4<f32>,
-    deep: vec4<f32>,
     lit: vec3<f32>,
-#ifdef WATER_COMPOSITE
     // The body's stops, optics rows and light ([`water_body_optics`]).
     bi: BodyIn,
-#endif
     room_fog: u32,
 ) -> vec4<f32> {
     let xz = world_pos.xz;
@@ -2736,10 +2682,8 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
-#ifdef WATER_COMPOSITE
     // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
     let snap_px = water_snapshot_px(frag_coord);
-#endif
 
     // ---- the live wave field ----------------------------------------------------------------
     //
@@ -2791,62 +2735,17 @@ fn stylised_water(
 #endif
     let to_view = normalize(view.world_position.xyz - world_pos);
 
-    // Body: the zone's own swatch, deepening with V. sqrt, not linear — absorption in real water is
-    // exponential, and the square root keeps the shallows a distinct band instead of a thin gradient.
-    // **How fast the water becomes water.** The depth coordinate runs 0 at the waterline to 1 at
-    // about five yards, and reading the body straight off it makes a stream a different substance
-    // from a pond: knee-deep water sits a fifth of the way along the ramp, so it keeps the swatch's
-    // shallow row — which in the shipped data is the muddy olive of a riverbed, not water — and its
-    // opacity stays near the shallow end, letting the bed through. The result is a wet path where
-    // there should be a stream.
-    //
-    // The exponents below pull both ramps forward so that anything more than ankle-deep reads as
-    // the same water a pond is made of, while the last hand's breadth still lightens into the
-    // shore. It is a look choice, not a depth model: the world's own numbers still decide, they are
-    // just read on a curve that treats shallow water as water.
-    //
-    // The ramp is also CAPPED short of the deep row by [`BODY_DEPTH_MAX`]; `BodyLook::deep_ceiling`
-    // says why.
-    // The wake rides the depth ramp with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
-    // **How far along the swatch the body has travelled**, and there are two answers.
-    //
-    // Where the scene behind the water is known, the water column is a real distance in yards and
-    // the shallow row gives way to the deep one by Beer–Lambert extinction, PER CHANNEL: red is
-    // gone within a couple of yards, green carries further, blue furthest. That is the whole reason
-    // deep water is blue rather than "the deep colour", and it is a thing a single lerp of two
-    // swatch rows cannot express at any depth but the one it was tuned at — which is why the deep
-    // end had to be capped by hand to stop several zones going to tar.
-    //
-    // Where it is not known — nothing drawn behind the water, or the first frame after a style
-    // flip — this is the authored depth byte on a curve.
+    // The wake rides the body's column with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
     let wake_push = wake_height * WAKE_BODY_DEPTH;
-    var body_t = saturate(pow(depth, 0.35) + wake_push) * BODY_DEPTH_MAX;
-    var body_rgb = mix(shallow.rgb, deep.rgb, body_t);
-    if (thickness >= 0.0) {
-        let t = min(thickness, WATER_MAX_THICKNESS);
-        // [`BODY_DEPTH_MAX`] applies here too, and leaving it off was the other half of the slab.
-        // The cap is not a fudge around the authored byte's units — it is a statement about the
-        // 1.12 palettes themselves, several of whose deep rows are nearly black because they were
-        // authored for a surface with no reflection and no glitter on it. A physically-correct
-        // extinction curve run all the way to that row is still a run to tar.
-        let absorbed =
-            saturate(vec3<f32>(1.0) - exp(-WATER_EXTINCTION * t) + wake_push) * BODY_DEPTH_MAX;
-        body_rgb = mix(shallow.rgb, deep.rgb, absorbed);
-    }
     // The sun's bearing, taken flat — see [`BODY_RIPPLE_SHADE`]. The epsilon is for the frame at
     // startup before the lanes are written, and for the instant the sun crosses the zenith.
     let sun_xz = normalize(water_reflect.sun.xz + vec2<f32>(1e-4, 1e-4));
     let wave_tilt = dot(n.xz, sun_xz);
-    let body = body_rgb * lit * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
-#ifdef WATER_COMPOSITE
     // The body as transport: the column behind the pixel, its transmittance and its albedo, in
     // uniform control flow for the bands' `fwidth`; then its light.
     let optics = water_body_optics(world_pos, frag_coord, sb, n, flat_n, to_view, bi, wake_push);
     let body_light = water_body_light(optics, world_pos, vec4<f32>(1.0), bi, wave_tilt, room_fog);
-#endif
 
-    // Fresnel toward the horizon. Schlick's 5th power, floored at the 2 % water reflects head-on.
-    let fresnel = pow(1.0 - saturate(dot(n, to_view)), 5.0);
     // What the surface reflects where no tier has a better answer: the sky, the dome and its clouds
     // as drawn, unlit and linear ([`sky_floor`]). The sky is at infinity, where the mirrors' law
     // (the flat reflection of a point the ripple slides sideways) reads it along the flat reflected
@@ -2856,27 +2755,14 @@ fn stylised_water(
     let r_rip = reflect(-to_view, n);
     let sky = sky_floor(reflect(-to_view, flat_n), sqrt(surface_lost2(surf)));
     // Seen from below, the surface reflects the dome's two stops along the rippled ray, lit as the
-    // terrain is ([`underside_sky`]); the floor in gamma either way.
+    // terrain is ([`underside_sky`]), in gamma.
     let eye_above = view.world_position.y > world_pos.y;
     let sky_g = select(underside_sky(r_rip) * lit, water_enc(sky), eye_above);
-    // **A surface has one reflection, and Fresnel is how big its share of the fragment is.** This
-    // is that share, and the tiers below spend it: the sky, the capture and the march are three
-    // answers to *what* is reflected, never three separate reflections to be layered one over the
-    // other.
-    //
-    // They used to be layered, and it cost the tiers about half their contrast. `rgb` took its full
-    // `s` of sky here; a tier then mixed itself in at its own `s`, which displaces only `s` of the
-    // sky and leaves `s(1 - s)` standing — so a reflection of a dark gorge arrived with a wash of
-    // bright sky still painted over it, the body was robbed to pay for it, and a river read as flat
-    // while a coast, where the tier is looking at the sky anyway, read as correct.
-    let fres = mix(0.02, 0.45, fresnel);
-#ifdef WATER_COMPOSITE
-    // The linear composite's share: [`water_fresnel`] on the filtered normal at the surface's
-    // roughness, under the grazing limit `look.composite.x` (1 for none).
+    // **A surface has one reflection, and Fresnel is how big its share of the fragment is**: the
+    // tiers below are answers to *what* is reflected, and they share it. The share is
+    // [`water_fresnel`] on the filtered normal at the surface's roughness, under the grazing limit
+    // `look.composite.x` (1 for none).
     let f_surf = min(water_fresnel(dot(n, to_view), surf.alpha), water_reflect.look.composite.x);
-#endif
-    let layered = water_reflect.flags.w > 0.5;
-    var rgb = mix(body, sky_g, fres);
 
     // ---- the cubemap probe, tier four ---------------------------------------------------------
     //
@@ -3067,28 +2953,11 @@ fn stylised_water(
     // **One reflection, four answers to what is in it**, in confidence order: the sky floor, then
     // the probe, the mirrors and the march, each covering its weight `w` of what the ones beneath
     // it give. The shares are explicit products:
-    // `refl = ((floor·(1 − w_p) + probe·w_p)·(1 − w_m) + mirror·w_m)·(1 − w_s) + ssr·w_s`, and the
+    // `refl_l = ((floor·(1 − w_p) + probe·w_p)·(1 − w_m) + mirror·w_m)·(1 − w_s) + ssr·w_s`, and the
     // floor's share is `(1 − w_p)(1 − w_m)(1 − w_s)`. Where the march found the answer itself,
     // nothing beneath it averages in: two reflections of one surface blended together are a double
     // image, not a better one.
     let w_p = saturate(probe_w);
-    if (layered && probe_w > 0.0) {
-        // **Saturated**, because `probe_w` carries a strength that is allowed above 1. WGSL's
-        // `mix` extrapolates rather than clamping, so an unsaturated weight past 1.0 does not
-        // merely show more reflection — it runs past the reflection and out the other side,
-        // subtracting the water's own body colour.
-        rgb = mix(
-            rgb,
-            probe_rgb,
-            saturate(
-                mix(0.02, REFLECT_MAX, fresnel)
-                    * probe_w
-                    * max(water_reflect.probe_box_max.x, 0.0)
-                    * (1.0 - ssr.conf),
-            ),
-        );
-    }
-
     // Each mirror serves the water near its own plane: its colour and its weight here — strength
     // times coverage times trust. Where both reach a fragment they blend by weight.
     // Off probe water the mirrors stand down, so the probe beneath them shows through.
@@ -3111,22 +2980,10 @@ fn stylised_water(
         }
         // Either mirror's weight counts; together they are an "either", not a sum past one.
         w_m = saturate(m1.a + m2.a - m1.a * m2.a);
-        if (layered) {
-            let amount = mix(0.02, REFLECT_MAX, fresnel) * w_m * (1.0 - ssr.conf);
-            rgb = mix(rgb, mirror_g, amount);
-        }
     }
 
-    // …and the march's own weight, on the same Fresnel weight the tiers below it use, so the water
-    // does not change how reflective it is depending on which tier answered.
+    // …and the march's own weight.
     let w_s = saturate(water_reflect.flags.z * ssr.conf);
-    if (layered && ssr.conf > 0.0) {
-        rgb = mix(
-            rgb,
-            ssr.rgb,
-            mix(0.02, REFLECT_MAX, fresnel) * water_reflect.flags.z * ssr.conf,
-        );
-    }
 
     // The sky is the FLOOR, not a layer: the answer for a direction no tier has a better one for,
     // less what the frame shows standing above the water along the reflected ray. Its share of the
@@ -3135,11 +2992,7 @@ fn stylised_water(
     let w_floor = (1.0 - w_p) * (1.0 - w_m) * (1.0 - w_s);
     var occ = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
     var occ_marched = 0.0;
-#ifdef WATER_COMPOSITE
     var floor_share = w_floor * f_surf;
-#else
-    var floor_share = w_floor * fres;
-#endif
 #ifdef WATER_VIEW
     // The occlusion view shows what the floor gets wherever a march may run, the tiers over it or not.
     if (water_view_id() == WV_FLOOR_OCC) {
@@ -3150,12 +3003,7 @@ fn stylised_water(
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
-    let floor_g = select(sky_g, water_enc(occ.rgb + occ.v * sky), eye_above);
-    let refl = ((floor_g * (1.0 - w_p) + probe_rgb * w_p) * (1.0 - w_m) + mirror_g * w_m)
-        * (1.0 - w_s)
-        + ssr.rgb * w_s;
-#ifdef WATER_COMPOSITE
-    // The same chain in linear light: each tier decoded where it has a share, the floor as the
+    // The chain in linear light: each tier decoded where it has a share, the floor as the
     // occlusion built it.
     var floor_l = occ.rgb + occ.v * sky;
     if (!eye_above) {
@@ -3183,52 +3031,18 @@ fn stylised_water(
     if (graded) {
         refl_g = max(grade_ab.w * refl_l + grade_ab.xyz, vec3<f32>(0.0));
     }
-#endif
-    // How much of `refl` came from the CUBE PROBE, so the Fresnel weight can be lifted where — and
-    // only where — the probe is the tier answering. See the final mix.
-    let probe_share = w_p * (1.0 - w_m) * (1.0 - w_s);
-
-    // **The probe lane draws its reflection and nothing else** (`probe_at.w`). Not a debug switch:
-    // it is what that lane is while the tier is being made correct, because a reflection arriving
-    // at a few per cent over a lit green lake hides every error it contains. See `liquid::probe`.
+    // **The probe lane draws its reflection and nothing else** (`probe_at.w`), ungraded. Not a
+    // debug switch: it is what that lane is while the tier is being made correct, because a
+    // reflection arriving at a few per cent over a lit green lake hides every error it contains.
+    // See `liquid::probe`.
     if (water_reflect.probe_at.w > 0.5) {
-        return vec4<f32>(refl, 1.0);
+        return vec4<f32>(water_enc(refl_l), 1.0);
     }
 
-    // The one mix. With both tiers off this is exactly the sky mix `rgb` already holds, which is
-    // what keeps a world with no reflection pass byte-identical.
-    //
-    // **The probe's share gets its own Fresnel weight**, and that is a deliberate departure from the
-    // rule stated above it — that the water should not change how reflective it looks depending on
-    // which tier answered. It is here because the probe could not otherwise be made more visible at
-    // all: on this path `refl` is one composited colour and the probe ALREADY owns it outright
-    // wherever it contributes, so raising the tier's own weight past 1.0 changed literally nothing
-    // (four strengths from 1.2 to 3.0 rendered byte-identical). The only remaining lever on how
-    // much of it reaches the pixel is the Fresnel mix, so that is the lever.
-    //
-    // `probe_share` is the fraction of `refl` still coming from the cube after the plane and the
-    // march have taken their turns, so the lift lands only where the probe actually answered and
-    // the other tiers keep the shared weight exactly as before. At `probe_boost == 1.0` this is
-    // arithmetically the old line.
-    if (!layered) {
-        // **What the boost multiplies is small, which is why it needs range.** `fres` is
-        // `mix(0.02, REFLECT_MAX, fresnel)`, and looking down at water from standing height the
-        // Fresnel term is near its floor — around 0.04. A 1.5x lift of that is still four per cent
-        // of reflection, which reads as no reflection at all. The useful range of this knob is
-        // therefore several times larger than a "strength" normally wants to be.
-        //
-        // Capped below 1 rather than at it: a fully mirrored surface is what [`REFLECT_MAX`] exists
-        // to prevent, and holding a little of the water's own body at every angle is what stops it
-        // reading as polished glass instead of a lake.
-        let probe_boost = max(water_reflect.probe_box_max.x, 0.0);
-        let lifted = min(fres * probe_boost, PROBE_REFLECT_CEIL);
-        rgb = mix(body, refl, saturate(mix(fres, lifted, probe_share)));
-    }
-
-    // The glitter path: the same Blinn highlight the reference computes, evaluated against the
-    // rippled normal per fragment. The fine ripple layer above breaks it into pieces; the exponent
-    // and the weight decide how hard and how bright those pieces are — which is to say, how ROUGH
-    // the water is. See [`SPEC_POWER`].
+    // The glitter path's lights: the same Blinn highlight the reference computes, evaluated against
+    // the rippled normal per fragment in the composite below. The fine ripple layer above breaks it
+    // into pieces; the exponent and the weight decide how hard and how bright those pieces are —
+    // which is to say, how ROUGH the water is. See [`SPEC_POWER`].
     //
     // **Against the VISIBLE sun, not the lighting one.** The engine carries two (see
     // `lighting::daynight`): `light_sun` is pinned at compass 225 deg and never sets — it exists so
@@ -3247,9 +3061,6 @@ fn stylised_water(
     let sun_reach = water_reflect.sun.w;
     // Widened, at the same energy, by the roughness the surface cannot resolve ([`glint_lobe_p1`]).
     let lost2 = surface_lost2(surf);
-    rgb += wow_light.light_spec.rgb
-        * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
-        * (SPEC_WEIGHT * sun_reach);
 
     // ...and the moon's, which is the same computation against the other body in the sky. Water
     // does not care which one is up; it was only ever the sun here because the sun was the only
@@ -3260,9 +3071,6 @@ fn stylised_water(
         water_reflect.moon.xyz / moon_len,
         moon_len > 1e-4,
     );
-    rgb += MOON_SPEC_COLOR
-        * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
-        * (SPEC_WEIGHT * MOON_SPEC_WEIGHT * water_reflect.moon.w);
 
     // The white line where the water meets the land, and the bubbles behind it.
     //
@@ -3365,11 +3173,8 @@ fn stylised_water(
         max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL),
         wake_foam * WAKE_FOAM_LEVEL,
     );
-    rgb = mix(rgb, FOAM_COLOR * lit, foam);
 
-    // Opacity is still the world's: the swatch ramp the reference uses, plus the foam, which is
-    // spray and hides what is under it.
-    // ...and the BODY thins to nothing where something passes through the surface: a sheet of water
+    // The BODY thins to nothing where something passes through the surface: a sheet of water
     // meeting a rock along a hard line is the giveaway that it is a sheet, while real water fades
     // over the last hand's breadth because by then there is barely any water left to be opaque
     // with. Needs to know what is behind the surface: [`scene_behind`]'s column.
@@ -3381,7 +3186,6 @@ fn stylised_water(
     if (thickness >= 0.0) {
         soft = saturate(thickness / SOFT_EDGE_YARDS);
     }
-    let alpha = max(mix(shallow.w, deep.w, sqrt(depth)) * soft, foam);
 #ifdef WATER_VIEW
     // The debug views paint one quantity over the water, opaque and unfogged; the composite's own
     // views change its layer below instead.
@@ -3425,11 +3229,7 @@ fn stylised_water(
             let column = max(vec3<f32>(sb.gap_z, sb.vertical, sb.path), vec3<f32>(0.0)) / 8.0;
             v = select(vec3<f32>(0.0), column, sb.known);
         } else if (view_id == WV_FRESNEL) {
-#ifdef WATER_COMPOSITE
             v = vec3<f32>(f_surf);
-#else
-            v = vec3<f32>(fres);
-#endif
         } else if (view_id == WV_ROUGHNESS || view_id == WV_ROUGHNESS_ANISO) {
             // α between the calm surface (0) and the fully unresolved one (1).
             let a0 = water_reflect.look.surf.x;
@@ -3464,14 +3264,13 @@ fn stylised_water(
         return vec4<f32>(v, 1.0);
     }
 #endif
-#ifdef WATER_COMPOSITE
     // ---- the composite, in linear light ---------------------------------------------------------
     //
-    // The gamma look's terms as one premultiplied layer: one reflectance for every tier, the
+    // The water as one premultiplied layer: one reflectance for every tier, the
     // tiers' linear chain graded above, the glints in linear, the body's in-scatter and the bed's
     // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
-    // The glints in linear light at the `composite.y` weight, `SPEC_WEIGHT` raised to the gamma,
-    // so the peak over black is the gamma look's; the moon's weight is raised likewise.
+    // The glints in linear light at the `composite.y` weight, the gamma glint weight 0.22 raised to
+    // the gamma, so the peak over black is the gamma weight's; the moon's weight is raised likewise.
     let gw = water_reflect.look.composite.y;
     let spec_l = water_dec(wow_light.light_spec.rgb)
         * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
@@ -3520,9 +3319,6 @@ fn stylised_water(
     }
 #endif
     return water_output(layer, frag_coord, snap_px, frag_coord_to_uv(frag_coord), 0.0, 1.0);
-#else
-    return vec4<f32>(apply_fog(rgb, world_pos, room_fog), alpha);
-#endif
 }
 #endif // WATER_STYLISED
 
@@ -3721,19 +3517,6 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // and its rooms are not lit by the scene's sun.
 #ifdef WATER_STYLISED
     if (w.path.y > 0.5) {
-        // **The ocean's depth coordinate is a different ramp from the river's**, and this path has
-        // to reconcile them. Both come off the same per-vertex MCLQ depth byte (~8.5 byte/yd), but
-        // the reference divides the river's by 42 — saturating at ~5 yd — and the ocean's by 255,
-        // which `liquid.rs` records as a placeholder pending its own RE. The faithful path above
-        // takes each as it finds it, because each indexes its own swatch and that IS the reference's
-        // behaviour. The stylised look cannot: it reads this number as *how deep the water is*, and
-        // a sixth of a river's ramp read as a sixth of the way to deep water is what put a
-        // shoreline's worth of foam across the whole of Booty Bay and left the sea the colour of a
-        // shallow. Rescaled into the river's units here, and here only.
-        var style_depth = depth;
-        if (w.kind.y > 0.5) {
-            style_depth = min(depth * (255.0 / 42.0), 1.0);
-        }
         var body_shallow = shallow;
         var body_deep = deep;
         var lit = vec3<f32>(1.0);
@@ -3756,7 +3539,6 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         // What stands behind this water pixel, from the complete linear depth (`liquid::hiz`): the
         // static world, entity-path models and units included.
         let sb = scene_behind(in.world_position.xyz, in.clip_position.xy);
-#ifdef WATER_COMPOSITE
         // The body's stops lie on the zone's own line from swatch row 0 toward row 63 (without the
         // ocean's ×0.9 tail): the deep stop at the deep ceiling, the mid stop at half of it, so the
         // three bands keep equal spans. A WMO exterior's pair is its deep river row twice, an
@@ -3779,23 +3561,17 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             w.path.x < 0.5,
             lit,
         );
-#endif
         return stylised_water(
             in.world_position.xyz,
             in.clip_position.xy,
             sb,
-            style_depth,
             in.shore,
             in.shore_offset,
             in.surface_normal,
             in.planar,
             in.flow,
-            body_shallow,
-            body_deep,
             lit,
-#ifdef WATER_COMPOSITE
             bi,
-#endif
             in.room_fog,
         );
     }

@@ -33,15 +33,15 @@ const ALPHA_CALM: f32 = 0.0548;
 /// mip's leakage) all do.
 const FEATURE_FADE_PX: (f32, f32) = (2.0, 4.0);
 
-/// The glints' weight in linear light: the gamma look's `SPEC_WEIGHT` 0.22 raised to 2.2, the same
-/// peak over black.
+/// The glints' weight in linear light: the gamma glint weight 0.22 raised to 2.2, the same peak over
+/// black.
 const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
 
-/// The reflectance's ceiling at grazing angles: the gamma look's `mix(0.02, 0.45, fresnel)` peak.
+/// The reflectance's ceiling at grazing angles.
 const GRAZING_LIMIT: f32 = 0.45;
 
 /// The reflection grading's strength `s`: near reflections (a shore's huts, a pier) soften to about
-/// the gamma look's contrast, open-sky ones keep the linear composite's physical strength.
+/// the baseline's contrast, open-sky ones keep the linear composite's physical strength.
 const GRADE_STRENGTH: f32 = 0.8;
 
 /// The ripple map's anisotropy clamp on the High tier; Medium and Low take none.
@@ -89,24 +89,8 @@ fn floor_occlusion() -> bool {
     !*OFF.get_or_init(|| std::env::var("WOW_WATER_FLOOR_OCC").is_ok_and(|v| v.trim() == "0"))
 }
 
-/// Whether the stylised pipelines take the linear composite (`WATER_COMPOSITE`): on, unless
-/// `$WOW_WATER_COMPOSITE` (read once) is an off word, [`lever_off`], which asks for the gamma look,
-/// for an A/B.
-pub(crate) fn composite_variant() -> bool {
-    static OFF: OnceLock<bool> = OnceLock::new();
-    !*OFF.get_or_init(|| std::env::var("WOW_WATER_COMPOSITE").is_ok_and(|v| lever_off(&v)))
-}
-
-/// Whether an on/off lever's value turns it off: `0`, `false`, `off` or `no`, in any case.
-fn lever_off(v: &str) -> bool {
-    let v = v.trim();
-    ["0", "false", "off", "no"]
-        .iter()
-        .any(|w| v.eq_ignore_ascii_case(w))
-}
-
-/// The glints' linear weight: `SPEC_WEIGHT` 0.22 raised to the gamma, so the peak over black is the
-/// gamma look's, unless `$WOW_WATER_GLINT=<weight>` (read once, above 0) sets it, to fit it.
+/// The glints' linear weight: the gamma glint weight 0.22 raised to the gamma, so the peak over
+/// black is the gamma weight's, unless `$WOW_WATER_GLINT=<weight>` (read once, above 0) sets it, to fit it.
 fn glint_weight_lin() -> f32 {
     static FORCED: OnceLock<Option<f32>> = OnceLock::new();
     FORCED
@@ -128,26 +112,19 @@ fn unit_lever(var: &str) -> Option<f32> {
 }
 
 /// The grading's strength, [`GRADE_STRENGTH`], unless `$WOW_WATER_GRADE=<s>` (read once, finite,
-/// at least 0) sets it, to measure it. Only the linear composite grades: under the gamma look
-/// (`$WOW_WATER_COMPOSITE=0`) it is 0 and the lever is ignored, so it cannot force the floor's
-/// readers on there.
+/// at least 0) sets it, to measure it.
 fn grade_strength() -> f32 {
     static FORCED: OnceLock<Option<f32>> = OnceLock::new();
-    let forced = *FORCED.get_or_init(|| {
-        let s = std::env::var("WOW_WATER_GRADE")
-            .ok()?
-            .trim()
-            .parse::<f32>()
-            .ok()?;
-        if !composite_variant() && s != 0.0 {
-            warn!("water: WOW_WATER_GRADE={s} ignored: the gamma look has no grading");
-        }
-        (s >= 0.0 && s.is_finite()).then_some(s)
-    });
-    if !composite_variant() {
-        return 0.0;
-    }
-    forced.unwrap_or(GRADE_STRENGTH)
+    FORCED
+        .get_or_init(|| {
+            let s = std::env::var("WOW_WATER_GRADE")
+                .ok()?
+                .trim()
+                .parse::<f32>()
+                .ok()?;
+            (s >= 0.0 && s.is_finite()).then_some(s)
+        })
+        .unwrap_or(GRADE_STRENGTH)
 }
 
 /// The grazing limit, 0.45, unless `$WOW_WATER_GRAZE=<0-1>` (read once; 1 for none) sets it.
@@ -210,16 +187,14 @@ pub(crate) fn ripple_aniso(tier: u8) -> u16 {
 /// The owner's and the developer's knobs for the look rows, at their defaults.
 #[derive(Resource, Clone, Debug, PartialEq)]
 pub(crate) struct WaterLook {
-    /// The linear composite's reflectance ceiling at grazing angles, 1 for none: 0.45, the
-    /// ceiling of the gamma look's fixed `mix(0.02, 0.45, fresnel)`.
+    /// The linear composite's reflectance ceiling at grazing angles, 1 for none: 0.45.
     pub(crate) grazing_limit: f32,
     /// The glint lobes' weight in linear light: the gamma weight 0.22 raised to 2.2, so the peak
     /// over black is unchanged.
     pub(crate) glint_weight_lin: f32,
     /// A glow excess forced onto every water pixel, for testing the glow path; 0.
     pub(crate) glow_test: f32,
-    /// The reflection grading's strength `s`, [`GRADE_STRENGTH`]; 0 under the gamma look. The
-    /// linear composite reads it.
+    /// The reflection grading's strength `s`, [`GRADE_STRENGTH`].
     pub(crate) grade_strength: f32,
     /// The grading's near share `C_NEAR`, 0.2.
     pub(crate) grade_c_near: f32,
@@ -451,8 +426,8 @@ mod tests {
             tier: 1,
             ..LookInputs::default()
         };
-        // The composite's strength comes from the constant, not `grade_strength()`, so
-        // `$WOW_WATER_COMPOSITE` and `$WOW_WATER_GRADE` do not reach the test.
+        // The grading's strength comes from the constant, not `grade_strength()`, so
+        // `$WOW_WATER_GRADE` does not reach the test.
         let look = WaterLook {
             grade_strength: super::GRADE_STRENGTH,
             ..WaterLook::default()
@@ -481,7 +456,6 @@ mod tests {
             "the gamma weight 0.22 raised to the gamma"
         );
         assert_eq!(row(LOOK_GRADE), [0.8, 0.3, 0.2, 0.0]);
-        assert!(lever_off(" Off ") && lever_off("0") && lever_off("FALSE") && !lever_off("1"));
         assert_eq!(row(LOOK_SHORE), [0.35, 0.61, 1.0, 1.0]);
         assert_eq!(row(LOOK_SHORE_KIND), [1.0, 1.0, 1.0, 0.0]);
         assert_eq!(row(LOOK_SURF), [0.0548, 1.0, 2.0, 4.0]);

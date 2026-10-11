@@ -83,7 +83,7 @@ pub struct BodyLook {
     /// Whether the probe's baked fog is re-applied at the mirror's distance.
     pub probe_refog: bool,
     /// Where the deep stop sits on the zone's line from swatch row 0 to row 63 (the mid stop at
-    /// half of it); the gamma body's `BODY_DEPTH_MAX` in `liquid.wgsl` is the same cap.
+    /// half of it).
     ///
     /// Under 1 on purpose. The 1.12 water palettes were authored for a surface with no reflection
     /// and no glitter on it, and several zones' deep row is nearly black (Stranglethorn's, at Booty
@@ -847,13 +847,12 @@ mod tests {
         }
     }
 
-    /// The deep stop at the ceiling is today's `mix(shallow, deep, BODY_DEPTH_MAX)` within one row
-    /// step of the byte ramp, `ceil(|c1 − c0|/64)`.
+    /// The deep stop at the ceiling, 0.72, is `mix(shallow, deep, 0.72)` of the swatch pair within
+    /// one row step of the byte ramp, `ceil(|c1 − c0|/64)`.
     #[test]
-    fn the_deep_ceiling_is_body_depth_max() {
-        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+    fn the_deep_stop_is_the_ceilings_share_of_the_swatch_pair() {
         let ceiling = BodyLook::default().deep_ceiling;
-        assert!(wgsl.contains(&format!("const BODY_DEPTH_MAX: f32 = {ceiling};")));
+        assert_eq!(ceiling, 0.72);
         let swatches = [
             ([90, 140, 140], [45, 35, 36]),
             ([60, 88, 89], [10, 25, 40]),
