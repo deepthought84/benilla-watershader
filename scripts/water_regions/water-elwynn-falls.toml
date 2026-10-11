@@ -1,5 +1,6 @@
 # wg-elwynn-falls-pool: the pool under Elwynn Falls, rocks at the far waterline (y 500), a moored
-# boat's bow across the bottom.
+# boat's bow across the bottom. No tier_seam row: the TIERS view gives the whole pool to the first
+# mirror at every tier, so it holds no boundary between tiers.
 scene = "water-elwynn-falls"
 [box]
 water = [100, 520, 1500, 720]

@@ -1,0 +1,8 @@
+# wg-nazferiti-repeat: Lake Nazferiti from its south end at the water, the far bank's palms and
+# trees reflected across the lake; the reflections fill the box.
+scene = "water-nazferiti-repeat"
+[box]
+reflection = [440, 410, 1560, 620]
+[[row]]
+metric = "repeat_signature"
+box = "reflection"

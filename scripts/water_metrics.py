@@ -849,6 +849,26 @@ def luma_sd(img, box):
     return {"value": float(crop(luma(img), box).std())}
 
 
+def clip_fraction(img, box):
+    """The fraction of the box's pixels with a channel at the 255 ceiling (clipped), with the
+    fractions all-white and all-black (where a NaN lands after the blender) beside it."""
+    a = crop(img, box)
+    n = a.shape[0] * a.shape[1]
+    return {
+        "value": float((a.max(axis=2) >= 255).sum() / n),
+        "white": float((a.min(axis=2) >= 255).sum() / n),
+        "black": float((a.max(axis=2) <= 0).sum() / n),
+    }
+
+
+def burst_clip_fraction(frames):
+    """clip_fraction of the whole frame over a burst (a dive through the surface): the largest
+    shot's, the shot it is at, and the largest all-black fraction of any shot."""
+    c = [clip_fraction(f, [0, 0, f.shape[1], f.shape[0]]) for f in frames]
+    i = int(np.argmax([r["value"] for r in c]))
+    return {"value": c[i]["value"], "at": i, "black": max(r["black"] for r in c)}
+
+
 def luma_p5(img, box):
     """5th percentile of luma in the box (how dark the darkest water gets), codes."""
     return {"value": float(np.percentile(crop(luma(img), box), 5))}
@@ -1038,6 +1058,8 @@ ROWS: dict[str, Row] = {
     "luma_sd": Row(luma_sd, STILL, "higher"),
     "luma_p5": Row(luma_p5, STILL, None),
     "frame_std": Row(frame_std, [("burst", "rgb")], "lower"),
+    "clip_fraction": Row(clip_fraction, STILL, "lower"),
+    "burst_clip_fraction": Row(burst_clip_fraction, [("burst", "full")], "lower"),
     "view_std": Row(view_std, [("burst", "rgb", "view")], "lower"),
     "pan_luma_std": Row(pan_luma_std, [("burst", "full"), ("poses",)], "lower"),
     "halo_count": Row(halo_count, STILL, "lower"),

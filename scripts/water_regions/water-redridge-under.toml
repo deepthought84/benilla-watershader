@@ -1,0 +1,18 @@
+# wg-redridge-under: 3 yd under Lake Everstill's surface, Redridge, 15° up at the surface from below,
+# the lake bed rising to the north shore along the bottom; the eye stands on the loaded surface.
+# The Reference twin's underside sparkles where the Improved one is flat, so lum_vs_ref reports.
+scene = "water-redridge-under"
+[box]
+frame = [0, 0, 1600, 900]
+underside = [0, 0, 1600, 450]
+bed = [0, 650, 1600, 900]
+[[row]]
+metric = "clip_fraction"
+box = "frame"
+[[row]]
+metric = "luma_sd"
+box = "bed"
+[[row]]
+metric = "lum_vs_ref"
+box = "underside"
+gate = false

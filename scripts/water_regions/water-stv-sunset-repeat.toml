@@ -1,0 +1,8 @@
+# wg-stv-sunset-repeat: the Stranglethorn coast at sunset, grazing, the jungle's trees reflected in the
+# shallows right of the beach; the reflected trunks fill the box.
+scene = "water-stv-sunset-repeat"
+[box]
+reflection = [740, 430, 1480, 600]
+[[row]]
+metric = "repeat_signature"
+box = "reflection"

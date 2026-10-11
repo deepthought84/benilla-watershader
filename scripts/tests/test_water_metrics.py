@@ -334,6 +334,20 @@ class Structure(unittest.TestCase):
 
 
 class Ratios(unittest.TestCase):
+    def test_clip_fraction_counts_pixels_at_the_ceiling_and_black_ones(self):
+        img = flat([100, 100, 100])
+        img[0:10, 0:10] = [255, 120, 80]  # one channel clipped
+        img[0:10, 10:20] = 255  # white
+        img[0:10, 20:30] = 0  # black, a NaN's look
+        r = wm.clip_fraction(img, [0, 0, 40, 20])
+        self.assertAlmostEqual(r["value"], 200 / 800)
+        self.assertAlmostEqual(r["white"], 100 / 800)
+        self.assertAlmostEqual(r["black"], 100 / 800)
+        frames = [flat([100, 100, 100]), img, flat([255, 255, 255])]
+        b = wm.burst_clip_fraction(frames)
+        self.assertEqual((b["value"], b["at"]), (1.0, 2))
+        self.assertAlmostEqual(b["black"], 100 / (W * H))
+
     def test_refl_contrast_is_the_reflected_over_the_direct_michelson(self):
         img = flat([100, 100, 100])
         img[0:10, 0:10] = 63  # direct crown
