@@ -16,6 +16,9 @@
 # and any other capture knob in the environment, reaches every client, apart from
 # $WOW_CAPTURE_STABLE and $WOW_CAPTURE_AGE, which the script drops (the render state, below).
 #
+# $WATER_NOLIQUID=1 adds to each Improved still its twin with no liquid drawn ($WOW_NO_LIQUID),
+# <scene>~noliquid.png: the world's own edges, which water_metrics.py's tier_seam leaves out.
+#
 # $WATER_PERF=<frames> measures instead of shooting (INS-4): each scene and its Reference twin build
 # and age as for a still, then run <frames> frames with vsync off (`WOW_FPS_PROBE`), so the GPU
 # stays busy and its clock does not idle down between vsyncs, with the whole-frame GPU meter on
@@ -116,6 +119,7 @@ for s in $scenes; do
   else
     echo "capture $s -> $dir/$s.png, $dir/$s-ref.png"
     shot "$s" "$s" 1
+    [ -z "${WATER_NOLIQUID:-}" ] || shot "$s" "$s~noliquid" 1 WOW_NO_LIQUID=1
     shot "$s" "$s-ref" 0
   fi
 done

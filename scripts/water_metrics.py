@@ -21,6 +21,8 @@ Files a scene reads from <dir> (only the ones its rows need):
     <scene>-ref.png             the Reference twin (and <scene>-ref-000.png ... its burst)
     <scene>@<view>.png          a WATER_VIEW debug capture (and <scene>@<view>-000.png ...)
     <scene>~<variant>.png       an A/B variant, e.g. ~noreflect for mirrors off
+    <scene>~noliquid.png        the pose with no liquid drawn ($WATER_NOLIQUID: the world's own
+                                edges, which tier_seam leaves out)
     <scene>~unbanded@albedo.png the albedo view with the bands off ($WOW_WATER_BAND_PUSH=0)
     <scene>.poses.csv           a moving burst's camera per shot: shot,ex,ey,ez,lx,ly,lz (WoW yd)
 
@@ -356,9 +358,167 @@ def seam_step(img, box, at, rows=3, axis="y"):
     return {"value": float(abs(a - b)), "before": float(a), "after": float(b)}
 
 
-def tier_seam(img, box, at, rows=3, axis="y"):
-    """The luma step across a reflection-tier ownership boundary (see seam_step)."""
-    return seam_step(img, box, at, rows, axis)
+# The TIERS view's pure colours (liquid.wgsl, WV_TIERS), linear 0-1 as the view writes them: each
+# water pixel is the mix of these by each tier's share of the reflection.
+TIER_COLOURS = {
+    "floor": (0.5, 0.5, 0.5),  # the sky floor (grey)
+    "probe": (0.0, 1.0, 0.0),
+    "mirror1": (0.0, 0.0, 1.0),
+    "mirror2": (0.0, 1.0, 1.0),
+    "march": (1.0, 0.0, 0.0),  # the screen-space march (High)
+}
+TIER_NAMES = list(TIER_COLOURS)
+# Four of the colours at a time, each set's mixes a solid: grey is also half red and half cyan, so
+# the set without the march is read first, and the march's only where it does not hold the colour.
+_TIER_SETS = [(0, 1, 2, 3), (4, 0, 1, 2), (4, 1, 2, 3)]
+
+
+def tier_classes(tiers, still, world, thr=2.0, tol=0.03):
+    """Each pixel's dominant reflection tier from the TIERS view (an index into TIER_NAMES), −1
+    where the pixel is not water. A pixel is water where the still differs from `world`, the
+    capture of the same pose with no liquid drawn, by more than `thr` codes (the view itself
+    draws without the glow, so it differs from the still on dry pixels too), and where the
+    view's colour is a mix of the tier colours (barycentric weights ≥ −`tol` in one of the colour
+    sets; with the march, of at most two tiers): a falls, a leaf or a sandy bank is not."""
+    c = np.clip(tiers[..., :3].astype(np.float64) / 255.0, 0.0, 1.0)
+    h, w = c.shape[:2]
+    flat = c.reshape(-1, 3)
+    cls = np.full(flat.shape[0], -1, dtype=np.int64)
+    todo = np.ones(flat.shape[0], dtype=bool)
+    protos = np.array(list(TIER_COLOURS.values()))
+    for s in _TIER_SETS:
+        p = protos[list(s)]
+        m = np.vstack([p.T, np.ones(4)])  # [rgb; 1] = M · weights
+        rhs = np.vstack([flat[todo].T, np.ones(int(todo.sum()))])
+        wts = np.linalg.solve(m, rhs).T
+        ok = (wts >= -tol).all(axis=1)
+        if 4 in s:
+            # The march's sets also hold the warm colours of a dry bank (a shore's glow or foam
+            # makes the still differ there): read them only for a mix of at most two tiers, as a
+            # march fading over one tier draws.
+            top2 = np.sort(wts, axis=1)[:, -2:].sum(axis=1)
+            ok &= top2 >= 1.0 - tol
+        idx = np.nonzero(todo)[0][ok]
+        cls[idx] = np.array(s)[np.argmax(wts[ok], axis=1)]
+        todo[idx] = False
+    water = np.abs(still[..., :3] - world[..., :3]).max(axis=-1) > thr
+    return np.where(water, cls.reshape(h, w), -1)
+
+
+def _runs(points, along):
+    """Components of boundary elements, `points` (row, col) of one orientation and tier pair,
+    joined where they touch along the boundary (`along` 1: the boundary runs along x, neighbours
+    one column apart and at most one row off; 0: the same transposed)."""
+    left = set(points)
+    out = []
+    while left:
+        seed = left.pop()
+        comp, stack = [seed], [seed]
+        while stack:
+            y, x = stack.pop()
+            for d in (-1, 1):
+                for o in (-1, 0, 1):
+                    q = (y + o, x + d) if along == 1 else (y + d, x + o)
+                    if q in left:
+                        left.remove(q)
+                        comp.append(q)
+                        stack.append(q)
+        out.append(comp)
+    return out
+
+
+def tier_seam(img, tiers, world, box=None, rows=3, stretch=32, min_len=8, world_max=4.0,
+              thr=2.0, detail=False):
+    """The luma step the final image shows across the boundaries between reflection tiers, found
+    from the TIERS view `tiers` of the same pose (no hand-placed boxes). A boundary element lies
+    between two 4-neighbour water pixels of different dominant tiers ([`tier_classes`]); its step
+    is the mean luma of the `rows` pixels on one side minus the `rows` on the other, along the
+    boundary's normal, all of them water. Elements join into stretches along the boundary (per
+    tier pair and orientation), cut every `stretch` px, and each stretch's step is its elements'
+    mean (signed, so the ripple averages out along it). A stretch where the capture of the same
+    pose with no liquid drawn, `world`, steps by more than `world_max` codes in the same place is
+    the world's own edge (a wall foot, a shore, a rock under clear water) and is excluded, unless
+    its step exceeds the world's by more than `world_max` too (the water adds a seam to the edge).
+    `value` is the width-weighted mean |step| over the stretches of at least `min_len` elements
+    (0 where the frame holds no tier boundary); `worst` the largest, with its tier pair and box;
+    `excluded` the elements dropped as the world's edge. `box` limits the search (default the
+    frame); `detail` adds every stretch (`all`: pair, n, step, world, box, kept)."""
+    L, Lw = luma(img), luma(world)
+    cls = tier_classes(tiers, img, world, thr)
+    h, w = cls.shape
+    if box is not None:
+        crop(cls, box)
+        x0, y0, x1, y1 = (int(v) for v in box)
+        inside = np.zeros_like(cls, dtype=bool)
+        inside[y0:y1, x0:x1] = True
+        cls = np.where(inside, cls, -1)
+    wet = cls >= 0
+    rows = int(rows)
+    groups: dict = {}
+    for axis in (0, 1):
+        # Pairs (p, p + 1) along `axis`: axis 0 a horizontal boundary between rows y and y + 1.
+        a = cls[:-1, :] if axis == 0 else cls[:, :-1]
+        b = cls[1:, :] if axis == 0 else cls[:, 1:]
+        ys, xs = np.nonzero((a >= 0) & (b >= 0) & (a != b))
+        n = h if axis == 0 else w
+        for y, x in zip(ys.tolist(), xs.tolist()):
+            at = y if axis == 0 else x  # the last pixel before the boundary
+            if at - rows + 1 < 0 or at + rows + 1 > n:
+                continue
+            if axis == 0:
+                lo, hi = (slice(at - rows + 1, at + 1), x), (slice(at + 1, at + rows + 1), x)
+            else:
+                lo, hi = (y, slice(at - rows + 1, at + 1)), (y, slice(at + 1, at + rows + 1))
+            if not (wet[lo].all() and wet[hi].all()):
+                continue
+            ca, cb = int(a[y, x]), int(b[y, x])
+            sign = 1.0 if ca < cb else -1.0  # from the lower tier index to the higher
+            step = sign * float(L[hi].mean() - L[lo].mean())
+            wstep = sign * float(Lw[hi].mean() - Lw[lo].mean())
+            key = (axis, min(ca, cb), max(ca, cb))
+            groups.setdefault(key, {})[(y, x)] = (step, wstep)
+    stretches = []
+    for (axis, ta, tb), elems in groups.items():
+        for comp in _runs(list(elems), 1 if axis == 0 else 0):
+            comp.sort(key=lambda p: p[1] if axis == 0 else p[0])
+            start = comp[0][1] if axis == 0 else comp[0][0]
+            cut: dict = {}
+            for p in comp:
+                along = p[1] if axis == 0 else p[0]
+                cut.setdefault((along - start) // int(stretch), []).append(p)
+            for part in cut.values():
+                s = np.array([elems[p] for p in part])
+                ys = [p[0] for p in part]
+                xs = [p[1] for p in part]
+                stretches.append({
+                    "pair": f"{TIER_NAMES[ta]}/{TIER_NAMES[tb]}",
+                    "n": len(part),
+                    "step": float(s[:, 0].mean()),
+                    "world": float(s[:, 1].mean()),
+                    "box": [min(xs), min(ys), max(xs) + 1, max(ys) + 1],
+                })
+    for s in stretches:
+        world_edge = abs(s["world"]) > world_max and abs(s["step"]) <= abs(s["world"]) + world_max
+        s["kept"] = s["n"] >= min_len and not world_edge
+    kept = [s for s in stretches if s["kept"]]
+    excluded = sum(s["n"] for s in stretches if s["n"] >= min_len and not s["kept"])
+    extra = {"all": stretches} if detail else {}
+    if not kept:
+        return {"value": 0.0, "stretches": 0, "px": 0, "excluded": excluded, **extra}
+    n = np.array([s["n"] for s in kept], dtype=np.float64)
+    v = np.abs(np.array([s["step"] for s in kept]))
+    worst = kept[int(np.argmax(v))]
+    return {
+        "value": float((n * v).sum() / n.sum()),
+        "stretches": len(kept),
+        "px": int(n.sum()),
+        "excluded": excluded,
+        "worst": abs(worst["step"]),
+        "worst_pair": worst["pair"],
+        "worst_box": worst["box"],
+        "worst_world": worst["world"],
+        **extra,
+    }
 
 
 def ring_seam(img, box, at, rows=3, axis="y"):
@@ -974,7 +1134,11 @@ ROWS: dict[str, Row] = {
     "lum_vs_ref": Row(lum_vs_ref, STILL + [("ref", "ref")], "higher", {"min": 1.0}),
     "water_bank_ratio": Row(water_bank_ratio, STILL, "lower"),
     "underdeck_ratio": Row(underdeck_ratio, STILL, "lower"),
-    "tier_seam": Row(tier_seam, STILL, "lower"),
+    "tier_seam": Row(
+        tier_seam,
+        STILL + [("view", "tiers", "tiers", True), ("variant", "world", "noliquid")],
+        "lower",
+    ),
     "pop": Row(pop, [("burst", "luma")], "lower"),
     "glint_peak": Row(glint_peak, STILL, None),
     "glint_width": Row(glint_width, STILL, None),

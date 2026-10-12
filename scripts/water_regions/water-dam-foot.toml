@@ -1,14 +1,11 @@
 # wg-dam-foot: the pool at the Stonewrought Dam's foot, 6° up at the dam and its falls; the pool's
-# far waterline at y 600, the falls' plunge at x 780-930. The tier seams: under the far waterline a
-# band of floor-served water (the TIERS view's grey) gives way to the probe's (green) at one row per
-# run of columns, either side of the plunge; each row measures one run at its row, at every tier.
+# far waterline at y 600, the falls' plunge at x 780-930. Under the far waterline floor-served water
+# gives way to the probe's; tier_seam traces that boundary from the TIERS view (needs
+# water-dam-foot@tiers.png and water-dam-foot~noliquid.png), and leaves out where it runs along the
+# dam's submerged base, the world's own edge.
 scene = "water-dam-foot"
 [box]
 pool = [300, 610, 1100, 880]
-seam_left = [610, 609, 759, 629]       # floor to probe at row 619
-seam_right = [948, 606, 978, 626]      # at row 616
-seam_slant = [978, 603, 1017, 623]     # at row 613, the boundary stepping up to the right
-seam_edge = [1020, 601, 1052, 621]     # at row 611
 [[row]]
 metric = "halo_count"
 box = "pool"
@@ -20,21 +17,3 @@ metric = "lum_vs_ref"
 box = "pool"
 [[row]]
 metric = "tier_seam"
-label = "tier_seam_left"
-box = "seam_left"
-at = 619
-[[row]]
-metric = "tier_seam"
-label = "tier_seam_right"
-box = "seam_right"
-at = 616
-[[row]]
-metric = "tier_seam"
-label = "tier_seam_slant"
-box = "seam_slant"
-at = 613
-[[row]]
-metric = "tier_seam"
-label = "tier_seam_edge"
-box = "seam_edge"
-at = 611

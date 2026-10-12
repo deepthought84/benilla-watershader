@@ -376,11 +376,11 @@ class Ratios(unittest.TestCase):
     def test_a_seam_step_stays_inside_the_image(self):
         img = flat([100, 100, 100])
         img[120:] = 110
-        r = wm.tier_seam(img, [0, 0, W, H], 120)
+        r = wm.seam_step(img, [0, 0, W, H], 120)
         self.assertAlmostEqual(r["value"], 10.0, places=4)
         for at in (1, 238):  # 3 lines either side would wrap or run off the frame
             with self.assertRaises(ValueError):
-                wm.tier_seam(img, [0, 0, W, H], at)
+                wm.seam_step(img, [0, 0, W, H], at)
         with self.assertRaises(ValueError):
             wm.ring_seam(img, [0, 0, W, H], 1, axis="x")
 
@@ -622,6 +622,101 @@ class TierConsistency(unittest.TestCase):
             self.assertEqual(res["n"], 50 * 100 + 200 * 100)
             self.assertTrue(res["pass"])
             self.assertAlmostEqual(res["value"], 0.05, delta=0.01)
+
+
+class TierSeam(unittest.TestCase):
+    """The automatic tier seam: the boundaries traced from the TIERS view, the step measured on the
+    still, the world's own edges (a capture with no liquid) left out."""
+
+    def scene(self):
+        # Water below row 60; the floor (grey) above row 120, the probe (green) from it, the first
+        # mirror right of column 260. The world with no liquid is a flat bed.
+        world = flat([60, 70, 50])
+        world[:60] = [150, 160, 170]
+        still = noisy([100, 100, 100], sd=3.0)
+        still[:60] = world[:60]
+        tiers = flat([128, 128, 128])
+        tiers[120:] = [0, 255, 0]
+        tiers[60:, 260:] = [0, 0, 255]
+        tiers[:60] = world[:60]  # the view repaints water only
+        return still, tiers, world
+
+    def test_the_classes_read_mixes_and_leave_the_dry_world_out(self):
+        still, tiers, world = self.scene()
+        tiers[200:, :20] = [38, 217, 38]  # 0.3 floor + 0.7 probe
+        tiers[200:, 20:40] = [90, 128, 166]  # 0.7 floor + 0.3 mirror 1: still the floor
+        cls = wm.tier_classes(tiers, still, world)
+        self.assertTrue((cls[:60] == -1).all())  # dry: the still is the world there
+        self.assertTrue((cls[60:120, :260] == 0).all())
+        self.assertTrue((cls[120:200, :260] == 1).all())
+        self.assertTrue((cls[200:, :20] == 1).all())
+        self.assertTrue((cls[200:, 20:40] == 0).all())
+        self.assertTrue((cls[60:, 260:] == 2).all())
+        # A colour no mix of the tiers makes (a falls drawn over the water) is not read.
+        tiers[150:160, 100:110] = [200, 170, 120]
+        tiers[160:170, 100:110] = [131, 92, 32]  # a sandy bank: red, green and blue mixed
+        tiers[170:180, 100:110] = [178, 0, 77]  # 0.7 march + 0.3 mirror 1
+        cls = wm.tier_classes(tiers, still, world)
+        self.assertTrue((cls[150:170, 100:110] == -1).all())
+        self.assertTrue((cls[170:180, 100:110] == 4).all())
+
+    def test_a_step_across_the_boundary_is_the_seam_and_a_ramp_is_none(self):
+        still, tiers, world = self.scene()
+        r = wm.tier_seam(still, tiers, world)
+        self.assertLess(r["value"], 1.0)  # the noise alone, averaged along the boundary
+        still[120:] += 10.0  # the probe's water 10 codes brighter than the floor's
+        r = wm.tier_seam(still, tiers, world, detail=True)
+        self.assertAlmostEqual(r["worst"], 10.0, delta=1.5)
+        self.assertEqual(r["worst_pair"], "floor/probe")
+        fp = [s for s in r["all"] if s["pair"] == "floor/probe"]
+        self.assertEqual(sum(s["n"] for s in fp), 260)  # one element per column
+        self.assertTrue(all(s["n"] <= 32 for s in fp))  # cut every 32 px
+        # The value weighs every kept stretch by its width, the floor/mirror and probe/mirror
+        # ones (no step) too.
+        self.assertLess(r["value"], r["worst"])
+        self.assertAlmostEqual(
+            r["value"] * r["px"],
+            sum(s["n"] * abs(s["step"]) for s in r["all"] if s["kept"]),
+            places=3,
+        )
+        # The same 10 codes spread over 40 rows is no seam: 3 px either side see 0.75 of it.
+        ramp = still.copy()
+        ramp[120:] -= 10.0
+        ramp[100:140] += (np.arange(40) / 40.0 * 10.0)[:, None, None]
+        ramp[140:] += 10.0
+        self.assertLess(wm.tier_seam(ramp, tiers, world)["value"], 1.5)
+
+    def test_the_worlds_own_edge_is_left_out(self):
+        still, tiers, world = self.scene()
+        # The bed itself steps 20 codes at the tier boundary, and the still shows it, dimmed.
+        world[120:, :260] += 20.0
+        still[120:, :260] += 12.0
+        r = wm.tier_seam(still, tiers, world, detail=True)
+        fp = [s for s in r["all"] if s["pair"] == "floor/probe"]
+        self.assertTrue(fp and not any(s["kept"] for s in fp))
+        self.assertGreaterEqual(r["excluded"], 260)
+        self.assertLess(r["value"], 1.0)
+        # A step well beyond what the world's edge explains is still a seam.
+        still[120:, :260] += 20.0
+        r = wm.tier_seam(still, tiers, world)
+        self.assertAlmostEqual(r["worst"], 32.0, delta=1.5)
+
+    def test_a_frame_without_a_boundary_scores_zero_and_the_row_reads_its_files(self):
+        still, tiers, world = self.scene()
+        one = tiers.copy()
+        one[60:] = [0, 0, 255]
+        self.assertEqual(wm.tier_seam(still, one, world)["value"], 0.0)
+        still[120:, :260] += 10.0
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-s.toml").write_text('[[row]]\nmetric = "tier_seam"\n')
+            save(still, d / "wg-s.png")
+            save(tiers, d / "wg-s@tiers.png")
+            res = wm.measure(d, d, ["wg-s"])["wg-s"]["tier_seam"]
+            self.assertIn("wg-s~noliquid.png", res["missing"])
+            save(world, d / "wg-s~noliquid.png")
+            res = wm.measure(d, d, ["wg-s"])["wg-s"]["tier_seam"]
+            self.assertAlmostEqual(res["worst"], 10.0, delta=1.5)
 
 
 class Profiles(unittest.TestCase):

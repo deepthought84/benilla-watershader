@@ -20,6 +20,7 @@ if [ "${WOW_CAPTURE:-}" = list ]; then echo water-a; exit 0; fi
 [ -z "${WOW_CAPTURE_AGE+x}" ] || echo "WOW_CAPTURE_AGE is set: $WOW_CAPTURE_AGE"
 echo "WOW_CAPTURE_PAN=${WOW_CAPTURE_PAN:-}"
 echo "WOW_MSAA=${WOW_MSAA:-}"
+echo "WOW_NO_LIQUID=${WOW_NO_LIQUID:-}"
 if [ -n "${STUB_ABORT:-}" ]; then echo "wgpu error: Validation Error"; exit 134; fi
 if [ "${WOW_CAPTURE_BURST:-0}" -gt 0 ]; then
   for i in $(seq 0 $((WOW_CAPTURE_BURST - 1))); do
@@ -117,6 +118,16 @@ class Shots(unittest.TestCase):
         self.assertNotIn("WOW_CAPTURE_STABLE", log)
         self.assertNotIn("WOW_CAPTURE_AGE", log)
         self.assertIn("WOW_CAPTURE_PAN=20,10", log)
+
+    def test_water_noliquid_adds_the_still_with_no_liquid(self):
+        r = self.shots(self.caller, self.tmp / "dry", WATER_NOLIQUID="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for stem, dry in (("water-a", ""), ("water-a~noliquid", "1"), ("water-a-ref", "")):
+            self.assertTrue((self.tmp / "dry" / f"{stem}.png").exists())
+            log = (self.tmp / "dry" / f"{stem}.log").read_text()
+            self.assertIn(f"WOW_NO_LIQUID={dry}\n", log)
+        r = self.shots(self.caller, self.tmp / "wet")
+        self.assertFalse((self.tmp / "wet" / "water-a~noliquid.png").exists())
 
     def test_msaa_is_off_whatever_the_caller_exported(self):
         r = self.shots(self.caller, self.tmp / "msaa", WOW_MSAA="4")
