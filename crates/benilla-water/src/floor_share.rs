@@ -12,8 +12,10 @@
 //! lies within an elected plane's full-trust tolerance, or when every spot it reads has a captured
 //! cube at full reach. A surface whose whole mirror water and every spot are served that way is
 //! passed without a look at its patches, so a sea of chunks costs one test each. Anything else, a
-//! surface not summarised yet, a debug view or the grading reading `rho_c`, counts as floor on
-//! screen.
+//! surface not summarised yet or a debug view, counts as floor on screen; so does, under the
+//! grading, any visible surface with water below the eye, since the grade's pivot reads the
+//! floor's verdict and `rho_c` on every fragment the eye is above (`floor_occlusion_wanted`),
+//! whatever its tiers.
 //!
 //! The answer, [`FloorOnScreen`], has two halves. `sky` builds the cube: every stylised fragment
 //! reads it for the floor's share, occluded or not, a WMO interior pool's too. `occluded`, the same
@@ -245,8 +247,8 @@ pub(crate) struct FloorOnScreen {
 
 impl FloorOnScreen {
     /// From the look (`shown`: stylised, water on screen), the occlusion knob, whether a debug view
-    /// or the grading wants the floor wherever water is, and whether any visible water, and any
-    /// visible water outside a WMO interior, leaves the floor a share.
+    /// wants the floor wherever water is, and whether any visible water, and any visible water
+    /// outside a WMO interior, leaves the floor a share or is graded from above.
     fn decide(shown: bool, occlusion: bool, forced: bool, any: bool, exterior: bool) -> Self {
         Self {
             sky: shown && (forced || any),
@@ -356,11 +358,14 @@ type FloorAt<'a, T> = Option<(T, Option<&'a Patch>)>;
 
 /// Of the visible water `surfaces` (each with its summary, `None` while it has none, and whether
 /// it is a WMO interior pool), the first with a patch that can show the sky floor, seen from
-/// `eye_y` under `tiers`, and the first such outside a WMO interior, each with that patch.
+/// `eye_y` under `tiers`, and the first such outside a WMO interior, each with that patch. Under
+/// the grading (`graded`) every fragment the eye is above reads the floor's verdict for the
+/// grade's pivot, so any surface with water below the eye counts, with no patch named.
 fn floor_surfaces<'a, T: Copy>(
     tiers: &Tiers,
     eye_y: f32,
     in_view: &impl Fn(Vec3, Vec3) -> bool,
+    graded: bool,
     surfaces: impl Iterator<Item = (T, Option<&'a SurfaceTiers>, bool)>,
 ) -> (FloorAt<'a, T>, FloorAt<'a, T>) {
     let mut any = None;
@@ -369,6 +374,7 @@ fn floor_surfaces<'a, T: Copy>(
             None => (t, None),
             Some(summary) => match tiers.floor_patch(summary, eye_y, in_view) {
                 Some(patch) => (t, Some(patch)),
+                None if graded && eye_y > summary.low => (t, None),
                 None => continue,
             },
         };
@@ -395,8 +401,9 @@ fn pyramid_readers(ssr: bool, floor: bool) -> WaterHizConsumers {
 
 /// Each frame, after the water's rectangle and the reflection block: whether any water on screen
 /// can show the sky floor, and whether it is occluded there ([`FloorOnScreen`]), and so which
-/// readers want the depth pyramids ([`WaterHizConsumers`]). A debug view or the grading reading
-/// `rho_c` wants the floor wherever water is on screen. `RUST_LOG=benilla_water::floor_share=debug`
+/// readers want the depth pyramids ([`WaterHizConsumers`]). A debug view wants the floor wherever
+/// water is on screen; the grading, whose pivot reads the floor's verdict and `rho_c` on every
+/// fragment the eye is above, wherever visible water lies below the eye. `RUST_LOG=benilla_water::floor_share=debug`
 /// logs each change.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn drive_floor_readers(
@@ -420,7 +427,9 @@ pub(crate) fn drive_floor_readers(
     mut consumers: ResMut<WaterHizConsumers>,
 ) {
     let shown = style.is_stylised() && rect.visible;
-    let forced = dev.water.view != 0 || look.grade_strength > 0.0;
+    // A debug view wants the floor wherever water is; the grading wherever the eye is above it.
+    let forced = dev.water.view != 0;
+    let graded = look.grade_strength > 0.0;
     let tiers = Tiers::from_lanes(&data.0);
     let (any, exterior) = (shown && !forced)
         .then(|| {
@@ -445,7 +454,13 @@ pub(crate) fn drive_floor_readers(
                         m.extension.path.x >= 1.5,
                     ))
                 });
-            Some(floor_surfaces(&tiers, eye.translation().y, &in_view, water))
+            Some(floor_surfaces(
+                &tiers,
+                eye.translation().y,
+                &in_view,
+                graded,
+                water,
+            ))
         })
         .flatten()
         .unwrap_or_default();
@@ -692,7 +707,7 @@ mod tests {
         let seen = |_: Vec3, _: Vec3| true;
         let first = |s: Vec<Option<&SurfaceTiers>>| {
             let s = s.into_iter().enumerate().map(|(i, s)| (i, s, false));
-            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, s);
+            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, false, s);
             assert_eq!(any.map(|(i, _)| i), exterior.map(|(i, _)| i));
             any.map(|(i, p)| (i, p.is_some()))
         };
@@ -732,7 +747,7 @@ mod tests {
         let seen = |_: Vec3, _: Vec3| true;
         let walk = |s: Vec<(&SurfaceTiers, bool)>| {
             let s = s.into_iter().enumerate().map(|(i, (t, x))| (i, Some(t), x));
-            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, s);
+            let (any, exterior) = floor_surfaces(&tiers, 30.0, &seen, false, s);
             (any.map(|(i, _)| i), exterior.map(|(i, _)| i))
         };
         assert_eq!(walk(vec![(&served, false), (&bare, true)]), (Some(1), None));
@@ -751,6 +766,43 @@ mod tests {
                 occluded: false
             }
         );
+    }
+
+    /// Under the grading every fragment the eye is above reads the floor's verdict, so a surface
+    /// the tiers serve whole still counts while its water lies below the eye, and only then; an
+    /// interior pool counts for the cube alone.
+    #[test]
+    fn the_grading_wants_the_floor_where_the_eye_is_above_water() {
+        let tiers = Tiers::from_lanes(&lanes());
+        let served = SurfaceTiers {
+            low: 10.0,
+            mirror: Some((10.0, 10.0)),
+            patches: vec![patch(10.0, 10.0, true, vec![], false)],
+            ..default()
+        };
+        let seen = |_: Vec3, _: Vec3| true;
+        let walk = |eye_y: f32, graded: bool, s: Vec<(&SurfaceTiers, bool)>| {
+            let s = s.into_iter().enumerate().map(|(i, (t, x))| (i, Some(t), x));
+            let (any, exterior) = floor_surfaces(&tiers, eye_y, &seen, graded, s);
+            (any.map(|(i, _)| i), exterior.map(|(i, _)| i))
+        };
+        assert_eq!(walk(30.0, false, vec![(&served, false)]), (None, None));
+        assert_eq!(walk(30.0, true, vec![(&served, false)]), (Some(0), Some(0)));
+        assert_eq!(
+            walk(5.0, true, vec![(&served, false)]),
+            (None, None),
+            "under it"
+        );
+        assert_eq!(
+            walk(10.0, true, vec![(&served, false)]),
+            (None, None),
+            "level with it"
+        );
+        assert_eq!(
+            walk(30.0, true, vec![(&served, true), (&served, false)]),
+            (Some(0), Some(1))
+        );
+        assert_eq!(walk(30.0, true, vec![(&served, true)]), (Some(0), None));
     }
 
     /// The cube is the floor's whatever the occlusion knob says; the occlusion needs the knob, and
