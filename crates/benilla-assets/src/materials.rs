@@ -747,8 +747,9 @@ pub const ATTRIBUTE_WOW_SURFACE_NORMAL: bevy::mesh::MeshVertexAttribute =
 
 /// Per vertex, the water's two reflection tiers (`benilla_formats::PlanarMap`): `x` how far the
 /// planar mirrors serve it, 0 on probe water ramping to 1 over a few cells; `y`, `z` the two probe
-/// spots it reads, lower id first (65535: none); `w` the second spot's share. The spot ids are
-/// constant across a cell, so interpolation leaves them whole. Read by the stylised lane only;
+/// spots it reads, lower id first (65535: none); `w` the second spot's share at the vertex
+/// (`WaterClasses::mix_at`), so it runs on smoothly across the cells reading one pair. The spot ids
+/// are constant across a cell, so interpolation leaves them whole. Read by the stylised lane only;
 /// `(1, 65535, 65535, 0)` on a mesh without it.
 ///
 /// Own attribute id and shader location 12, beside [`ATTRIBUTE_WOW_SURFACE_NORMAL`].

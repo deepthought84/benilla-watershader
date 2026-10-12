@@ -776,8 +776,11 @@ fn liquid_bevy_mesh(
                         .as_ref()
                         .and_then(|c| c.get(j * xt + i))
                         .filter(|_| bind_spots);
-                    let (lo, hi, share) =
-                        here.map_or((NO_SPOT, NO_SPOT, 0.0), |c| (c.spots[0], c.spots[1], c.mix));
+                    // The second spot's share at this vertex, so it runs smoothly across cells.
+                    let (lo, hi, share) = here.map_or((NO_SPOT, NO_SPOT, 0.0), |c| {
+                        let share = planar.map_or(c.mix, |m| m.mix_at(p[0], p[1], c));
+                        (c.spots[0], c.spots[1], share)
+                    });
                     planar_w.push([
                         mix(mix(cw(0), cw(1), fu), mix(cw(2), cw(3), fu), fv),
                         f32::from(lo),

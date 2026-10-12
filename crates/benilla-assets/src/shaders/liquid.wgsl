@@ -2845,23 +2845,27 @@ fn stylised_water(
         // is off by the slope, and the reflected ray twice that.
         let r = reflect(-to_view, flat_n);
         let probe_pos = world_pos + vec3<f32>(n_slide.x, 0.0, n_slide.z) * water_reflect.march.y;
-        // The tier's strength is the weighted mean, over the taps, of each probe's availability, so
-        // it does not depend on which tap ranks first. A probe serves its whole region, so it does
-        // not fade with distance from it. The taps are blended by weight and nothing cleverer: the
-        // probe is a soft term under the screen-space march, not an attempt to place reflections
-        // exactly.
-        var strength = 0.0;
+        // **The tier's strength is how much of this cell's spot shares a cube covers**: the sum of
+        // the taps' weights (availability times share), so it does not depend on which tap ranks
+        // first. A cell between two spots whose second has no cube (only the spots nearest the
+        // player are captured) gives the floor that spot's share, which the classification ramps
+        // across the cells between them, so the probe hands its water to the floor over a stretch
+        // instead of a step at the cell where the held spot's share ends. A probe serves its whole
+        // region, so it does not fade with distance from it. The taps are blended by weight and
+        // nothing cleverer: the probe is a soft term under the screen-space march, not an attempt
+        // to place reflections exactly.
+        var cover = 0.0;
         for (var k = 0; k < taps; k = k + 1) {
+            cover = cover + wt[k];
             if (w[k] <= 0.0) {
                 continue;
             }
             let sl = water_reflect.probes[idx[k]];
-            let share = w[k] / wsum;
-            strength = strength + share * sl.at.w;
             probe_rgb = probe_rgb
-                + sample_probe(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w)) * share;
+                + sample_probe(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w))
+                    * (w[k] / wsum);
         }
-        probe_w = water_reflect.probe_cfg.x * strength;
+        probe_w = water_reflect.probe_cfg.x * min(cover, 1.0);
     }
 
     // `$WOW_PROBE_SHOW` — the cube as the water reads it, black where the tier is not contributing.

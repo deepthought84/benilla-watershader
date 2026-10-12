@@ -57,6 +57,12 @@ pub trait WaterClasses: Send + Sync + 'static {
     /// The probe spots, indexed by the ids cells carry.
     fn spots(&self) -> &[ProbeSpot];
 
+    /// The second spot's share at WoW `(x, y)` in a cell reading `cell`'s spots: the cell's own
+    /// `mix` unless the classification can say it continuously across the cell.
+    fn mix_at(&self, _x: f32, _y: f32, cell: &CellWater) -> f32 {
+        cell.mix
+    }
+
     /// The current at WoW `(x, y)`, yards a second, blended between the cells around it; zero
     /// with no water there.
     fn flow(&self, _x: f32, _y: f32) -> [f32; 2] {

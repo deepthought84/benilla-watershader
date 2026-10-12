@@ -272,7 +272,8 @@ impl Tiers {
         let plane = |at: usize| (data[at + 1] >= 1.0).then_some(data[at]);
         let slot = |k: usize| &data[PROBE_LANES.start + 16 * k..][..16];
         // A spot is full when a slot holds it at full reach and no slot holds it at less: the
-        // shader's strength is the taps' weighted mean of their reach.
+        // shader's strength sums the taps' reach times share, so a spot short of full reach, or
+        // with no cube, leaves the floor its share.
         let mut full = Vec::new();
         let mut short = Vec::new();
         for k in 0..PROBE_SLOT_MAX {

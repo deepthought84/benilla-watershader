@@ -573,6 +573,21 @@ impl PlanarMap {
         self.cells(lq).iter().map(|c| c.plane).collect()
     }
 
+    /// The second spot's share at WoW `(x, y)` in a cell reading `cell`'s two spots, by the same
+    /// rule the cell's `mix` takes at its centre, so it runs on across the cell and into the next
+    /// that reads the same pair. The cell's `mix` where it reads fewer than two.
+    pub fn mix_at(&self, x: f32, y: f32, cell: &CellWater) -> f32 {
+        let [lo, hi] = cell.spots;
+        let (Some(a), Some(b)) = (
+            self.spots.get(usize::from(lo)),
+            self.spots.get(usize::from(hi)),
+        ) else {
+            return cell.mix;
+        };
+        let d = |s: &ProbeSpot| (s.at[0] - x).hypot(s.at[1] - y);
+        pair_share(d(a), d(b))
+    }
+
     /// The probe spots, indexed by the ids cells carry.
     pub fn spots(&self) -> &[ProbeSpot] {
         &self.spots
@@ -881,18 +896,27 @@ fn nearest_spots(at: [f32; 2], ids: &[u16], spots: &[ProbeSpot]) -> CellWater {
         [] => ([NO_SPOT, NO_SPOT], 0.0),
         [(_, a)] => ([*a, NO_SPOT], 0.0),
         [(da, a), (db, b), ..] => {
-            let second = 0.5 * smoothstep(0.3, 0.5, da / (da + db).max(1e-3));
-            if a < b {
-                ([*a, *b], second)
-            } else {
-                ([*b, *a], 1.0 - second)
-            }
+            let (lo, hi) = if a < b { (*a, *b) } else { (*b, *a) };
+            let (d_lo, d_hi) = if a < b { (*da, *db) } else { (*db, *da) };
+            ([lo, hi], pair_share(d_lo, d_hi))
         }
     };
     CellWater {
         spots,
         mix,
         ..CellWater::DRY
+    }
+}
+
+/// The higher id's share between two spots `d_lo` and `d_hi` yards away: none while the lower is
+/// well the nearer, a half where they are equally near, rising over the band between.
+fn pair_share(d_lo: f32, d_hi: f32) -> f32 {
+    let (near, far) = (d_lo.min(d_hi), d_lo.max(d_hi));
+    let second = 0.5 * smoothstep(0.3, 0.5, near / (near + far).max(1e-3));
+    if d_lo <= d_hi {
+        second
+    } else {
+        1.0 - second
     }
 }
 
@@ -916,6 +940,10 @@ impl WaterClasses for PlanarMap {
 
     fn spots(&self) -> &[ProbeSpot] {
         PlanarMap::spots(self)
+    }
+
+    fn mix_at(&self, x: f32, y: f32, cell: &CellWater) -> f32 {
+        PlanarMap::mix_at(self, x, y, cell)
     }
 
     fn flow(&self, x: f32, y: f32) -> [f32; 2] {
@@ -1171,6 +1199,43 @@ mod tests {
             between.spots[1] != NO_SPOT && between.mix > 0.2 && between.mix < 0.8,
             "{between:?}"
         );
+    }
+
+    /// A cell's share between its two spots, taken at any point in it, is its `mix` at its
+    /// centre and runs on without a step into the next cell reading the same pair.
+    #[test]
+    fn the_spot_share_runs_smoothly_across_cells() {
+        let lq = sheet(3, 72, |_, j| 100.0 - 0.6 * j as f32);
+        let map = PlanarMap::build([&lq].into_iter()).expect("a grid");
+        for j in 14..34 {
+            let c = at(&map, &lq, 1, j);
+            let [x, y] = cell_centre(&lq, 1, j);
+            // The classification's own centre of the cell, on its lattice.
+            let (a, b) = key_of([x, y], map.cell);
+            let mid = [(a as f32 + 0.5) * map.cell, (b as f32 + 0.5) * map.cell];
+            assert!(
+                (map.mix_at(mid[0], mid[1], &c) - c.mix).abs() < 1e-5,
+                "{c:?} at row {j}"
+            );
+            // The edge this cell shares with the previous one, from both sides.
+            let [px, py] = cell_centre(&lq, 1, j - 1);
+            let edge = [(x + px) * 0.5, (y + py) * 0.5];
+            let prev = at(&map, &lq, 1, j - 1);
+            if prev.spots == c.spots {
+                let (a, b) = (
+                    map.mix_at(edge[0], edge[1], &prev),
+                    map.mix_at(edge[0], edge[1], &c),
+                );
+                assert!((a - b).abs() < 1e-5, "rows {} and {j}: {a} vs {b}", j - 1);
+            }
+        }
+        // A cell reading one spot keeps its own share.
+        let one = CellWater {
+            spots: [0, NO_SPOT],
+            mix: 0.0,
+            ..CellWater::DRY
+        };
+        assert_eq!(map.mix_at(0.0, 0.0, &one), 0.0);
     }
 
     #[test]
