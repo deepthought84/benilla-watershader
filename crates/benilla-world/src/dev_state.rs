@@ -105,7 +105,7 @@ impl Default for WaterDebug {
 /// The body's `transmittance`, `in_scatter` and `albedo` paint the composite's body terms;
 /// `fresnel` its reflectance; the grading's `grade`, `refl_ungraded` and `refl_graded` its
 /// reflection; `refracted_bed` the bed the composite passes and `refract_reject` the refracted
-/// lookup's weight, offset and leak (Medium and High refract; Low shows the unrefracted bed).
+/// lookup's weight, offset and leak (High refracts; Low and Medium show the unrefracted bed).
 pub const WATER_VIEWS: [&str; 27] = [
     "off",
     "mirror1",

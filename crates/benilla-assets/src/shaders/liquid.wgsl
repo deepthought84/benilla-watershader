@@ -2348,15 +2348,15 @@ var<private> water_src1: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 
 /// The bed the water's transmittance passes, linear: the snapshot under the pixel, and under
 /// `WATER_REFRACT` the snapshot's texel at the refracted lookup `refr_uv` (a texel centre) by its
-/// weight `accept`.
+/// weight `accept`, which is 0 where the snapshot is not the viewport's size
+/// ([`water_body_optics`]).
 fn water_bed(snap_px: vec3<f32>, refr_uv: vec2<f32>, accept: f32) -> vec3<f32> {
     var bed = water_dec(snap_px);
 #ifdef WATER_REFRACT
     // Read whatever the weight, so the read does not wait on the depth test that weighs it.
-    let ok = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(view.viewport.zw));
     let px = vec2<i32>(floor(refr_uv * view.viewport.zw + view.viewport.xy));
     let refr = water_dec(textureLoad(scene_tex, px, 0).rgb);
-    bed = select(bed, mix(bed, refr, accept), ok);
+    bed = mix(bed, refr, accept);
 #endif
     return bed;
 }
@@ -2391,7 +2391,7 @@ fn body_release(h: vec4<u32>) -> BodyHeld {
 /// The water's output: `C = enc(l + t·bed)` less `β` times the snapshot, with `1 − β` in alpha, so
 /// the premultiplied blend `src + β·dst` lands on `C` where `dst` is the snapshot, and a transparent
 /// drawn before the water shows through attenuated by `β = enc(luma(t))`. `bed` is the bed the
-/// layer passes, linear ([`water_bed`], refracted on Medium and High); the remainder always
+/// layer passes, linear ([`water_bed`], refracted on High); the remainder always
 /// subtracts the unrefracted texel `snap_px`, the one the blender's `dst` holds. `cov` is the share
 /// of the pixel the surface covers.
 fn water_output(
@@ -2648,11 +2648,13 @@ fn water_body_optics(
     let p_rr = scene_world_pos(uv_r, max(d_r, 1e-3));
     // A surface in front of the water (a pier leg, a swimmer) or above its plane (a bank, a rock
     // above the waterline) is not the bed: the lookup is rejected, softly, so silhouettes do not
-    // flicker.
+    // flicker. A snapshot not of the viewport's size (a frame of a resize) holds no texel for the
+    // lookup, so neither the bed's colour nor its depth refracts there.
     let z_surf = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
     let a_front = smoothstep(-0.25, 0.0, d_r - z_surf);
     let a_below = 1.0 - smoothstep(0.0, 0.15, p_rr.y - world_pos.y);
-    o.accept = select(0.0, a_front * a_below, o.known && d_r > 0.0);
+    let snap_fits = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(vp));
+    o.accept = select(0.0, a_front * a_below, o.known && d_r > 0.0 && snap_fits);
     o.bed_uv_r = uv_r;
     z_bed = max(world_pos.y - mix(sb.bed.y, p_rr.y, o.accept), 0.0);
 #endif
