@@ -779,6 +779,20 @@ mod tests {
         }
     }
 
+    /// The refraction bends the bed's lookup by the ripple's tilt alone, the normal's horizontal
+    /// part: the normal is built about world up, so its part off the heightfield's normal holds a
+    /// sloping stream's grade, which would move the whole bed downhill.
+    #[test]
+    fn the_refraction_bends_by_the_ripple_alone() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        let tau = "let tau = vec3<f32>(n.x, 0.0, n.z);";
+        assert!(wgsl.contains(tau), "liquid.wgsl lost `{tau}`");
+        assert!(
+            !wgsl.contains("n - flat_n * dot(n, flat_n)"),
+            "the refraction's tilt takes no part of the heightfield's grade"
+        );
+    }
+
     /// The authored column caps a deep lake's path: a bed 45 yd down under a river column authored
     /// at byte 6 (V 6/42, 0.67 yd) shows through as the 1.12 lake does, where the true column passes
     /// almost nothing (Loch Modan's noon row, a grazing view, the sun 60° up). A column authored at

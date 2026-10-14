@@ -2622,9 +2622,11 @@ fn water_body_optics(
 #ifdef WATER_REFRACT
     // The bed seen along the refracted ray. Only the ripple's tilt bends it, by (1 − 1/n) of the
     // path to the bed, at most the path over which a tenth of the bed's light survives; there is
-    // no mean apparent-depth shift, so the waterline stays where it is.
+    // no mean apparent-depth shift, so the waterline stays where it is. The tilt is the normal's
+    // horizontal part: `n` is built about world up ([`water_surface`]), so a sloping stream's
+    // grade, which `flat_n` carries, bends nothing.
     let vp = view.viewport.zw;
-    let tau = n - flat_n * dot(n, flat_n);
+    let tau = vec3<f32>(n.x, 0.0, n.z);
     let sig_bar = dot(bi.sig_abs, LUMA_709) + bi.sig_turb;
     let reach = min(sb.path, 2.302585 / max(sig_bar, 1e-3));
     let refr = water_reflect.look.body.refr;
