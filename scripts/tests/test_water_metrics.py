@@ -296,15 +296,22 @@ class Structure(unittest.TestCase):
     def test_refract_leak_counts_the_occluder_pulled_into_the_strip(self):
         frame = flat([200, 40, 40], w=100, h=100)  # a red occluder on the left …
         frame[:, 50:] = [40, 80, 160]  # … over blue water on the right
-        mask = np.zeros((100, 100, 3), dtype=np.float32)
-        mask[:, 50:] = 255
-        bed = flat([40, 80, 160], w=100, h=100)
+        bed = frame.copy()
         refracted = bed.copy()
         refracted[:, 50:54] = [200, 40, 40]  # four columns of the strip read the occluder
+        # The reject view repaints the water, its blue the share of the tap that is not bed (all
+        # of it here), and leaves the occluder as the frame has it.
+        mask = frame.copy()
+        mask[:, 50:] = [255, 0, 255]
         r = wm.refract_leak(refracted, bed, frame, mask, [0, 0, 100, 100])
         self.assertEqual(r["strip"], 800)
         self.assertAlmostEqual(r["value"], 0.5)
+        self.assertAlmostEqual(r["depth"], 1.0)
         self.assertEqual(wm.refract_leak(bed, bed, frame, mask, [0, 0, 100, 100])["value"], 0.0)
+        # The same colours where the tap read only bed are a submerged face moved, not a leak.
+        mask[:, 50:] = [128, 0, 0]
+        r = wm.refract_leak(refracted, bed, frame, mask, [0, 0, 100, 100])
+        self.assertEqual((r["strip"], r["value"], r["depth"]), (800, 0.0, 0.0))
 
     def test_autocorr_peak_finds_a_period_along_the_bank(self):
         img = noisy([60, 90, 100], sd=1.0, w=400, h=40)

@@ -765,12 +765,24 @@ def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=No
 
 
 def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0):
-    """Refraction pulling an occluder into the water: in the `band`-px strip of water along every
-    non-water silhouette, the share of pixels whose refracted-bed view matches the nearest
-    occluder's colour (ΔE76 < 5) while the unrefracted bed view does not. `mask` is the water
-    view (non-zero on water). Pass ≤ 0.1%."""
+    """Refraction pulling an occluder in front of the water into it: in the `band`-px strip of
+    water along every non-water silhouette, the share of pixels whose refracted-bed view
+    (`refracted_bed`) matches the nearest occluder's colour (ΔE76 < 5) while the unrefracted bed
+    view does not. The bed and the occluders' colours (`bed`, `frame`) are the
+    `composite_identity` view, the frame with the water passing everything unrefracted, taken
+    alike (no glow). Water is where a second view, `mask` (`refract_reject`), differs from the
+    refracted one (view_water): each repaints water only. That view's blue is the share of the
+    refracted read that is not bed, from the depth (a surface in front of the water, above its
+    plane, or sky): the read's whole weight, its red, or 0; a pixel whose blue is not 0 or its red
+    is a world pixel that moved between the captures (a flame, a falling sheet of water), not
+    water. A colour match counts as a leak only where that share is above 0, so a
+    submerged face that the refraction rightly moves, and that happens to look like the occluder
+    above it, is not one. `depth` reports the strip's share whose tap is over 10% not bed.
+    Pass ≤ 0.1%."""
     R, B, F = (crop(a, box) for a in (refracted, bed, frame))
-    wm = crop(mask, box).max(axis=-1) > 0 if mask.ndim == 3 else crop(mask, box) > 0
+    wm = crop(view_water(refracted, mask), box)
+    m = crop(mask, box)
+    not_bed = np.where(np.abs(m[..., 2] - m[..., 0]) <= 2.0, m[..., 2], 0.0)
     occ = F.copy()
     known = ~wm
     strip = np.zeros_like(wm)
@@ -792,12 +804,16 @@ def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0):
         strip |= grown & wm
         known = grown
     if not strip.any():
-        return {"value": 0.0, "strip": 0}
+        return {"value": 0.0, "strip": 0, "depth": 0.0}
     lo = lab(occ[strip])
     near_r = np.linalg.norm(lab(R[strip]) - lo, axis=-1) < de
     near_b = np.linalg.norm(lab(B[strip]) - lo, axis=-1) < de
-    leak = near_r & ~near_b
-    return {"value": float(leak.mean()), "strip": int(strip.sum())}
+    leak = near_r & ~near_b & (not_bed[strip] > 0)
+    return {
+        "value": float(leak.mean()),
+        "strip": int(strip.sum()),
+        "depth": float((not_bed[strip] > 0.1 * 255).mean()),
+    }
 
 
 def roughness_profile(view, box, channel=0, rising=None):
@@ -1177,10 +1193,10 @@ ROWS: dict[str, Row] = {
     "refract_leak": Row(
         refract_leak,
         [
-            ("view", "refracted", "refracted", True),
-            ("view", "bed", "bed", True),
-            ("still", "frame"),
-            ("view", "mask", "water", True),
+            ("view", "refracted", "refracted_bed", True),
+            ("view", "bed", "composite_identity", True),
+            ("view", "frame", "composite_identity", True),
+            ("view", "mask", "refract_reject", True),
         ],
         "lower",
         {"max": 0.001},

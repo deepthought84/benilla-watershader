@@ -25,3 +25,7 @@ metric = "halo_count"
 box = "water"
 [[row]]
 metric = "tier_seam"
+# P1-32: no refracted read pulls the boulders or the boat into the pool.
+[[row]]
+metric = "refract_leak"
+box = [0, 0, 1600, 900]

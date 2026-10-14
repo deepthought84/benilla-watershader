@@ -46,3 +46,7 @@ box = "water"
 metric = "deep_hue"
 box = "water"
 defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
+# P1-32: no refracted read pulls the huts' legs, the reeds or the near bank into the water.
+[[row]]
+metric = "refract_leak"
+box = [0, 0, 1600, 900]
