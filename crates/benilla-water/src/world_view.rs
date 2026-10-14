@@ -284,6 +284,19 @@ pub(super) fn register(app: &mut App) {
 mod tests {
     use super::*;
 
+    /// The refracted lookup's largest offset (`liquid.wgsl`'s `REFRACT_MAX_PX`) stays inside the
+    /// rectangle's margin with a pixel to spare on each side, where the linear depth is this
+    /// frame's.
+    #[test]
+    fn the_refracted_lookup_stays_inside_the_rectangles_margin() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        let decl = format!(
+            "const REFRACT_MAX_PX: f32 = {}.0;",
+            WATER_RECT_MARGIN_PX - 2
+        );
+        assert!(wgsl.contains(&decl), "liquid.wgsl lost `{decl}`");
+    }
+
     /// Armed with a marked view rendered, exactly one visit each; unarmed (the look off, or no
     /// water on screen), none; armed with no marked view rendered, nothing owed.
     #[test]

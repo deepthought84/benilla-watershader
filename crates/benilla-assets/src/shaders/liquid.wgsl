@@ -990,6 +990,18 @@ fn scene_behind(world_pos: vec3<f32>, frag_xy: vec2<f32>) -> SceneBehind {
     s.path = length(world_pos - eye) * max(k - 1.0, 0.0);
     return s;
 }
+
+/// The world point at view Z `z` yards on the ray through `uv`, the view's [0, 1] coordinate: the
+/// linear depth holds view Z, not the distance along the ray.
+fn scene_world_pos(uv: vec2<f32>, z: f32) -> vec3<f32> {
+    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let p_view = vec3<f32>(
+        ndc.x * z / view.clip_from_view[0][0],
+        ndc.y * z / view.clip_from_view[1][1],
+        -z,
+    );
+    return (view.world_from_view * vec4<f32>(p_view, 1.0)).xyz;
+}
 #endif
 
 // ---- colour transfer ---------------------------------------------------------------------------
@@ -2334,19 +2346,61 @@ fn water_snapshot_px(frag_xy: vec2<f32>) -> vec3<f32> {
 var<private> water_src1: vec4<f32> = vec4<f32>(0.0, 0.0, 0.0, 0.0);
 #endif
 
+/// The bed the water's transmittance passes, linear: the snapshot under the pixel, and under
+/// `WATER_REFRACT` the snapshot's texel at the refracted lookup `refr_uv` (a texel centre) by its
+/// weight `accept`.
+fn water_bed(snap_px: vec3<f32>, refr_uv: vec2<f32>, accept: f32) -> vec3<f32> {
+    var bed = water_dec(snap_px);
+#ifdef WATER_REFRACT
+    // Read whatever the weight, so the read does not wait on the depth test that weighs it.
+    let ok = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(view.viewport.zw));
+    let px = vec2<i32>(floor(refr_uv * view.viewport.zw + view.viewport.xy));
+    let refr = water_dec(textureLoad(scene_tex, px, 0).rgb);
+    bed = select(bed, mix(bed, refr, accept), ok);
+#endif
+    return bed;
+}
+
+/// The bed's radiance and transmittance and the in-scatter's weight, as the composite takes them.
+struct BodyHeld {
+    bed: vec3<f32>,
+    t_bed: vec3<f32>,
+    w_in: f32,
+};
+
+/// The refracted bed and the transmittance in half precision, four words: they cross the tiers,
+/// where the shader's register peak lies at the edge of an occupancy step, in the room the
+/// transmittance and the in-scatter's weight alone took.
+fn body_hold(bed: vec3<f32>, t_bed: vec3<f32>, w_in: f32) -> vec4<u32> {
+    return vec4<u32>(
+        pack2x16float(bed.rg),
+        pack2x16float(vec2<f32>(bed.b, t_bed.r)),
+        pack2x16float(t_bed.gb),
+        bitcast<u32>(w_in),
+    );
+}
+
+/// [`body_hold`]'s words back as floats.
+fn body_release(h: vec4<u32>) -> BodyHeld {
+    let a = unpack2x16float(h.x);
+    let b = unpack2x16float(h.y);
+    let c = unpack2x16float(h.z);
+    return BodyHeld(vec3<f32>(a, b.x), vec3<f32>(b.y, c), bitcast<f32>(h.w));
+}
+
 /// The water's output: `C = enc(l + t·bed)` less `β` times the snapshot, with `1 − β` in alpha, so
 /// the premultiplied blend `src + β·dst` lands on `C` where `dst` is the snapshot, and a transparent
-/// drawn before the water shows through attenuated by `β = enc(luma(t))`. `refr_uv` and `accept`
-/// are the refracted bed's lookup and weight, `cov` the share of the pixel the surface covers.
+/// drawn before the water shows through attenuated by `β = enc(luma(t))`. `bed` is the bed the
+/// layer passes, linear ([`water_bed`], refracted on Medium and High); the remainder always
+/// subtracts the unrefracted texel `snap_px`, the one the blender's `dst` holds. `cov` is the share
+/// of the pixel the surface covers.
 fn water_output(
     a: WaterLayer,
     frag_xy: vec2<f32>,
     snap_px: vec3<f32>,
-    refr_uv: vec2<f32>,
-    accept: f32,
+    bed: vec3<f32>,
     cov: f32,
 ) -> vec4<f32> {
-    let bed = water_dec(snap_px);
     let c_lin = a.l + a.t * bed;
     let c = water_enc(c_lin);
     let beta = pow(max(dot(a.t, LUMA_709), 0.0), 1.0 / WATER_GAMMA);
@@ -2449,6 +2503,10 @@ const WATER_IOR: f32 = 1.333;
 const INV_IOR: f32 = 0.7501875;
 /// The cosine of the critical angle (48.61°): a ray refracted into water lies within it.
 const MU_D_MIN: f32 = 0.6612;
+/// The refracted lookup's largest offset in pixels: the water's screen rectangle is grown by 32 px
+/// (`world_view::WATER_RECT_MARGIN_PX`), so a lookup this far off a water pixel reads this frame's
+/// linear depth, with a pixel's guard on each side.
+const REFRACT_MAX_PX: f32 = 30.0;
 /// Yards per unit of the authored depth coordinate, for a pixel whose bed is not known: the river
 /// LUT's span (`0x810380`), and 255 over the ocean's 1.72 bytes per yard.
 const REF_RIVER_V_YD: f32 = 4.6667;
@@ -2550,13 +2608,55 @@ fn water_body_optics(
     // μ_d the lighting sun refracted into the water, μ_v the view ray refracted into it: the bed's
     // light reaches the eye along the refracted ray, which is never steeper than the critical
     // angle, so a grazing view crosses at most 1/0.66 yd of water per yard of depth. z is the depth
-    // of the bed on this pixel's straight ray, not of the bed the refracted ray meets: where the bed
-    // drops away from the eye the path over-counts the water, where it rises it under-counts.
+    // of the bed the bed's lookup reads: the straight ray's, and under `WATER_REFRACT` the
+    // refracted lookup's by its weight. Where the bed drops away from the eye the path over-counts
+    // the water, where it rises it under-counts.
     let mu_s = max(-normalize(wow_light.light_sun.xyz).y, 0.0);
     let mu_d = max(sqrt(1.0 - (1.0 - mu_s * mu_s) * INV_IOR * INV_IOR), MU_D_MIN);
     let ci = saturate(dot(flat_n, to_view));
     let mu_v = max(sqrt(1.0 - (1.0 - ci * ci) * INV_IOR * INV_IOR), MU_D_MIN);
-    o.z = select(bi.fallback_z, max(sb.vertical, 0.0), o.known);
+    let uv = (frag_coord - view.viewport.xy) / view.viewport.zw;
+    var z_bed = max(sb.vertical, 0.0);
+    o.bed_uv_r = uv;
+    o.accept = 0.0;
+#ifdef WATER_REFRACT
+    // The bed seen along the refracted ray. Only the ripple's tilt bends it, by (1 − 1/n) of the
+    // path to the bed, at most the path over which a tenth of the bed's light survives; there is
+    // no mean apparent-depth shift, so the waterline stays where it is.
+    let vp = view.viewport.zw;
+    let tau = n - flat_n * dot(n, flat_n);
+    let sig_bar = dot(bi.sig_abs, LUMA_709) + bi.sig_turb;
+    let reach = min(sb.path, 2.302585 / max(sig_bar, 1e-3));
+    let refr = water_reflect.look.body.refr;
+    let p_r = sb.bed - (1.0 - INV_IOR) * refr.x * reach * tau;
+    let clip = position_world_to_clip(p_r);
+    let uv_r0 = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+    // The offset in pixels, held inside the water's screen rectangle's margin, where the linear
+    // depth is this frame's.
+    let dpx = (uv_r0 - uv) * vp;
+    let lim = min(refr.y * vp.y, REFRACT_MAX_PX);
+    // The lookup is the centre of the texel whose depth is tested, so the bed read is exactly the
+    // surface the rejection judged: a bilinear tap would blend in a neighbour (a pier leg's edge)
+    // that no test saw.
+    let at = clamp(
+        floor(uv * vp + dpx * min(1.0, lim / max(length(dpx), 1e-4))),
+        vec2<f32>(0.0),
+        vp - 1.0,
+    );
+    let uv_r = (at + 0.5) / vp;
+    let d_r = scene_view_z(vec2<i32>(at + view.viewport.xy));
+    let p_rr = scene_world_pos(uv_r, max(d_r, 1e-3));
+    // A surface in front of the water (a pier leg, a swimmer) or above its plane (a bank, a rock
+    // above the waterline) is not the bed: the lookup is rejected, softly, so silhouettes do not
+    // flicker.
+    let z_surf = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
+    let a_front = smoothstep(-0.25, 0.0, d_r - z_surf);
+    let a_below = 1.0 - smoothstep(0.0, 0.15, p_rr.y - world_pos.y);
+    o.accept = select(0.0, a_front * a_below, o.known && d_r > 0.0);
+    o.bed_uv_r = uv_r;
+    z_bed = max(world_pos.y - mix(sb.bed.y, p_rr.y, o.accept), 0.0);
+#endif
+    o.z = select(bi.fallback_z, z_bed, o.known);
     // On ADT water the light crosses at most the authored column, the MCLQ depth byte in yards:
     // 1.12 draws a bed through as much water as the byte says, so a bed the artists left visible
     // under a deep lake stays visible. A WMO's byte is an opacity, not a depth.
@@ -2573,8 +2673,6 @@ fn water_body_optics(
     o.x = saturate(mix(x0, band_soft(x0, fw), look.y) + wake_push);
     o.a_lin = albedo_ramp(bi.s, bi.m, bi.d, o.x);
     o.a_g = water_enc(o.a_lin);
-    o.bed_uv_r = (frag_coord - view.viewport.xy) / view.viewport.zw;
-    o.accept = 0.0;
     o.bed_lod = 0.0;
     return o;
 }
@@ -2625,9 +2723,9 @@ const WV_FLOOR_OCC: u32 = 14u;
 const WV_SKY_FLOOR: u32 = 15u;
 const WV_SIGMA_SHAPE: u32 = 16u;
 // The composite's own views, which change the layer rather than paint over it: identity hands the
-// blender a layer that passes everything (the frame must equal the snapshot), discard returns 0
-// (the frame is untouched). Then the body's: enc(t_bed), enc(in-scatter) and the albedo at the
-// pixel's ramp coordinate.
+// blender a layer that passes everything, unrefracted (the frame must equal the snapshot), discard
+// returns 0 (the frame is untouched). Then the body's: enc(t_bed), enc(in-scatter) and the albedo
+// at the pixel's ramp coordinate.
 const WV_COMPOSITE_IDENTITY: u32 = 17u;
 const WV_DISCARD: u32 = 18u;
 const WV_TRANSMITTANCE: u32 = 19u;
@@ -2637,6 +2735,11 @@ const WV_ALBEDO: u32 = 21u;
 const WV_GRADE: u32 = 22u;
 const WV_REFL_UNGRADED: u32 = 23u;
 const WV_REFL_GRADED: u32 = 24u;
+// The refraction's: the bed as the composite passes it, enc; the refracted lookup's weight in r,
+// its offset in g as a share of `REFRACT_MAX_PX`, and in b the weight of a read that is not bed
+// ([`view_refract_leak`]).
+const WV_REFRACTED_BED: u32 = 25u;
+const WV_REFRACT_REJECT: u32 = 26u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2646,6 +2749,18 @@ fn water_view_id() -> u32 {
 fn view_sigma_abs() -> vec3<f32> {
     let body = water_reflect.look.body;
     return select(body.sig_river.rgb, body.sig_ocean.rgb, w.kind.y > 0.5);
+}
+
+// The share of the refracted bed's read that comes from a surface the rejection exists to keep
+// out, by its weight: a texel whose opaque surface lies in front of this fragment (a pier leg, a
+// swimmer), more than 0.15 yd above the water's plane (a bank, a rock above the waterline) or is
+// sky. 0 where the read is bed.
+fn view_refract_leak(world_pos: vec3<f32>, uv_r: vec2<f32>, accept: f32) -> f32 {
+    let z_surf = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
+    let d = scene_view_z(vec2<i32>(floor(uv_r * view.viewport.zw + view.viewport.xy)));
+    let p = scene_world_pos(uv_r, max(d, 1e-3));
+    let out = d <= 0.0 || d < z_surf - 0.25 || p.y > world_pos.y + 0.15;
+    return select(0.0, accept, out);
 }
 #endif
 
@@ -2682,8 +2797,6 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
-    // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
-    let snap_px = water_snapshot_px(frag_coord);
 
     // ---- the live wave field ----------------------------------------------------------------
     //
@@ -2744,6 +2857,15 @@ fn stylised_water(
     // The body as transport: the column behind the pixel, its transmittance and its albedo, in
     // uniform control flow for the bands' `fwidth`; then its light.
     let optics = water_body_optics(world_pos, frag_coord, sb, n, flat_n, to_view, bi, wake_push);
+#ifdef WATER_REFRACT
+    // The refracted bed, read here where its lookup is made, held with the bed's transmittance
+    // ([`body_hold`]) across the tiers to the composite.
+    let held = body_hold(
+        water_bed(water_snapshot_px(frag_coord), optics.bed_uv_r, optics.accept),
+        optics.t_bed,
+        optics.w_in,
+    );
+#endif
     let body_light = water_body_light(optics, world_pos, vec4<f32>(1.0), bi, wave_tilt, room_fog);
 
     // What the surface reflects where no tier has a better answer: the sky, the dome and its clouds
@@ -3298,7 +3420,19 @@ fn stylised_water(
         return vec4<f32>(water_enc(refl_l), 1.0);
     } else if (view_id == WV_REFL_GRADED) {
         return vec4<f32>(water_enc(refl_g), 1.0);
+    } else if (view_id == WV_REFRACTED_BED) {
+        let bed_r = water_bed(water_snapshot_px(frag_coord), optics.bed_uv_r, optics.accept);
+        return vec4<f32>(water_enc(bed_r), 1.0);
+    } else if (view_id == WV_REFRACT_REJECT) {
+        let off = length((optics.bed_uv_r - frag_coord_to_uv(frag_coord)) * view.viewport.zw);
+        let leak = view_refract_leak(world_pos, optics.bed_uv_r, optics.accept);
+        return vec4<f32>(optics.accept, off / REFRACT_MAX_PX, leak, 1.0);
     }
+#endif
+#ifdef WATER_REFRACT
+    let body = body_release(held);
+#else
+    let body = BodyHeld(vec3<f32>(0.0), optics.t_bed, optics.w_in);
 #endif
     // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
     var layer = layer_surface(
@@ -3306,8 +3440,8 @@ fn stylised_water(
         refl_g,
         spec_l,
         body_light.in_scatter,
-        vec3<f32>(optics.w_in),
-        optics.t_bed,
+        vec3<f32>(body.w_in),
+        body.t_bed,
     );
     layer = layer_cover(layer, soft);
     // Foam is coverage: spray over the surface, hiding what is under it.
@@ -3315,14 +3449,21 @@ fn stylised_water(
         layer = layer_over(water_dec(FOAM_COLOR * lit), foam, layer);
     }
     layer = layer_fog(layer, world_pos, room_fog);
+    let snap_px = water_snapshot_px(frag_coord);
+#ifdef WATER_REFRACT
+    var bed_out = body.bed;
+#else
+    var bed_out = water_dec(snap_px);
+#endif
 #ifdef WATER_VIEW
     if (view_id == WV_COMPOSITE_IDENTITY) {
         layer = WaterLayer(vec3<f32>(0.0), vec3<f32>(1.0));
+        bed_out = water_dec(snap_px);
     } else if (view_id == WV_DISCARD) {
         return vec4<f32>(0.0);
     }
 #endif
-    return water_output(layer, frag_coord, snap_px, frag_coord_to_uv(frag_coord), 0.0, 1.0);
+    return water_output(layer, frag_coord, snap_px, bed_out, 1.0);
 }
 #endif // WATER_STYLISED
 
