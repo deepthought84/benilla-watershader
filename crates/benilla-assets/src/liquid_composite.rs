@@ -549,6 +549,41 @@ fn calm_water_reflects_two_percent_head_on_and_fresnel_is_monotone() {
     }
 }
 
+/// A 10-bit unorm texel, as the snapshot (`Rgb10a2Unorm`) stores a framebuffer colour.
+fn ten_bit(c: V3) -> V3 {
+    c.map(|x| (x.clamp(0.0, 1.0) * 1023.0).round() / 1023.0)
+}
+
+#[test]
+fn a_ten_bit_snapshot_is_within_half_a_step() {
+    let mut rng = Lcg(0x5EED_0009);
+    let step = 0.5 / 1023.0;
+    let slack = 2f32.powi(-10);
+    for n in 0..20_000 {
+        let Case { layer, .. } = random_case(&mut rng, n % 2 == 1);
+        // The framebuffer holds the half-float frame; the water reads its 10-bit snapshot.
+        let dst = rng.texel(1.0);
+        let snap = ten_bit(dst);
+        let c = target(layer, snap);
+        let beta_s = dot(layer.t, LUMA_709).max(0.0).powf(1.0 / WATER_GAMMA);
+        let beta = enc(layer.t).iter().copied().fold(0.0, f32::max);
+        let scalar = src_scalar(layer, snap);
+        let (src0, src1) = src_dual(layer, snap);
+        for blender in [Blender::F32, Blender::F16] {
+            let got = blender.premul(scalar, dst);
+            assert!(
+                max_diff(got, c) <= beta_s * step + slack,
+                "case {n}, {blender:?} scalar: {got:?} against {c:?}"
+            );
+            let got = blender.dual(src0, src1, dst);
+            assert!(
+                max_diff(got, c) <= beta * step + slack,
+                "case {n}, {blender:?} dual: {got:?} against {c:?}"
+            );
+        }
+    }
+}
+
 /// The shader's colour transfer is this mirror's: the same gamma and the same luminance weights.
 #[test]
 fn the_shaders_transfer_is_the_mirrors() {

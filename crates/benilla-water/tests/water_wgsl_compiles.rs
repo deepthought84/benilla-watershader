@@ -34,7 +34,7 @@ fn value(name: &str, v: u32) -> (String, ShaderDefValue) {
 /// Every pipeline this crate queues, as (shader, defs): `water_compute`'s floor occlusion at each
 /// tier (`init_compute_pipelines`), the sky cube's two entry points (`init_lut_pipelines`), the
 /// pyramid's seed single- and multisampled (`HizPipelines::queue_seed`, at 4 samples) and its
-/// reduce, and the probe's face blit and filter, which push no defs.
+/// reduce, the scene snapshot's blit, and the probe's face blit and filter, which push no defs.
 fn pipelines() -> Vec<(&'static str, Vec<(String, ShaderDefValue)>)> {
     let mut out = Vec::new();
     for tier in LiquidKey::TIER_DEFS {
@@ -56,7 +56,12 @@ fn pipelines() -> Vec<(&'static str, Vec<(String, ShaderDefValue)>)> {
         "hiz_seed.wgsl",
         vec![flag("SEED_MS"), value("SEED_SAMPLES", 4)],
     ));
-    for shader in ["hiz_reduce.wgsl", "probe_face.wgsl", "probe_filter.wgsl"] {
+    for shader in [
+        "hiz_reduce.wgsl",
+        "scene_snapshot.wgsl",
+        "probe_face.wgsl",
+        "probe_filter.wgsl",
+    ] {
         out.push((shader, vec![]));
     }
     out
