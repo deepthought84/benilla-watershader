@@ -764,25 +764,32 @@ def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=No
     return {"value": float(w), "bank": float(b)}
 
 
-def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0):
+def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0, with_pixels=False):
     """Refraction pulling an occluder in front of the water into it: in the `band`-px strip of
     water along every non-water silhouette, the share of pixels whose refracted-bed view
     (`refracted_bed`) matches the nearest occluder's colour (ΔE76 < 5) while the unrefracted bed
     view does not. The bed and the occluders' colours (`bed`, `frame`) are the
     `composite_identity` view, the frame with the water passing everything unrefracted, taken
     alike (no glow). Water is where a second view, `mask` (`refract_reject`), differs from the
-    refracted one (view_water): each repaints water only. That view's blue is the share of the
-    refracted read that is not bed, from the depth (a surface in front of the water, above its
-    plane, or sky): the read's whole weight, its red, or 0; a pixel whose blue is not 0 or its red
-    is a world pixel that moved between the captures (a flame, a falling sheet of water), not
-    water. A colour match counts as a leak only where that share is above 0, so a
-    submerged face that the refraction rightly moves, and that happens to look like the occluder
-    above it, is not one. `depth` reports the strip's share whose tap is over 10% not bed.
-    Pass ≤ 0.1%."""
+    refracted one (view_water): each repaints water only. That view's red is the refracted read's
+    weight, its green the read's offset (a share of 30 px), its blue the share of the read that is
+    not bed by the depth (a surface in front of the water, above its plane, or sky): the read's
+    whole weight, its red, or 0; a pixel whose blue is not 0 or its red is a world pixel that moved
+    between the captures (a flame, a falling sheet of water), not water.
+
+    `value` counts a colour match only where that share is above 0. The view tests the texel the
+    shader's rejection tests, with the rejection's own thresholds, so on water it is 0 by
+    construction: the row guards the rejection, it does not see a leak the depth cannot (an
+    alpha-tested or transparent occluder missing from the linear depth, a resolved MSAA
+    silhouette's colour). `depth` is the strip's share whose read is over 10% not bed by that view;
+    on water only world pixels at the views' edges carry it. `colour` is the colour test alone over
+    the reads that moved (weight and offset above 0), with `colour_px` pixels; `with_pixels` adds
+    their mask over `box` as `pixels`, for looking at them. Pass ≤ 0.1% (`value`)."""
     R, B, F = (crop(a, box) for a in (refracted, bed, frame))
     wm = crop(view_water(refracted, mask), box)
-    m = crop(mask, box)
+    m = crop(mask, box).astype(np.float64)
     not_bed = np.where(np.abs(m[..., 2] - m[..., 0]) <= 2.0, m[..., 2], 0.0)
+    moved = (m[..., 0] > 0) & (m[..., 1] > 0)
     occ = F.copy()
     known = ~wm
     strip = np.zeros_like(wm)
@@ -797,23 +804,35 @@ def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0):
         ):
             take = np.zeros_like(wm)
             take[dst] = known[src] & ~grown[dst]
-            moved = np.zeros_like(occ)
-            moved[dst] = occ[src]
-            occ[take] = moved[take]
+            moved_c = np.zeros_like(occ)
+            moved_c[dst] = occ[src]
+            occ[take] = moved_c[take]
             grown |= take
         strip |= grown & wm
         known = grown
     if not strip.any():
-        return {"value": 0.0, "strip": 0, "depth": 0.0}
+        out = {"value": 0.0, "strip": 0, "depth": 0.0, "colour": 0.0, "colour_px": 0}
+        if with_pixels:
+            out["pixels"] = np.zeros_like(wm)
+        return out
     lo = lab(occ[strip])
     near_r = np.linalg.norm(lab(R[strip]) - lo, axis=-1) < de
     near_b = np.linalg.norm(lab(B[strip]) - lo, axis=-1) < de
-    leak = near_r & ~near_b & (not_bed[strip] > 0)
-    return {
+    hue = near_r & ~near_b
+    leak = hue & (not_bed[strip] > 0)
+    colour = hue & moved[strip]
+    out = {
         "value": float(leak.mean()),
         "strip": int(strip.sum()),
         "depth": float((not_bed[strip] > 0.1 * 255).mean()),
+        "colour": float(colour.mean()),
+        "colour_px": int(colour.sum()),
     }
+    if with_pixels:
+        px = np.zeros_like(wm)
+        px[strip] = colour
+        out["pixels"] = px
+    return out
 
 
 def roughness_profile(view, box, channel=0, rising=None):

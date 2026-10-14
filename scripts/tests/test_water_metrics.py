@@ -308,10 +308,17 @@ class Structure(unittest.TestCase):
         self.assertAlmostEqual(r["value"], 0.5)
         self.assertAlmostEqual(r["depth"], 1.0)
         self.assertEqual(wm.refract_leak(bed, bed, frame, mask, [0, 0, 100, 100])["value"], 0.0)
-        # The same colours where the tap read only bed are a submerged face moved, not a leak.
+        # The same colours where the tap read only bed are a submerged face moved, not a leak;
+        # the colour test alone counts them where the read moved, and not where it did not.
         mask[:, 50:] = [128, 0, 0]
         r = wm.refract_leak(refracted, bed, frame, mask, [0, 0, 100, 100])
         self.assertEqual((r["strip"], r["value"], r["depth"]), (800, 0.0, 0.0))
+        self.assertEqual((r["colour"], r["colour_px"]), (0.0, 0))
+        mask[:, 50:] = [128, 40, 0]
+        r = wm.refract_leak(refracted, bed, frame, mask, [0, 0, 100, 100], with_pixels=True)
+        self.assertEqual((r["value"], r["colour_px"]), (0.0, 400))
+        self.assertAlmostEqual(r["colour"], 0.5)
+        self.assertTrue(r["pixels"][:, 50:54].all() and not r["pixels"][:, 54:].any())
 
     def test_autocorr_peak_finds_a_period_along_the_bank(self):
         img = noisy([60, 90, 100], sd=1.0, w=400, h=40)
