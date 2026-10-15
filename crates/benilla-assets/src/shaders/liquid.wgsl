@@ -2391,7 +2391,7 @@ fn body_release(h: vec4<u32>) -> BodyHeld {
 /// The water's output: `C = enc(l + t·bed)` less `β` times the snapshot, with `1 − β` in alpha, so
 /// the premultiplied blend `src + β·dst` lands on `C` where `dst` is the snapshot, and a transparent
 /// drawn before the water shows through attenuated by `β = enc(luma(t))`. `bed` is the bed the
-/// layer passes, linear ([`water_bed`], refracted on High); the remainder always
+/// layer passes, linear ([`water_bed`], refracted on Medium and High); the remainder always
 /// subtracts the unrefracted texel `snap_px`, the one the blender's `dst` holds. `cov` is the share
 /// of the pixel the surface covers.
 fn water_output(
@@ -2801,6 +2801,10 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
+#ifndef WATER_REFRACT
+    // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
+    let snap_px = water_snapshot_px(frag_coord);
+#endif
 
     // ---- the live wave field ----------------------------------------------------------------
     //
@@ -3453,8 +3457,8 @@ fn stylised_water(
         layer = layer_over(water_dec(FOAM_COLOR * lit), foam, layer);
     }
     layer = layer_fog(layer, world_pos, room_fog);
-    let snap_px = water_snapshot_px(frag_coord);
 #ifdef WATER_REFRACT
+    let snap_px = water_snapshot_px(frag_coord);
     var bed_out = body.bed;
 #else
     var bed_out = water_dec(snap_px);

@@ -476,7 +476,7 @@ impl LiquidKey {
     }
 
     /// The fragment-stage defs [`LiquidExt::specialize`] pushes for this key: on stylised water,
-    /// the stylised region, the complete depth and the tier, the bed's refraction on High,
+    /// the stylised region, the complete depth and the tier, the bed's refraction from Medium up,
     /// and each variant the key carries.
     pub fn frag_defs(self) -> Vec<&'static str> {
         let mut defs = Vec::new();
@@ -488,7 +488,7 @@ impl LiquidKey {
             "WATER_SCENE_DEPTH",
             Self::TIER_DEFS[usize::from(self.tier())],
         ]);
-        if self.tier() == 2 {
+        if self.tier() >= 1 {
             defs.push("WATER_REFRACT");
         }
         if self.has(Self::VIEW) {
@@ -1872,8 +1872,8 @@ mod tests {
             );
             assert_eq!(
                 defs.contains(&"WATER_REFRACT"),
-                tier == 2,
-                "the bed refracts on High only, path.w {bits}"
+                tier >= 1,
+                "the bed refracts from Medium up, path.w {bits}"
             );
             assert!(
                 key(1.0, 1.0, bits).frag_defs().is_empty()
