@@ -2601,7 +2601,8 @@ const MCSH_SPAN_YD: f32 = 1066.6666;
 
 /// Whether the lighting sun reaches the surface point `world_pos` over a water column `column`
 /// yards deep, 1 lit and 0 shadowed: the terrain's MCSH at the ground point the sun's ray through
-/// the surface meets, read bilinearly as the terrain reads it. Lit outside the shadow's window.
+/// the surface meets, read bilinearly across the torus (the terrain clamps each chunk's block half
+/// a texel in). Lit outside the shadow's window.
 fn lighting_sun_mcsh(world_pos: vec3<f32>, column: f32) -> f32 {
     let win = water_reflect.look.body.shadow;
     let l = normalize(wow_light.light_sun.xyz);

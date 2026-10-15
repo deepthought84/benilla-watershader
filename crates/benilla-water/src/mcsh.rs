@@ -17,7 +17,8 @@
 //! window reads lit while any waits (a teleport's first frames).
 //!
 //! The image exists only while the look is Improved Water: on the reference lane the materials
-//! bind the one-texel lit placeholder and no system here runs but the toggle.
+//! bind the one-texel lit placeholder, the frame holds no blocks, and no system here runs but the
+//! toggle and `ShadowFrame`'s extract, which copies a changed frame only.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -183,14 +184,18 @@ impl WaterShadow {
         self.image.clone()
     }
 
-    /// Take in a tile's chunks, queueing those in the window.
+    /// Take in a tile's chunks, queueing those in the window. A chunk already indexed to this tile
+    /// is not queued again: a loaded tile sends both `LoadedWithDependencies` and `Added`.
     fn add_tile(&mut self, id: AssetId<AdtTile>, tile: &AdtTile) {
         for (i, chunk) in tile.chunks.iter().enumerate() {
             let Some(&nw) = chunk.positions.first() else {
                 continue;
             };
             let k = chunk_of_nw(nw);
-            self.chunks.insert(k, (id, i as u16));
+            let at = (id, i as u16);
+            if self.chunks.insert(k, at) == Some(at) {
+                continue;
+            }
             if self.centre.is_some_and(|c| in_window(c, k)) {
                 self.pending.insert(k);
             }
@@ -259,15 +264,24 @@ impl WaterShadow {
         mcsh: impl Fn(AssetId<AdtTile>, u16) -> Option<Vec<u8>>,
     ) -> Vec<(UVec2, Vec<u8>)> {
         let centre = self.centre.unwrap_or(here);
-        let mut queue: Vec<IVec2> = self.pending.iter().copied().collect();
-        queue.sort_by_key(|&k| {
-            let first = self.stale.contains(&k) && in_read(centre, k);
-            (!first, (k - here).length_squared(), k.y, k.x)
-        });
-        queue.truncate(SHADOW_WRITES_PER_FRAME);
+        // Each chunk's order once, unique by its row and column; the frame's 64 are selected
+        // before they are sorted.
+        let mut queue: Vec<_> = self
+            .pending
+            .iter()
+            .map(|&k| {
+                let first = self.stale.contains(&k) && in_read(centre, k);
+                ((!first, (k - here).length_squared(), k.y, k.x), k)
+            })
+            .collect();
+        if queue.len() > SHADOW_WRITES_PER_FRAME {
+            queue.select_nth_unstable_by_key(SHADOW_WRITES_PER_FRAME, |&(order, _)| order);
+            queue.truncate(SHADOW_WRITES_PER_FRAME);
+        }
+        queue.sort_unstable_by_key(|&(order, _)| order);
         queue
             .into_iter()
-            .map(|k| {
+            .map(|(_, k)| {
                 self.pending.remove(&k);
                 self.stale.remove(&k);
                 let bytes = self
@@ -288,6 +302,8 @@ impl WaterShadow {
 /// persists there between frames that pop none.
 #[derive(Resource, Clone, Default, ExtractResource)]
 struct ShadowFrame {
+    /// The torus is built: the render world's copy runs only while it is.
+    armed: bool,
     generation: u64,
     id: AssetId<Image>,
     writes: Arc<Vec<(UVec2, Vec<u8>)>>,
@@ -315,6 +331,7 @@ fn toggle_water_shadow(
     style: Res<WaterStyle>,
     mut shadow: ResMut<WaterShadow>,
     mut window: ResMut<WaterShadowWindow>,
+    mut frame: ResMut<ShadowFrame>,
     mut images: ResMut<Assets<Image>>,
     tiles: Res<Assets<AdtTile>>,
     mut materials: ResMut<Assets<LiquidMaterial>>,
@@ -327,6 +344,13 @@ fn toggle_water_shadow(
     let placeholder = shadow.placeholder.clone();
     *shadow = WaterShadow::new(placeholder);
     *window = WaterShadowWindow::default();
+    // The last blocks go with the torus; the generation runs on, so the render world, which skips
+    // the generation it took last, takes the next torus's first.
+    *frame = ShadowFrame {
+        armed: stylised,
+        generation: frame.generation,
+        ..default()
+    };
     if stylised {
         shadow.image = images.add(torus_image());
         shadow.allocated = true;
@@ -387,6 +411,7 @@ fn drive_water_shadow(
     if !shadow.allocated {
         return;
     }
+    // This frame's pose: `view::CameraPoseSet` publishes the root camera's in `Update`.
     let Some(eye) = cam.iter().next().map(GlobalTransform::translation) else {
         return;
     };
@@ -497,9 +522,15 @@ fn upload_water_shadow(
     );
 }
 
-/// Whether the look is Improved Water, the condition every system here but the toggle runs under.
+/// Whether the look is Improved Water, the condition every main-world system here but the toggle
+/// runs under.
 fn stylised(style: Res<WaterStyle>) -> bool {
     style.is_stylised()
+}
+
+/// Render world: whether the torus is built, the condition the copy runs under.
+fn shadow_armed(frame: Option<Res<ShadowFrame>>) -> bool {
+    frame.is_some_and(|f| f.armed)
 }
 
 pub(super) fn register(app: &mut App) {
@@ -537,7 +568,9 @@ pub(super) fn register(app: &mut App) {
     };
     render_app.add_systems(
         Render,
-        upload_water_shadow.in_set(RenderSystems::PrepareResources),
+        upload_water_shadow
+            .run_if(shadow_armed)
+            .in_set(RenderSystems::PrepareResources),
     );
 }
 
@@ -563,7 +596,7 @@ mod tests {
     }
 
     /// The shader's copies of the map's half extent and the torus's span are 32 tiles and 32
-    /// chunks.
+    /// chunks, and it reads the torus at the coordinate [`torus_uv`] mirrors.
     #[test]
     fn the_shaders_spans_are_the_formats() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
@@ -580,9 +613,13 @@ mod tests {
         };
         assert!((value("MAP_HALF_YD") - 32.0 * TILE_SIZE).abs() < 1e-3);
         assert!((value("MCSH_SPAN_YD") - 32.0 * CHUNK_SIZE).abs() < 1e-3);
-        assert_eq!(MAP_HALF_YD, 32.0 * TILE_SIZE);
-        assert_eq!(MCSH_SPAN_YD, 32.0 * CHUNK_SIZE);
         assert_eq!(MCSH_TEXELS, 2048);
+        for line in [
+            "let uv = fract((g + vec2<f32>(MAP_HALF_YD)) / MCSH_SPAN_YD);",
+            "let shadowed = textureSampleLevel(water_shadow, ripples_samp, uv, 0.0).r;",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
     }
 
     /// A chunk at global chunk `k` with `shadow` as its MCSH.
@@ -944,7 +981,44 @@ mod tests {
         assert!(shadow.pending.is_empty() && shadow.stale.is_empty());
     }
 
-    /// The reference lane builds no torus and frees it on the way back.
+    /// **A tile that streams in is copied once, and lit again when it goes**, through the tiles'
+    /// asset events: a loaded tile sends `LoadedWithDependencies`, read the frame it is sent, and
+    /// `Added`, read a frame later, which queues nothing.
+    #[test]
+    fn a_streamed_tile_is_copied_once_and_lit_when_it_goes() {
+        let k = IVec2::new(400, 400);
+        let mut app = app_at(k, WaterStyle::Stylised);
+        app.update();
+        app.update();
+        let frame = |app: &App| app.world().resource::<ShadowFrame>().clone();
+        assert_eq!(frame(&app).generation, 0, "no tile, nothing queued");
+        let at = k + IVec2::new(3, -2);
+        let tile = app
+            .world_mut()
+            .resource_mut::<Assets<AdtTile>>()
+            .add(shadowed_tile(at));
+        app.world_mut()
+            .write_message(AssetEvent::LoadedWithDependencies { id: tile.id() });
+        app.update();
+        let f = frame(&app);
+        assert_eq!(f.generation, 1);
+        assert_eq!(*f.writes, [(torus_origin(at), vec![255; CHUNK_BYTES])]);
+        for _ in 0..2 {
+            app.update();
+            assert_eq!(frame(&app).generation, 1, "its `Added` queues nothing");
+        }
+        app.world_mut()
+            .resource_mut::<Assets<AdtTile>>()
+            .remove(tile.id());
+        app.update();
+        app.update();
+        let f = frame(&app);
+        assert_eq!(f.generation, 2);
+        assert_eq!(*f.writes, [(torus_origin(at), vec![0; CHUNK_BYTES])]);
+    }
+
+    /// The reference lane builds no torus, and on the way back frees it, drops the last blocks and
+    /// disarms the render world's copy.
     #[test]
     fn the_reference_lane_binds_the_placeholder() {
         let mut app = app_at(IVec2::new(10, 10), WaterStyle::Reference);
@@ -952,20 +1026,30 @@ mod tests {
         let shadow = app.world().resource::<WaterShadow>();
         assert!(!shadow.allocated);
         assert_eq!(shadow.image, shadow.placeholder);
+        assert!(!app.world().resource::<ShadowFrame>().armed);
         app.insert_resource(WaterStyle::Stylised);
+        let _tile = app
+            .world_mut()
+            .resource_mut::<Assets<AdtTile>>()
+            .add(shadowed_tile(IVec2::new(10, 10)));
         app.update();
-        let torus = app.world().resource::<WaterShadow>().image();
-        assert!(app
-            .world()
-            .resource::<Assets<Image>>()
-            .get(&torus)
-            .is_some());
+        app.update();
+        let torus = app.world().resource::<WaterShadow>().image().id();
+        let images = |app: &App| app.world().resource::<Assets<Image>>().get(torus).is_some();
+        assert!(images(&app));
+        let frame = app.world().resource::<ShadowFrame>();
+        assert!(frame.armed && frame.generation == 1 && frame.writes.len() == 1);
         app.insert_resource(WaterStyle::Reference);
         app.update();
         let shadow = app.world().resource::<WaterShadow>();
         assert_eq!(shadow.image, shadow.placeholder);
         assert!(shadow.chunks.is_empty() && shadow.centre.is_none());
         assert_eq!(*app.world().resource::<WaterShadowWindow>(), default());
+        let frame = app.world().resource::<ShadowFrame>();
+        assert!(!frame.armed && frame.writes.is_empty());
+        assert_eq!(frame.generation, 1, "the generation runs on");
+        app.update();
+        assert!(!images(&app), "the torus is freed");
     }
 
     /// **Render world: a generation is copied once**, one whose texture is missing waits for it,
@@ -974,6 +1058,7 @@ mod tests {
     fn a_generation_is_copied_once() {
         let (mut seen, mut waiting) = (0u64, Vec::new());
         let mut f = ShadowFrame {
+            armed: true,
             generation: 1,
             id: AssetId::default(),
             writes: Arc::new(vec![(UVec2::ZERO, vec![0; CHUNK_BYTES])]),
