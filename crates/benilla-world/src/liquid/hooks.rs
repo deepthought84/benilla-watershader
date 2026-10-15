@@ -241,6 +241,9 @@ pub struct WaterPassImages {
     pub floor_occ: Handle<Image>,
     /// The sky floor's cube; the placeholder is black.
     pub sky_lut: Handle<Image>,
+    /// The lighting sun's terrain shadow (the ADT chunks' MCSH) around the camera, `R8Unorm`, 1
+    /// shadowed; the placeholder is one lit texel.
+    pub shadow: Handle<Image>,
     /// The wave simulation's field.
     pub wake: Handle<Image>,
     /// The reflection block, [`REFLECT_FLOATS`] floats, written once a frame in the render world.
@@ -365,6 +368,7 @@ pub(super) fn placeholder_pass_images(
         1,
         None,
     ));
+    let shadow = images.add(placeholder(TextureFormat::R8Unorm, 1, None));
     let reflect_buf = device.create_buffer(&BufferDescriptor {
         label: Some("water_reflect_params"),
         size: (REFLECT_FLOATS * 4) as u64,
@@ -382,6 +386,7 @@ pub(super) fn placeholder_pass_images(
         water_occl: occl,
         floor_occ: flat.clone(),
         sky_lut: sky_cube,
+        shadow,
         wake: flat,
         reflect_buf,
     });

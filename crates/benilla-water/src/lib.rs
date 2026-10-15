@@ -5,9 +5,9 @@
 //! the screen-space march reads (`depth`, `hiz`, `scene_color`), the sky floor's occlusion over the
 //! mirror planes and the sky floor's cube (`water_compute`, `sky_lut`), whether the water on screen
 //! can show the sky floor at all (`floor_share`), the wave simulation (`ripple_sim`), the surface's
-//! clock (`clock`), the body's optics and light (`body`), the terrain shadow's window (`mcsh`)
-//! and the look's knobs (`look`). The surface shading
-//! is `liquid.wgsl`'s stylised lane, in the engine.
+//! clock (`clock`), the body's optics and light (`body`), the lighting sun's terrain shadow
+//! around the camera (`mcsh`) and the look's knobs (`look`). The surface shading is
+//! `liquid.wgsl`'s stylised lane, in the engine.
 //!
 //! Every pass is inert on the reference lane (`WaterStyle::Reference`); the plugin only makes
 //! the Improved Water option draw what it names.
@@ -68,8 +68,8 @@ impl Plugin for ImprovedWaterPlugin {
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
-        app.init_resource::<look::WaterLook>()
-            .init_resource::<mcsh::WaterShadowWindow>();
+        app.init_resource::<look::WaterLook>();
+        mcsh::register(app);
         reflect::register(app);
         ripple_sim::register(app);
         world_view::register(app);
@@ -133,6 +133,7 @@ fn publish_pass_images(
     occ: Option<Res<water_compute::FloorOcc>>,
     lut: Option<Res<sky_lut::SkyLut>>,
     sim: Option<Res<ripple_sim::RippleSim>>,
+    shadow: Res<mcsh::WaterShadow>,
 ) {
     let (
         Some(reflect),
@@ -158,6 +159,7 @@ fn publish_pass_images(
         water_occl: occ.occl.clone(),
         floor_occ: occ.col.clone(),
         sky_lut: lut.image.clone(),
+        shadow: shadow.image(),
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
     });

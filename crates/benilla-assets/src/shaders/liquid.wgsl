@@ -77,6 +77,9 @@ const PROBE_TAPS_MAX: i32 = 3;
 @group(#{MATERIAL_BIND_GROUP}) @binding(119) var sky_lut: texture_cube<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(120) var water_occl: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(121) var floor_occ: texture_2d<f32>;
+// The lighting sun's terrain shadow around the camera (`benilla_water::mcsh`): the ADT chunks' MCSH
+// bytes, 1 shadowed, in a 2048² torus over 32×32 chunks; one lit texel while it is not built.
+@group(#{MATERIAL_BIND_GROUP}) @binding(122) var water_shadow: texture_2d<f32>;
 #ifdef WATER_SCENE_DEPTH
 // The opaque world's linear depth behind each pixel (`liquid::hiz`): view Z in yards, written after
 // the opaque pass inside the water's screen rectangle, 0 where nothing was drawn. A texel outside
@@ -2591,6 +2594,24 @@ fn body_lift(a_g: vec3<f32>, lift: f32) -> vec3<f32> {
     return lift * a_g / max(max(a_g.r, max(a_g.g, a_g.b)), max(lift, 1e-4));
 }
 
+/// The map's north-west corner from its centre, 32 ADT tiles, and the shadow torus's span, 32 MCNK
+/// chunks of 64 MCSH texels, in yards (`benilla_water::mcsh`'s `MAP_HALF_YD`, `MCSH_SPAN_YD`).
+const MAP_HALF_YD: f32 = 17066.666;
+const MCSH_SPAN_YD: f32 = 1066.6666;
+
+/// Whether the lighting sun reaches the surface point `world_pos` over a water column `column`
+/// yards deep, 1 lit and 0 shadowed: the terrain's MCSH at the ground point the sun's ray through
+/// the surface meets, read bilinearly as the terrain reads it. Lit outside the shadow's window.
+fn lighting_sun_mcsh(world_pos: vec3<f32>, column: f32) -> f32 {
+    let win = water_reflect.look.body.shadow;
+    let l = normalize(wow_light.light_sun.xyz);
+    let g = world_pos.xz + l.xz * (min(max(column, 0.0), 16.0) / max(-l.y, 0.2));
+    let inside = win.w > 0.5 && all(abs(g - win.xy) < vec2<f32>(win.z));
+    let uv = fract((g + vec2<f32>(MAP_HALF_YD)) / MCSH_SPAN_YD);
+    let shadowed = textureSampleLevel(water_shadow, ripples_samp, uv, 0.0).r;
+    return select(1.0, 1.0 - shadowed, inside);
+}
+
 /// The water column behind this pixel and its transmittance, the in-scatter's weight and the
 /// albedo. Takes `fwidth`: call it in uniform control flow.
 fn water_body_optics(
@@ -2751,6 +2772,9 @@ const WV_REFL_GRADED: u32 = 24u;
 // ([`view_refract_leak`]).
 const WV_REFRACTED_BED: u32 = 25u;
 const WV_REFRACT_REJECT: u32 = 26u;
+// The lighting sun's terrain shadow at the surface over the pixel's column, white lit
+// ([`lighting_sun_mcsh`]).
+const WV_MCSH: u32 = 27u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -3442,6 +3466,8 @@ fn stylised_water(
         let off = length((optics.bed_uv_r - frag_coord_to_uv(frag_coord)) * view.viewport.zw);
         let leak = view_refract_leak(world_pos, optics.bed_uv_r, optics.accept);
         return vec4<f32>(optics.accept, off / REFRACT_MAX_PX, leak, 1.0);
+    } else if (view_id == WV_MCSH) {
+        return vec4<f32>(vec3<f32>(lighting_sun_mcsh(world_pos, optics.z)), 1.0);
     }
 #endif
 #ifdef WATER_REFRACT

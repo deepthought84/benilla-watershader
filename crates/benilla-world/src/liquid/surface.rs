@@ -1057,6 +1057,7 @@ pub(super) fn setup_liquid(
                     water_occl: pass.water_occl.clone(),
                     floor_occ: pass.floor_occ.clone(),
                     sky_lut: pass.sky_lut.clone(),
+                    shadow: pass.shadow.clone(),
                     wake: wake.clone(),
                     reflect_buf: pass.reflect_buf.clone(),
                     // x = fullbright (the sheet as body, still fogged); y = the ocean swatch;

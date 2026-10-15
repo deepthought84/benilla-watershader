@@ -682,6 +682,11 @@ pub struct LiquidExt {
     /// size of [`Self::water_occl`].
     #[texture(121, visibility(fragment))]
     pub floor_occ: Handle<Image>,
+    /// The lighting sun's terrain shadow around the camera (`benilla_water`'s `mcsh`): the ADT
+    /// chunks' MCSH bytes in a 2048² `R8Unorm` torus, 1 shadowed. Read through
+    /// [`Self::ripples`]' repeating sampler.
+    #[texture(122, visibility(fragment))]
+    pub shadow: Handle<Image>,
     /// The reflection's per-frame parameters (`benilla_world::liquid::reflect`), a buffer so the
     /// per-frame write does not rebuild every liquid material's bind group.
     #[storage(107, read_only, buffer, visibility(fragment))]
