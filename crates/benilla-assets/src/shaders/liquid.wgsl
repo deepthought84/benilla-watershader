@@ -2595,7 +2595,7 @@ fn water_body_optics(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
     sb: SceneBehind,
-    n: vec3<f32>,
+    n_lo: vec3<f32>,
     flat_n: vec3<f32>,
     to_view: vec3<f32>,
     bi: BodyIn,
@@ -2622,11 +2622,12 @@ fn water_body_optics(
 #ifdef WATER_REFRACT
     // The bed seen along the refracted ray. Only the ripple's tilt bends it, by (1 − 1/n) of the
     // path to the bed, at most the path over which a tenth of the bed's light survives; there is
-    // no mean apparent-depth shift, so the waterline stays where it is. The tilt is the normal's
-    // horizontal part: `n` is built about world up ([`water_surface`]), so a sloping stream's
-    // grade, which `flat_n` carries, bends nothing.
+    // no mean apparent-depth shift, so the waterline stays where it is. The tilt is the horizontal
+    // part of the resolved low band's normal, the one the mirrors slide by: the octaves finer than
+    // ~8 px of footprint would tear a submerged edge row to row. The normal is built about world
+    // up ([`water_surface`]), so a sloping stream's grade, which `flat_n` carries, bends nothing.
     let vp = view.viewport.zw;
-    let tau = vec3<f32>(n.x, 0.0, n.z);
+    let tau = vec3<f32>(n_lo.x, 0.0, n_lo.z);
     let sig_bar = dot(bi.sig_abs, LUMA_709) + bi.sig_turb;
     let reach = min(sb.path, 2.302585 / max(sig_bar, 1e-3));
     let refr = water_reflect.look.body.refr;
@@ -2648,15 +2649,19 @@ fn water_body_optics(
     let uv_r = (at + 0.5) / vp;
     let d_r = scene_view_z(vec2<i32>(at + view.viewport.xy));
     let p_rr = scene_world_pos(uv_r, max(d_r, 1e-3));
-    // A surface in front of the water (a pier leg, a swimmer) or above its plane (a bank, a rock
-    // above the waterline) is not the bed: the lookup is rejected, softly, so silhouettes do not
-    // flicker. A snapshot not of the viewport's size (a frame of a resize) holds no texel for the
-    // lookup, so neither the bed's colour nor its depth refracts there.
+    // A surface in front of the water (a pier leg, a swimmer), above its plane (a bank, a rock
+    // above the waterline) or standing above this pixel's own bed by more than a 45° slope over
+    // the offset (a reed, a rock's submerged face) is not the bed the bent ray reaches: on screen
+    // it lies on another surface point's ray, nearer the eye. The lookup is rejected, softly, so
+    // silhouettes do not flicker. A snapshot not of the viewport's size (a frame of a resize)
+    // holds no texel for the lookup, so neither the bed's colour nor its depth refracts there.
     let z_surf = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;
     let a_front = smoothstep(-0.25, 0.0, d_r - z_surf);
     let a_below = 1.0 - smoothstep(0.0, 0.15, p_rr.y - world_pos.y);
+    let rise = distance(p_r, sb.bed);
+    let a_bed = 1.0 - smoothstep(rise, rise + 0.15, p_rr.y - sb.bed.y);
     let snap_fits = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(vp));
-    o.accept = select(0.0, a_front * a_below, o.known && d_r > 0.0 && snap_fits);
+    o.accept = select(0.0, a_front * a_below * a_bed, o.known && d_r > 0.0 && snap_fits);
     o.bed_uv_r = uv_r;
     z_bed = max(world_pos.y - mix(sb.bed.y, p_rr.y, o.accept), 0.0);
 #endif
@@ -2864,7 +2869,7 @@ fn stylised_water(
     let wave_tilt = dot(n.xz, sun_xz);
     // The body as transport: the column behind the pixel, its transmittance and its albedo, in
     // uniform control flow for the bands' `fwidth`; then its light.
-    let optics = water_body_optics(world_pos, frag_coord, sb, n, flat_n, to_view, bi, wake_push);
+    let optics = water_body_optics(world_pos, frag_coord, sb, n_slide, flat_n, to_view, bi, wake_push);
 #ifdef WATER_REFRACT
     // The refracted bed, read here where its lookup is made, held with the bed's transmittance
     // ([`body_hold`]) across the tiers to the composite.

@@ -779,18 +779,39 @@ mod tests {
         }
     }
 
-    /// The refraction bends the bed's lookup by the ripple's tilt alone, the normal's horizontal
-    /// part: the normal is built about world up, so its part off the heightfield's normal holds a
-    /// sloping stream's grade, which would move the whole bed downhill.
+    /// The refraction bends the bed's lookup by the ripple's tilt alone, the horizontal part of the
+    /// resolved low band's normal the mirrors slide by: the normal is built about world up, so its
+    /// part off the heightfield's normal holds a sloping stream's grade, which would move the whole
+    /// bed downhill, and the octaves finer than the low band would tear a submerged edge row to row.
     #[test]
     fn the_refraction_bends_by_the_ripple_alone() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
-        let tau = "let tau = vec3<f32>(n.x, 0.0, n.z);";
-        assert!(wgsl.contains(tau), "liquid.wgsl lost `{tau}`");
+        for line in [
+            "let tau = vec3<f32>(n_lo.x, 0.0, n_lo.z);",
+            "water_body_optics(world_pos, frag_coord, sb, n_slide, flat_n, to_view, bi, wake_push);",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
         assert!(
             !wgsl.contains("n - flat_n * dot(n, flat_n)"),
             "the refraction's tilt takes no part of the heightfield's grade"
         );
+    }
+
+    /// The refracted lookup is rejected where it lands on a surface standing above the pixel's own
+    /// bed by more than a 45° slope over the offset (a reed, a rock's submerged face): that
+    /// surface lies on another surface point's ray, and reading it duplicates and tears the
+    /// submerged edge frame to frame.
+    #[test]
+    fn the_refracted_read_keeps_off_what_stands_above_the_bed() {
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        for line in [
+            "let rise = distance(p_r, sb.bed);",
+            "let a_bed = 1.0 - smoothstep(rise, rise + 0.15, p_rr.y - sb.bed.y);",
+            "o.accept = select(0.0, a_front * a_below * a_bed, o.known && d_r > 0.0 && snap_fits);",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
     }
 
     /// The authored column caps a deep lake's path: a bed 45 yd down under a river column authored
