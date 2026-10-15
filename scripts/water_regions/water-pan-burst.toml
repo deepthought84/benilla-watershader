@@ -1,4 +1,6 @@
-# wg-pan-burst: water-loch-modan's camera swept 20° either side over the burst.
+# wg-pan-burst: water-loch-modan's camera swept 20° either side over the burst. Flake:
+# water-loch-modan's lake-bed patch at x815-837 y701-720 (below the water box), in the still and
+# its Reference twin.
 # Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
 # rows measure the image's motion as much as the water's; pan_luma_std, a world-anchored box
 # reprojected per shot, gates a pan once the in-scatter view exists.

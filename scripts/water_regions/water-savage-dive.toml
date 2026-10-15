@@ -1,6 +1,7 @@
 # wg-savage-dive: a burst diving the eye from 2 yd over the Savage Coast's sea to 3 yd under it, 75 yd
 # out on the coast scene's view, level. Above the water the sky clips (about 0.16 of the frame);
-# under it nothing should, and no shot holds black (a NaN's look).
+# under it nothing should, and no shot holds black (a NaN's look). Flake: a critter at x0-16
+# y714-748 and x296-307 y628-638 lands in one of two states, in the still and its Reference twin.
 scene = "water-savage-dive"
 [[row]]
 metric = "burst_clip_fraction"
