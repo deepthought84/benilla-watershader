@@ -764,6 +764,12 @@ def shade_ratio(img, water_shade, water_lit, bank_shade, bank_lit, in_scatter=No
     return {"value": float(w), "bank": float(b)}
 
 
+# The share of the water `refract_leak` needs carrying a refracted read to read the views: on
+# Medium's and High's views 87-99.9% of it does; on Low's, which does not refract, under 2%, world
+# pixels that moved between the captures.
+READ_MIN = 0.1
+
+
 def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0, with_pixels=False):
     """Refraction pulling an occluder in front of the water into it: in the `band`-px strip of
     water along every non-water silhouette, the share of pixels whose refracted-bed view
@@ -784,10 +790,21 @@ def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0, with_pixels=F
     silhouette's colour). `depth` is the strip's share whose read is over 10% not bed by that view;
     on water only world pixels at the views' edges carry it. `colour` is the colour test alone over
     the reads that moved (weight and offset above 0), with `colour_px` pixels; `with_pixels` adds
-    their mask over `box` as `pixels`, for looking at them. Pass ≤ 0.1% (`value`)."""
+    their mask over `box` as `pixels`, for looking at them. Pass ≤ 0.1% (`value`).
+
+    `value` is None where under READ_MIN of the water carries a refracted read (views taken on
+    Low, which does not refract, or a dead refraction) and where no water borders a silhouette:
+    the row has nothing to read."""
     R, B, F = (crop(a, box) for a in (refracted, bed, frame))
     wm = crop(view_water(refracted, mask), box)
     m = crop(mask, box).astype(np.float64)
+    # A refracted read: weight above 0, its not-bed share 0 or its weight.
+    read = (m[..., 0] > 0) & ((m[..., 2] <= 2.0) | (np.abs(m[..., 2] - m[..., 0]) <= 2.0))
+    if (read & wm).sum() < READ_MIN * max(int(wm.sum()), 1):
+        out = {"value": None, "strip": 0, "basis": "no refracted read on the water"}
+        if with_pixels:
+            out["pixels"] = np.zeros_like(wm)
+        return out
     not_bed = np.where(np.abs(m[..., 2] - m[..., 0]) <= 2.0, m[..., 2], 0.0)
     moved = (m[..., 0] > 0) & (m[..., 1] > 0)
     occ = F.copy()
@@ -811,7 +828,7 @@ def refract_leak(refracted, bed, frame, mask, box, band=8, de=5.0, with_pixels=F
         strip |= grown & wm
         known = grown
     if not strip.any():
-        out = {"value": 0.0, "strip": 0, "depth": 0.0, "colour": 0.0, "colour_px": 0}
+        out = {"value": None, "strip": 0, "basis": "no water borders a silhouette in the box"}
         if with_pixels:
             out["pixels"] = np.zeros_like(wm)
         return out

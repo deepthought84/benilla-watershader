@@ -286,7 +286,7 @@ mod tests {
 
     /// The refracted lookup's largest offset (`liquid.wgsl`'s `REFRACT_MAX_PX`) stays inside the
     /// rectangle's margin with a pixel to spare on each side, where the linear depth is this
-    /// frame's.
+    /// frame's: the constant is the margin less 2, and the clamp scales the offset to it.
     #[test]
     fn the_refracted_lookup_stays_inside_the_rectangles_margin() {
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
@@ -295,6 +295,12 @@ mod tests {
             WATER_RECT_MARGIN_PX - 2
         );
         assert!(wgsl.contains(&decl), "liquid.wgsl lost `{decl}`");
+        for line in [
+            "let lim = min(refr.y * vp.y, REFRACT_MAX_PX);",
+            "floor(uv * vp + dpx * min(1.0, lim / max(length(dpx), 1e-4))),",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl's clamp lost `{line}`");
+        }
     }
 
     /// Armed with a marked view rendered, exactly one visit each; unarmed (the look off, or no

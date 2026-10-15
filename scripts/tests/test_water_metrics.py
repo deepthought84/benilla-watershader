@@ -319,6 +319,15 @@ class Structure(unittest.TestCase):
         self.assertEqual((r["value"], r["colour_px"]), (0.0, 400))
         self.assertAlmostEqual(r["colour"], 0.5)
         self.assertTrue(r["pixels"][:, 50:54].all() and not r["pixels"][:, 54:].any())
+        # Views from Low, which does not refract: the reject view is black on the water and the
+        # refracted bed is the straight one; the row has nothing to read.
+        mask[:, 50:] = [0, 0, 0]
+        r = wm.refract_leak(bed, bed, frame, mask, [0, 0, 100, 100])
+        self.assertIsNone(r["value"])
+        self.assertEqual(r["strip"], 0)
+        # No water borders a silhouette in the box: nothing to read either.
+        mask[:, 50:] = [255, 0, 255]
+        self.assertIsNone(wm.refract_leak(refracted, bed, frame, mask, [60, 0, 100, 100])["value"])
 
     def test_autocorr_peak_finds_a_period_along_the_bank(self):
         img = noisy([60, 90, 100], sd=1.0, w=400, h=40)

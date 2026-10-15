@@ -29,6 +29,7 @@ box = "water"
 metric = "lum_vs_ref"
 box = "water"
 # P1-32: no refracted read pulls the dock's legs into the water (the refraction views).
+# Views from Medium or High: Low does not refract, and the row reads n/a there.
 [[row]]
 metric = "refract_leak"
 box = [0, 0, 1600, 900]
