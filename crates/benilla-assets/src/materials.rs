@@ -646,8 +646,8 @@ pub struct LiquidExt {
     #[texture(108, visibility(fragment))]
     #[sampler(109, visibility(fragment))]
     pub wake: Handle<Image>,
-    /// The opaque scene before transparents (`benilla_world::liquid::scene_color`), which the
-    /// screen-space march reads its hits from.
+    /// The opaque scene before transparents, in 10 bits (`benilla_water::scene_color`): the colour
+    /// behind the water, the refracted bed, the floor march's occluder and the reflection's hit.
     #[texture(111, visibility(fragment))]
     #[sampler(112, visibility(fragment))]
     pub scene_color: Handle<Image>,

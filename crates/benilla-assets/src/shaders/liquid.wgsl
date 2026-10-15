@@ -42,8 +42,10 @@
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var ripples_samp: sampler;
 // The stylised look's PLANAR REFLECTION: the world as a camera mirrored through the water plane
 // saw it (`benilla_world::liquid::reflect`), with **alpha as coverage**.
-// The opaque scene, snapshotted before anything transparent drew — what a screen-space reflection
-// reads once its ray has found a hit (`benilla_world::liquid::scene_color`).
+// The opaque scene in 10 bits, snapshotted before anything transparent drew
+// (`benilla_water::scene_color`): the colour behind the water (`water_snapshot_px`), the
+// refracted bed (`water_bed`), the floor march's occluder (`snapshot_box`) and the reflection's
+// hit (`ssr_read`).
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var scene_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var scene_samp: sampler;
 // Must equal `liquid::probe::PROBE_SLOT_MAX`: it is the length of the slot array in the reflection
