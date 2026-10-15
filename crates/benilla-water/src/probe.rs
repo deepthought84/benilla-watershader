@@ -40,8 +40,8 @@
 //!
 //! The capture is six cameras into six 2D images plus one node copying them into the cube's layers,
 //! rather than six cameras aimed at cube faces directly, because `ImageRenderTarget` carries a
-//! handle and a scale factor and no layer — a camera cannot address one face. The copy is the same
-//! `copy_texture_to_texture` shape `scene_color` already uses.
+//! handle and a scale factor and no layer — a camera cannot address one face. The copy is a blit
+//! per face into that face's layer, which also un-mirrors it (`shaders/probe_face.wgsl`).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
@@ -820,9 +820,8 @@ fn draw_probe_gizmos(
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 struct WaterProbeLabel;
 
-/// A cube-shaped image the water samples. `COPY_DST` because the node writes it with
-/// `copy_texture_to_texture` rather than rendering into it — see the module doc on why a camera
-/// cannot address a face.
+/// A cube-shaped image the water samples, written face by face by the node's blit into one layer
+/// view each — see the module doc on why a camera cannot address a face.
 fn cube_image() -> Image {
     let mut image = Image::new_fill(
         Extent3d {

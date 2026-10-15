@@ -48,9 +48,10 @@ use bevy::render::render_graph::{
 use bevy::render::render_resource::binding_types::texture_2d;
 use bevy::render::render_resource::{
     BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntries,
-    CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, Operations,
-    PipelineCache, RenderPassColorAttachment, RenderPassDescriptor, RenderPipelineDescriptor,
-    ShaderStages, TextureDimension, TextureFormat, TextureSampleType, TextureUsages, TextureViewId,
+    CachedRenderPipelineId, ColorTargetState, ColorWrites, Extent3d, FragmentState, LoadOp,
+    Operations, PipelineCache, RenderPassColorAttachment, RenderPassDescriptor,
+    RenderPipelineDescriptor, ShaderStages, StoreOp, TextureDimension, TextureFormat,
+    TextureSampleType, TextureUsages, TextureViewId,
 };
 use bevy::render::renderer::{RenderContext, RenderDevice};
 use bevy::render::texture::GpuImage;
@@ -85,7 +86,7 @@ pub(crate) struct WaterSceneColor {
     pub(crate) image: Handle<Image>,
     /// Its current size in physical pixels.
     size: UVec2,
-    /// Whether the copy should run at all — the stylised look only, like everything else here.
+    /// Whether the blit should run at all — the stylised look only, like everything else here.
     armed: bool,
 }
 
@@ -93,11 +94,12 @@ pub(crate) struct WaterSceneColor {
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
 pub(crate) struct WaterSceneColorLabel;
 
-/// Where the snapshot is written this frame. Outside the water's rectangle the texels keep an
-/// earlier frame's colour, so the rectangle is enough only while no reader looks outside it: the
-/// composite reads the texel under each water fragment and the refracted bed one at most
-/// `WATER_RECT_MARGIN_PX - 2` pixels off it, both inside the rectangle's margin; the reflection
-/// march and the floor occlusion read the occluder wherever on screen it is.
+/// Where the snapshot is drawn this frame. The pass clears the whole target to transparent black
+/// first, so outside a scissored rectangle the texels are black, and the rectangle is enough only
+/// while no reader looks outside it: the composite reads the texel under each water fragment and
+/// the refracted bed one at most `WATER_RECT_MARGIN_PX - 2` pixels off it, both inside the
+/// rectangle's margin; the reflection march and the floor occlusion read the occluder wherever on
+/// screen it is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WaterSnapshotScope {
     /// The water's rectangle, inclusive min, exclusive max, in the target's pixels.
@@ -247,10 +249,10 @@ fn prepare_snapshot_bindings(
     device: Res<RenderDevice>,
     mut bindings: ResMut<SnapshotBindings>,
 ) {
-    let (Some(_), Some(pipe)) = (snap.filter(|s| s.armed), pipe) else {
-        return;
-    };
-    let Ok(target) = views.single() else {
+    let armed = snap.is_some_and(|s| s.armed);
+    let (true, Some(pipe), Ok(target)) = (armed, pipe, views.single()) else {
+        // A kept group would hold its main texture alive after the view's cache has dropped it.
+        *bindings = SnapshotBindings::default();
         return;
     };
     let main = target.main_texture_view();
@@ -326,19 +328,17 @@ impl Node for WaterSceneColorNode {
                 &BindGroupEntries::single(main_view),
             )
         });
-        let consumers = world
-            .get_resource::<WaterHizConsumers>()
-            .copied()
-            .unwrap_or_default();
         let rect = world
             .get_resource::<WaterScreenRect>()
             .copied()
             .unwrap_or_default();
-        let scope = WaterSnapshotScope::of(
-            consumers,
-            &rect,
-            UVec2::new(gpu.size.width, gpu.size.height),
-        );
+        let size = UVec2::new(gpu.size.width, gpu.size.height);
+        // No word from the readers is read as an outside reader: the whole target.
+        let scope = world
+            .get_resource::<WaterHizConsumers>()
+            .map_or(WaterSnapshotScope::Full, |c| {
+                WaterSnapshotScope::of(*c, &rect, size)
+            });
         let scissor = scope.scissor();
         if scissor.is_some_and(|(_, _, w, h)| w == 0 || h == 0) {
             return Ok(());
@@ -351,7 +351,11 @@ impl Node for WaterSceneColorNode {
                 view: &gpu.texture_view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: Operations::default(),
+                // Cleared, so a read outside a scissored rectangle shows black, never an old frame.
+                ops: Operations {
+                    load: LoadOp::Clear(LinearRgba::NONE.into()),
+                    store: StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -415,6 +419,7 @@ pub(super) fn register(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::image::ImageSampler;
 
     fn rect(min: (u32, u32), max: (u32, u32)) -> WaterScreenRect {
         WaterScreenRect {
@@ -471,5 +476,62 @@ mod tests {
         let beside = rect((1700, 0), (2000, 900));
         let scope = WaterSnapshotScope::of(WaterHizConsumers(0), &beside, size);
         assert_eq!(scope.scissor().map(|s| (s.2, s.3)), Some((0, 900)));
+    }
+
+    /// The image the blit draws and the material samples: 10 bits a channel (the composite's
+    /// half-step bound, test 9 in `liquid_composite`), a render target, and the default linear
+    /// sampler the sky LUT's mip reads rely on.
+    #[test]
+    fn the_snapshot_is_a_ten_bit_target_with_the_default_sampler() {
+        let image = snapshot_image(UVec2::new(320, 180));
+        let d = &image.texture_descriptor;
+        assert_eq!(d.format, TextureFormat::Rgb10a2Unorm);
+        assert_eq!(
+            d.usage,
+            TextureUsages::TEXTURE_BINDING | TextureUsages::RENDER_ATTACHMENT
+        );
+        assert_eq!(image.sampler, ImageSampler::Default);
+        assert_eq!((d.size.width, d.size.height), (320, 180));
+    }
+
+    /// The functions of a WGSL source that use `scene_tex` for anything but its size, in order.
+    fn snapshot_readers(wgsl: &str) -> Vec<&str> {
+        let mut readers = Vec::new();
+        let mut current = "";
+        for line in wgsl.lines() {
+            if let Some(rest) = line.strip_prefix("fn ") {
+                current = rest.split('(').next().unwrap_or(rest);
+            }
+            let code = line.split("//").next().unwrap_or(line);
+            if code.trim_start().starts_with('@') {
+                continue; // the binding's declaration
+            }
+            let reads = code.match_indices("scene_tex").any(|(at, _)| {
+                let before = &code[..at];
+                let whole = !before.ends_with(|c: char| c.is_alphanumeric() || c == '_')
+                    && !code[at + "scene_tex".len()..]
+                        .starts_with(|c: char| c.is_alphanumeric() || c == '_');
+                whole && !before.ends_with("textureDimensions(")
+            });
+            if reads && readers.last() != Some(&current) {
+                readers.push(current);
+            }
+        }
+        readers
+    }
+
+    /// Every snapshot read is one the scope accounts for: the composite's texel and the refracted
+    /// bed's lie inside the rectangle's margin, the floor march's box is read only under
+    /// `FLOOR_OCCLUSION` and the reflection march's only under `SSR`. A new reader either stays
+    /// inside the margin or joins `OUTSIDE_READERS`, or a scissored frame hands it black.
+    #[test]
+    fn every_snapshot_reader_is_one_the_scope_accounts_for() {
+        let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        assert_eq!(
+            snapshot_readers(liquid),
+            ["snapshot_box", "ssr_read", "water_snapshot_px", "water_bed"]
+        );
+        let compute = include_str!("shaders/water_compute.wgsl");
+        assert_eq!(snapshot_readers(compute), ["snapshot_box"]);
     }
 }

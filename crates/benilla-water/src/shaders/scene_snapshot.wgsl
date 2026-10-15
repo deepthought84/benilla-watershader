@@ -1,5 +1,5 @@
 // The water's scene snapshot: the main texture after the opaque world, copied texel for texel into
-// the 10-bit `WaterSceneColor` (`liquid::scene_color`). The main texture is the resolved,
+// the 10-bit `WaterSceneColor` (`benilla_water::scene_color`). The main texture is the resolved,
 // single-sampled one, so one `textureLoad` per pixel is the whole copy; the format conversion
 // clamps to [0, 1], which only fullbright magma and slime exceed.
 

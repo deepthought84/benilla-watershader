@@ -23,14 +23,13 @@
 //!
 //! The shape is `scene_color`'s, because the problem is the same one: an image the liquid material
 //! samples, sized to the view, rebuilt when the view resizes, re-pointed into every material, and
-//! filled by a render-graph node. The differences are that this one carries a mip chain and is
-//! written by passes rather than copied into.
+//! filled by a render-graph node. The difference is that this one carries a mip chain.
 //!
 //! ## From the VIEW's depth, after the opaque pass
 //!
 //! It is built **after the opaque and transmissive passes and before the transparent pass**, from
 //! the view's own depth attachment: the only window where the depth of the opaque world is complete
-//! and the water has not yet been drawn. It is also the window [`super::scene_color`] copies the
+//! and the water has not yet been drawn. It is also the window [`super::scene_color`] snapshots the
 //! colour in, so the depth the march walks and the colour it reads describe the same frame.
 //!
 //! That depth holds everything the opaque pass drew: the static world, the entity path's models
@@ -857,7 +856,7 @@ pub(super) fn register(app: &mut App) {
         )
         .add_render_graph_node::<WaterHizNode>(Core3d, WaterHizLabel)
         // After the opaque world has written the view's depth, before the water is drawn — the
-        // same window `scene_color` copies the colour in.
+        // same window `scene_color` snapshots the colour in.
         .add_render_graph_edges(Core3d, (Node3d::MainTransmissivePass, WaterHizLabel))
         .add_render_graph_edges(Core3d, (WaterHizLabel, Node3d::MainTransparentPass));
 }
