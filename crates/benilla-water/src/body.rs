@@ -80,8 +80,11 @@ pub struct BodyLook {
     /// of the view height.
     pub refract: f32,
     pub refract_max_frac: f32,
-    /// Whether the probe's baked fog is re-applied at the mirror's distance.
+    /// Whether the probe's baked fog, and the floor occluder's (the frame's at the hit), are
+    /// re-based to the fog the mirror would lay on them, at the eye Z of the image beyond the
+    /// surface.
     pub probe_refog: bool,
+    pub floor_refog: bool,
     /// Where the deep stop sits on the zone's line from swatch row 0 to row 63 (the mid stop at
     /// half of it).
     ///
@@ -106,6 +109,7 @@ impl Default for BodyLook {
             refract: 1.0,
             refract_max_frac: 0.01,
             probe_refog: true,
+            floor_refog: true,
             deep_ceiling: 0.72,
         }
     }
@@ -395,7 +399,7 @@ pub fn body_lanes(
             look.refract,
             look.refract_max_frac,
             f32::from(u8::from(look.probe_refog)),
-            0.0,
+            f32::from(u8::from(look.floor_refog)),
         ],
         shadow,
         [e.sun_share, look.deep_ceiling, e.night, 0.0],
@@ -1044,7 +1048,18 @@ mod tests {
         let lanes = body_lanes(&light, &dome, &BodyLook::default(), [1.0, 2.0, 500.0, 1.0]);
         let row = |i: usize| -> [f32; 4] { lanes[4 * i..4 * i + 4].try_into().unwrap() };
         assert_eq!(row(4), [0.615, 0.5, 0.22, 0.25]);
-        assert_eq!(row(5), [1.0, 0.01, 1.0, 0.0]);
+        assert_eq!(row(5), [1.0, 0.01, 1.0, 1.0]);
+        let off = BodyLook {
+            probe_refog: false,
+            floor_refog: false,
+            ..BodyLook::default()
+        };
+        let lanes = body_lanes(&light, &dome, &off, [1.0, 2.0, 500.0, 1.0]);
+        assert_eq!(
+            lanes[22..24],
+            [0.0, 0.0],
+            "the re-fogs' lanes are refr.z and refr.w"
+        );
         assert_eq!(row(6), [1.0, 2.0, 500.0, 1.0]);
         assert_eq!(row(7)[1], 0.72);
         let e = noon_light();

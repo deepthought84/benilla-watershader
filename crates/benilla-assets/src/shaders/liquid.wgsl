@@ -212,8 +212,8 @@ struct WaterBody {
     e_sun: vec4<f32>,
     // The ramp rate, the band push, the band edge, the lift.
     look: vec4<f32>,
-    // The refraction's strength, its largest offset as a share of the view height, the probe
-    // re-fog (1 on), spare.
+    // The refraction's strength, its largest offset as a share of the view height, the probe's
+    // re-fog and the floor occluder's (1 on).
     refr: vec4<f32>,
     // The terrain shadow's window: its centre's x and z and its half extent in yards, valid (1).
     shadow: vec4<f32>,
@@ -1509,13 +1509,16 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     // exact regardless of how soft the picture is being read.
     let d_geom = textureSampleLevel(probe_tex, probe_samp, dir, idx, 0.0).a;
     let lod = probe_lod(distance(p, sl.at.xyz), d_geom);
+    // The fog the face camera laid on this direction and the fog the mirror would, taken before
+    // the colour's reads so only the two shares are held across them.
+    let shares = probe_fog_shares(dir, d_geom, sl.at.xyz, p);
     let centre = textureSampleLevel(probe_tex, probe_samp, dir, idx, lod).rgb;
     // A small softening (`march.z`, in cube texels): four more reads a fixed
     // angle around the direction, averaged with it, so the capture's texels do not read as pixels
-    // on the water.
+    // on the water. Either way the colour leaves fogged as the mirror fogs ([`probe_refog`]).
     let spread = water_reflect.march.z * water_reflect.probe_box_min.y;
     if (spread <= 0.0) {
-        return centre;
+        return probe_refog(centre, shares);
     }
     let helper = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9);
     let t1 = normalize(cross(dir, helper)) * spread;
@@ -1525,7 +1528,7 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t1, idx, lod).rgb;
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir + t2, idx, lod).rgb;
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t2, idx, lod).rgb;
-    return sum * 0.2;
+    return probe_refog(sum * 0.2, shares);
 }
 
 #ifdef WATER_SSR
@@ -2288,15 +2291,151 @@ fn floor_occ_plane(uv_look: vec2<f32>) -> FloorOcc {
     return FloorOcc(c.rgb, o.r, c.a, o.a);
 }
 
+// ---- the fog, once (REF-8) ----------------------------------------------------------------------
+//
+// Every term of the water is fogged once, by the world's own law at its own distance. The world the
+// mirror reflects is fogged as its camera drew it, at the eye Z of the image beyond the surface;
+// the probe and the floor's occluder were fogged at another distance (the face camera's, the
+// frame's at the hit) and are re-based to the mirror's; the bed is the frame's, fogged at its own
+// eye Z. The in-scatter, the glints and foam are fogged at the surface's, and so is the reflected
+// sky: the dome is drawn unfogged, and its light crosses the fog from the surface to the eye.
+
+/// The eye Z of the point `p`, yards: the planar depth 1.12's fog coordinate is.
+fn water_eye_z(p: vec3<f32>) -> f32 {
+    return -(view.view_from_world * vec4<f32>(p, 1.0)).z;
+}
+
+/// [`apply_fog`]'s GL_LINEAR law: the share of a colour that stays at eye Z `eye_z` under the
+/// fog's start and end `fog_span`.
+fn fog_law(eye_z: f32, fog_span: vec2<f32>) -> f32 {
+    let denom = max(fog_span.y - fog_span.x, 0.001);
+    return clamp((fog_span.y - eye_z) / denom, 0.0, 1.0);
+}
+
+/// The fog on a surface point: `g` its colour (gamma), `f` the share of the surface that stays.
+struct WaterFog {
+    g: vec3<f32>,
+    f: f32,
+};
+
+/// The fog [`apply_fog`] lays on the surface point `world_pos`: the scene's, or a WMO room's haze
+/// under the room gate; `f` 1 with the fog off.
+fn water_fog(world_pos: vec3<f32>, room_fog: u32) -> WaterFog {
+    var colour = wow_light.fog_color;
+    var span = wow_light.fog_params.xy;
+    if (w.kind.z > 0.5 && room_fog != 0u) {
+        colour = wow_light.wmo_fog_color;
+        span = wow_light.wmo_fog_params.xy;
+    }
+    return WaterFog(colour.rgb, select(1.0, fog_law(water_eye_z(world_pos), span), colour.w > 0.5));
+}
+
+/// A linear radiance `c` fogged as 1.12 fogs a surface: [`apply_fog`]'s mix in gamma, at the share
+/// `f` that stays and the fog colour `g`; where the fog leaves all of it, `c` as it came.
+fn fog_diffuse(c: vec3<f32>, f: f32, g: vec3<f32>) -> vec3<f32> {
+    if (f >= 1.0) {
+        return c;
+    }
+    return water_dec(mix(g, water_enc(c), f));
+}
+
+/// A colour `c_g` (gamma) fogged at the share `f_was` re-fogged at the share `f_now`, in the fog
+/// colour `g`. Where little survived the first fog the un-fog would amplify what did (a blurred
+/// near silhouette over a fogged background), so the re-base fades to the colour as it came between
+/// the shares 0.35 and 0.2, and the un-fogged colour stays within 0.25 of the colour or the fog.
+fn fog_rebase(c_g: vec3<f32>, f_was: f32, f_now: f32, g: vec3<f32>) -> vec3<f32> {
+    let clear = clamp(
+        (c_g - (1.0 - f_was) * g) / max(f_was, 0.2),
+        vec3<f32>(0.0),
+        max(c_g, g) + vec3<f32>(0.25),
+    );
+    return mix(c_g, mix(g, clear, f_now), smoothstep(0.2, 0.35, f_was));
+}
+
+/// The fog shares the probe's colour along `dir` is re-based between ([`probe_refog`]): `x` the
+/// share the face camera left, at its own eye Z, the stored distance `d_geom` from the capture
+/// point `capture` along the face's axis (`dir`'s largest component); `y` the share the mirror
+/// would leave, at the eye Z of the hit's image in the water's plane through the surface point
+/// `p`. The sky (no hit) the face drew unfogged, and its light takes the fog between the surface
+/// and the eye: `x` 1, `y` the surface's. Both 1, which re-bases nothing, with the fog off, the eye
+/// below the surface (its fog is the water's, not the faces') or the lane off (`refr.z`).
+fn probe_fog_shares(dir: vec3<f32>, d_geom: f32, capture: vec3<f32>, p: vec3<f32>) -> vec2<f32> {
+    let fog = wow_light.fog_color;
+    if (fog.w <= 0.5 || water_reflect.look.body.refr.z < 0.5 || view.world_position.y <= p.y) {
+        return vec2<f32>(1.0);
+    }
+    let span = wow_light.fog_params.xy;
+    if (d_geom > 9000.0) {
+        return vec2<f32>(1.0, fog_law(water_eye_z(p), span));
+    }
+    let hit = capture + dir * d_geom;
+    let image = vec3<f32>(hit.x, 2.0 * p.y - hit.y, hit.z);
+    return vec2<f32>(
+        fog_law(d_geom * max(abs(dir.x), max(abs(dir.y), abs(dir.z))), span),
+        fog_law(water_eye_z(image), span),
+    );
+}
+
+/// The probe's colour `c_g` (gamma) fogged as the mirror fogs it: re-based from the face camera's
+/// fog to the mirror's by their `shares` ([`probe_fog_shares`]), in the scene's fog, as the faces
+/// draw it.
+fn probe_refog(c_g: vec3<f32>, shares: vec2<f32>) -> vec3<f32> {
+    return fog_rebase(c_g, shares.x, shares.y, wow_light.fog_color.rgb);
+}
+
+/// The mirror's colour `m_g` (gamma) in linear light, with the dome it drew fogged at the surface.
+/// The mirror camera fogs the world at the eye Z of its image beyond the surface, which counts the
+/// fog between the surface and the eye already, but draws the dome as it is, and the dome's light
+/// crosses that fog too. The share of the colour that is the dome is read off its agreement with
+/// the sky floor `sky` along the same flat ray (linear; the two show one sky): within a fifth all of
+/// it, past two fifths none, so the world's reflection keeps the fog its image was drawn with.
+fn mirror_fog(m_g: vec3<f32>, sky: vec3<f32>, fog: WaterFog) -> vec3<f32> {
+    let m = water_dec(m_g);
+    if (fog.f >= 1.0) {
+        return m;
+    }
+    let off = length(m - sky) / max(length(sky), 1e-3);
+    let dome = 1.0 - smoothstep(0.2, 0.4, off);
+    return water_dec(mix(fog.g, m_g, mix(1.0, fog.f, dome)));
+}
+
+/// The floor's occluder fogged as the mirror fogs it. Its colour is the frame's at the hit
+/// (`occ.rgb`, times the shut share `1 − v`), fogged at the hit's own eye Z; the mirror would fog
+/// it at the eye Z of its image beyond the surface, along the view ray. The hit's distance from the
+/// surface comes back out of `rho_c` ([`floor_rho_c`]: `D = R·√(ρ/(1 − ρ))`) along the flat
+/// reflection. The scene's fog only; an open floor, a hit over 2000 yd off (ρ ≥ 0.999), a hit and
+/// an image both nearer than the fog's start, and the lane off (`refr.w`) keep the colour.
+fn floor_refog(
+    occ: FloorOcc,
+    world_pos: vec3<f32>,
+    to_view: vec3<f32>,
+    flat_n: vec3<f32>,
+) -> FloorOcc {
+    let fog = wow_light.fog_color;
+    let shut = 1.0 - occ.v;
+    if (fog.w <= 0.5
+        || shut < 1.0 / 255.0
+        || occ.rho_c >= 0.999
+        || water_reflect.look.body.refr.w < 0.5) {
+        return occ;
+    }
+    let d = FLOOR_CONTACT_REACH * sqrt(max(occ.rho_c, 0.0) / (1.0 - occ.rho_c));
+    let span = wow_light.fog_params.xy;
+    let f_hit = fog_law(water_eye_z(world_pos + reflect(-to_view, flat_n) * d), span);
+    let f_image = fog_law(water_eye_z(world_pos - to_view * d), span);
+    if (f_hit >= 1.0 && f_image >= 1.0) {
+        return occ;
+    }
+    let c_g = fog_rebase(water_enc(occ.rgb / shut), f_hit, f_image, fog.rgb);
+    return FloorOcc(water_dec(c_g) * shut, occ.v, occ.rho_c, occ.known);
+}
+
 // ---- the linear composite (FND-2) ---------------------------------------------------------------
 //
 // The framebuffer holds gamma values and light adds in linear, so the water is built as
 // premultiplied linear layers and handed to the blender as a remainder against the snapshot: the
 // pixel lands on `enc(l + t·dec(background))` wherever the framebuffer still holds the snapshot.
 // `liquid_composite` mirrors every function here on the CPU and tests the algebra.
-
-/// The layer guard where fog divides a layer by its own coverage.
-const WATER_LAYER_EPS: f32 = 1e-4;
 
 /// One premultiplied layer: `l` the linear radiance it adds, `t` how much of what is behind passes.
 struct WaterLayer {
@@ -2325,21 +2464,6 @@ fn layer_cover(a: WaterLayer, c: f32) -> WaterLayer {
 /// An opaque `colour` over the layer with coverage `cover` (foam).
 fn layer_over(colour: vec3<f32>, cover: f32, a: WaterLayer) -> WaterLayer {
     return WaterLayer(cover * colour + (1.0 - cover) * a.l, (1.0 - cover) * a.t);
-}
-
-/// [`apply_fog`]'s gamma law on the layer's own colour, weighted by its opacity: opaque water
-/// fogs as an opaque surface does, clear water leaves the bed's own fog alone. Where the law leaves
-/// every colour as it is (no fog, or water nearer than the fog's start) the layer is returned as
-/// it came, without the round trip through gamma.
-fn layer_fog(a: WaterLayer, world_pos: vec3<f32>, room_fog: u32) -> WaterLayer {
-    let black = apply_fog(vec3<f32>(0.0), world_pos, room_fog);
-    let white = apply_fog(vec3<f32>(1.0), world_pos, room_fog);
-    if (all(black == vec3<f32>(0.0)) && all(white == vec3<f32>(1.0))) {
-        return a;
-    }
-    let o = vec3<f32>(1.0) - a.t;
-    let own = water_enc(a.l / max(o, vec3<f32>(WATER_LAYER_EPS)));
-    return WaterLayer(o * water_dec(apply_fog(own, world_pos, room_fog)), a.t);
 }
 
 /// The snapshot's texel under this fragment, the colour the blender's destination holds wherever
@@ -2562,13 +2686,11 @@ struct BodyOptics {
     bed_lod: f32,
 };
 
-/// The body's light: its in-scatter radiance, the illuminant on the body and on foam, and the fog.
+/// The body's light: its in-scatter radiance and the illuminant on the body and on foam.
 struct BodyLight {
     in_scatter: vec3<f32>,
     irradiance: vec3<f32>,
     foam_irradiance: vec3<f32>,
-    fog_f: f32,
-    fog_g: vec3<f32>,
 };
 
 /// Three soft bands over the ramp coordinate `x`, their edges widened by the pixel's own footprint
@@ -2759,16 +2881,15 @@ fn water_body_optics(
 }
 
 /// The body's in-scatter: the albedo under the illuminant ([`body_irradiance`]; 1 on an unlit
-/// interior, as the reference draws it), the lift on it in gamma, the ripple's shading. `vis` is
-/// the open share of the sky and the sun ([`body_visibility`]), `wave_tilt` the facet's tilt along
-/// the sun's bearing.
+/// interior, as the reference draws it), the lift on it in gamma, the ripple's shading; the
+/// composite fogs it. `vis` is the open share of the sky and the sun ([`body_visibility`]),
+/// `wave_tilt` the facet's tilt along the sun's bearing.
 fn water_body_light(
     o: BodyOptics,
     world_pos: vec3<f32>,
     vis: vec4<f32>,
     bi: BodyIn,
     wave_tilt: f32,
-    room_fog: u32,
 ) -> BodyLight {
     var l: BodyLight;
     var e = body_irradiance(world_pos, o.z, vis, bi.adt);
@@ -2780,8 +2901,6 @@ fn water_body_light(
     l.in_scatter = water_dec(in_g) * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
     l.irradiance = e.body;
     l.foam_irradiance = e.foam;
-    l.fog_f = 1.0;
-    l.fog_g = vec3<f32>(0.0);
     return l;
 }
 
@@ -2858,6 +2977,8 @@ const WV_MCSH: u32 = 27u;
 const WV_SKY_VIS: u32 = 28u;
 const WV_SUN_VIS: u32 = 29u;
 const WV_FOAM_LIGHT: u32 = 30u;
+// The surface's fog: the share that stays in r, the fog colour's green and blue in g and b.
+const WV_FOG: u32 = 31u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2990,7 +3111,7 @@ fn stylised_water(
     // The light on the body: the sky and the lighting sun through what the frame shows standing
     // over the surface, and the sun under the terrain's shadow.
     let vis = body_visibility(world_pos, frag_coord);
-    let body_light = water_body_light(optics, world_pos, vis, bi, wave_tilt, room_fog);
+    let body_light = water_body_light(optics, world_pos, vis, bi, wave_tilt);
     // Held to the composite in half precision ([`light_hold`]).
     let light_held = light_hold(body_light);
 
@@ -3077,9 +3198,12 @@ fn stylised_water(
     let cut = wt[taps];
     var wsum = 0.0;
     var w = array<f32, 3>(0.0, 0.0, 0.0);
+    // The taps' cover, summed here so the ranked weights are not held across the cube reads.
+    var cover = 0.0;
     for (var k = 0; k < taps; k = k + 1) {
         w[k] = max(wt[k] - cut, 0.0);
         wsum = wsum + w[k];
+        cover = cover + wt[k];
     }
     if (wsum > 1e-8) {
         // The cube is read through a FLATTER normal than the water draws with — see
@@ -3104,9 +3228,7 @@ fn stylised_water(
         // region, so it does not fade with distance from it. The taps are blended by weight and
         // nothing cleverer: the probe is a soft term under the screen-space march, not an attempt
         // to place reflections exactly.
-        var cover = 0.0;
         for (var k = 0; k < taps; k = k + 1) {
-            cover = cover + wt[k];
             if (w[k] <= 0.0) {
                 continue;
             }
@@ -3255,11 +3377,18 @@ fn stylised_water(
 #endif
     if (floor_occlusion_wanted(floor_share, world_pos)) {
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);
+        occ = floor_refog(occ, world_pos, to_view, flat_n);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
+    // The reflected sky's light crosses the fog between the surface and the eye, which the dome as
+    // drawn never took: the open sky the floor reflects and the dome the mirror drew are fogged at
+    // the surface ([`water_fog`]), as the in-scatter is. What the tiers drew of the world they
+    // fogged at its image's distance already ([`mirror_fog`], [`probe_refog`], [`floor_refog`]).
+    let fog = water_fog(world_pos, room_fog);
+    let sky_seen = fog_diffuse(sky, fog.f, fog.g);
     // The chain in linear light: each tier decoded where it has a share, the floor as the
     // occlusion built it.
-    var floor_l = occ.rgb + occ.v * sky;
+    var floor_l = occ.rgb + occ.v * sky_seen;
     if (!eye_above) {
         floor_l = water_dec(sky_g);
     }
@@ -3269,14 +3398,14 @@ fn stylised_water(
     let graded = eye_above && water_reflect.look.grade.x > 0.0;
     var grade_ab = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     if (graded) {
-        grade_ab = grade_affine(sky, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));
+        grade_ab = grade_affine(sky_seen, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));
     }
     var refl_l = floor_l;
     if (w_p > 0.0) {
         refl_l = mix(refl_l, water_dec(probe_rgb), w_p);
     }
     if (w_m > 0.0) {
-        refl_l = mix(refl_l, water_dec(mirror_g), w_m);
+        refl_l = mix(refl_l, mirror_fog(mirror_g, sky, fog), w_m);
     }
     if (w_s > 0.0) {
         refl_l = mix(refl_l, water_dec(ssr.rgb), w_s);
@@ -3522,19 +3651,22 @@ fn stylised_water(
     //
     // The water as one premultiplied layer: one reflectance for every tier, the
     // tiers' linear chain graded above, the glints in linear, the body's in-scatter and the bed's
-    // transmittance, the edge's coverage, the foam over it, then the gamma fog law on the layer.
+    // transmittance, the edge's coverage, the foam over it, each term fogged once: the reflection
+    // as its tier fogged it, the glints and foam at the surface's eye Z, the bed as the frame did.
     // The glints in linear light at the `composite.y` weight, the gamma glint weight 0.22 raised to
     // the gamma, so the peak over black is the gamma weight's; the moon's weight is raised likewise.
+    // A highlight adds light, so the fog takes its share away rather than mixing toward a colour.
     let gw = water_reflect.look.composite.y;
-    let spec_l = water_dec(wow_light.light_spec.rgb)
+    let spec_l = (water_dec(wow_light.light_spec.rgb)
         * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
         * (gw * sun_reach)
         + water_dec(MOON_SPEC_COLOR)
             * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
-            * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w);
+            * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w))
+        * fog.f;
 #ifdef WATER_VIEW
     // The body's own views, opaque and unfogged: what passes from the bed, what the body scatters,
-    // and the albedo the ramp reads at this pixel.
+    // and the albedo the ramp reads at this pixel; then the surface's fog.
     if (view_id == WV_TRANSMITTANCE) {
         return vec4<f32>(water_enc(optics.t_bed), 1.0);
     } else if (view_id == WV_IN_SCATTER) {
@@ -3565,6 +3697,8 @@ fn stylised_water(
         let left = frag_coord.x < view.viewport.x + 0.5 * view.viewport.z;
         let e = select(body_light.irradiance, body_light.foam_irradiance, left);
         return vec4<f32>(water_enc(e), 1.0);
+    } else if (view_id == WV_FOG) {
+        return vec4<f32>(fog.f, fog.g.g, fog.g.b, 1.0);
     }
 #endif
 #ifdef WATER_REFRACT
@@ -3574,21 +3708,28 @@ fn stylised_water(
 #endif
     // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
     let light = light_release(light_held);
+    // From below the surface the floor is the dome's stops ([`underside_sky`]), which no camera drew
+    // and so none fogged: the fog between the surface and the eye takes the reflection here.
+    var refl_out = refl_g;
+    if (!eye_above) {
+        refl_out = fog_diffuse(refl_g, fog.f, fog.g);
+    }
     var layer = layer_surface(
         f_surf,
-        refl_g,
+        refl_out,
         spec_l,
-        light.in_scatter,
+        fog_diffuse(light.in_scatter, fog.f, fog.g),
         vec3<f32>(body.w_in),
         body.t_bed,
     );
     layer = layer_cover(layer, soft);
     // Foam is coverage: spray over the surface, hiding what is under it.
-    // Lit by the body's light in the terrain light's colour (warm at dusk, blue under the moon).
+    // Lit by the body's light in the terrain light's colour (warm at dusk, blue under the moon),
+    // and fogged as a surface is.
     if (foam > 0.0) {
-        layer = layer_over(water_dec(FOAM_COLOR) * light.foam, foam, layer);
+        let foam_l = fog_diffuse(water_dec(FOAM_COLOR) * light.foam, fog.f, fog.g);
+        layer = layer_over(foam_l, foam, layer);
     }
-    layer = layer_fog(layer, world_pos, room_fog);
 #ifdef WATER_REFRACT
     let snap_px = water_snapshot_px(frag_coord);
     var bed_out = body.bed;

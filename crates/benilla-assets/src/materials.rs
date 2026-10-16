@@ -2060,6 +2060,17 @@ mod tests {
         names
     }
 
+    /// The text of `liquid.wgsl`'s function whose declaration starts with `head`, to its closing
+    /// brace at column 0.
+    fn liquid_function(head: &str) -> &'static str {
+        let src = include_str!("shaders/liquid.wgsl");
+        let at = src
+            .find(head)
+            .unwrap_or_else(|| panic!("liquid.wgsl lost `{head}`"));
+        let rest = &src[at..];
+        &rest[..rest.find("\n}\n").expect("a closing brace at column 0")]
+    }
+
     /// Every identifier in `text` outside its `//` comments (the shader has no block comments).
     fn identifiers(text: &str) -> std::collections::HashSet<&str> {
         text.lines()
@@ -2126,14 +2137,7 @@ mod tests {
     /// diffuse row.
     #[test]
     fn the_stylised_lane_reads_no_terrain_light() {
-        let src = include_str!("shaders/liquid.wgsl");
-        let function = |head: &str| -> &str {
-            let at = src
-                .find(head)
-                .unwrap_or_else(|| panic!("liquid.wgsl lost `{head}`"));
-            let rest = &src[at..];
-            &rest[..rest.find("\n}\n").expect("a closing brace at column 0")]
-        };
+        let function = liquid_function;
         let frag = function("fn fragment(");
         let branch = &frag[frag
             .find("#ifdef WATER_STYLISED")
@@ -2154,6 +2158,93 @@ mod tests {
         assert!(
             function("fn water_body_light(").contains("body_irradiance("),
             "the body's light is no longer the irradiance"
+        );
+    }
+
+    /// **Each term of the water is fogged once** (REF-8). The world the mirror reflects is fogged
+    /// as its camera drew it; nothing in the stylised region fogs the layer as a whole or calls the
+    /// reference's `apply_fog`; both of the probe's returns and the floor's occluder are re-based
+    /// to the mirror's fog; the in-scatter, the glints, foam and the reflected sky (the floor's,
+    /// the probe's and the mirror's dome) take the surface's. `fog_law` is `apply_fog`'s
+    /// arithmetic, so the two lanes fog by one law.
+    #[test]
+    fn the_stylised_lane_fogs_each_term_once() {
+        let src = include_str!("shaders/liquid.wgsl");
+        let law = liquid_function("fn fog_law(");
+        let apply = liquid_function("fn apply_fog(");
+        let denom = "let denom = max(fog_span.y - fog_span.x, 0.001);";
+        assert!(
+            law.contains(denom) && apply.contains(denom),
+            "the fog's span differs"
+        );
+        let factor = "clamp((fog_span.y - eye_z) / denom, 0.0, 1.0)";
+        assert!(
+            law.contains(&format!("return {factor};")),
+            "fog_law lost the law"
+        );
+        assert!(
+            apply.contains(&format!("let factor = {factor};")),
+            "apply_fog's law moved: fog_law must follow it"
+        );
+        let start = src.find("#ifdef WATER_STYLISED\n").expect("the region");
+        let end = src
+            .find("#endif // WATER_STYLISED")
+            .expect("the region's end");
+        let region = identifiers(&src[start..end]);
+        for banned in ["apply_fog", "layer_fog"] {
+            assert!(
+                !region.contains(banned),
+                "the stylised region names `{banned}`"
+            );
+        }
+        let probe = liquid_function("fn sample_probe(");
+        assert_eq!(
+            probe.matches("return ").count(),
+            2,
+            "sample_probe's returns"
+        );
+        assert_eq!(
+            probe.matches("return probe_refog(").count(),
+            2,
+            "a probe return skips the re-fog"
+        );
+        let water = liquid_function("fn stylised_water(");
+        assert!(
+            water.contains(
+                "occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);\n        \
+                 occ = floor_refog(occ, world_pos, to_view, flat_n);"
+            ),
+            "the floor's occluder is not re-fogged as it is found"
+        );
+        assert!(
+            water.contains("* fog.f;"),
+            "the glints are not fogged at the surface"
+        );
+        assert!(
+            water.contains("fog_diffuse(water_dec(FOAM_COLOR) * light.foam, fog.f, fog.g)"),
+            "foam is not fogged at the surface"
+        );
+        assert!(
+            water.contains("fog_diffuse(light.in_scatter, fog.f, fog.g)"),
+            "the in-scatter is not fogged at the surface"
+        );
+        for (line, what) in [
+            (
+                "let sky_seen = fog_diffuse(sky, fog.f, fog.g);",
+                "the floor's sky",
+            ),
+            (
+                "var floor_l = occ.rgb + occ.v * sky_seen;",
+                "the floor's open share",
+            ),
+            ("mirror_fog(mirror_g, sky, fog)", "the mirror's dome"),
+        ] {
+            assert!(water.contains(line), "{what} is not fogged at the surface");
+        }
+        let shares = liquid_function("fn probe_fog_shares(");
+        assert!(
+            shares.contains("if (d_geom > 9000.0) {\n        return vec2<f32>(1.0, fog_law(water_eye_z(p), span));"),
+            "the probe's sky is not fogged at the surface"
         );
     }
 }

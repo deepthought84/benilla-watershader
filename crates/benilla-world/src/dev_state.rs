@@ -109,8 +109,8 @@ impl Default for WaterDebug {
 /// `mcsh` the lighting sun's terrain shadow at the surface, white lit; `sky_vis` and `sun_vis` the
 /// open share of the sky and of the lighting sun the body is lit through (1 off the mirror planes
 /// and on Low); `foam_light` foam's illuminant left of the screen's centre against the body's right
-/// of it.
-pub const WATER_VIEWS: [&str; 31] = [
+/// of it; `fog` the surface's fog, the share that stays in red and the fog colour's green and blue.
+pub const WATER_VIEWS: [&str; 32] = [
     "off",
     "mirror1",
     "mirror2",
@@ -142,6 +142,7 @@ pub const WATER_VIEWS: [&str; 31] = [
     "sky_vis",
     "sun_vis",
     "foam_light",
+    "fog",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.

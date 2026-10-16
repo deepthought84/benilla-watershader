@@ -139,31 +139,50 @@ fn grazing_limit() -> f32 {
 /// The body's knobs at their defaults, unless `$WOW_WATER_DEEP_CEILING=<0-1>` sets where the deep
 /// stop sits on the zone's line (1 the swatch's last row), `$WOW_WATER_BAND_PUSH=<0-1>` how far
 /// the three bands pull the ramp (0 unbanded), `$WOW_WATER_TURB=<0-4>` the turbidity's scale on
-/// both kinds or `$WOW_WATER_REFRACT=<0-8>` the refraction's strength (1 physical); each read
-/// once, to measure it.
+/// both kinds, `$WOW_WATER_REFRACT=<0-8>` the refraction's strength (1 physical), or
+/// `$WOW_WATER_PROBE_REFOG=0|1` and `$WOW_WATER_FLOOR_REFOG=0|1` whether the probe's and the floor
+/// occluder's fog are re-based to the mirror's; each read once, to measure it.
 fn body_look() -> BodyLook {
-    type Forced = (Option<f32>, Option<f32>, Option<f32>, Option<f32>);
+    struct Forced {
+        ceiling: Option<f32>,
+        push: Option<f32>,
+        turb: Option<f32>,
+        refract: Option<f32>,
+        probe_refog: Option<bool>,
+        floor_refog: Option<bool>,
+    }
     static FORCED: OnceLock<Forced> = OnceLock::new();
-    let (ceiling, push, turb, refract) = *FORCED.get_or_init(|| {
+    let forced = FORCED.get_or_init(|| {
         let ranged = |var: &str, max: f32| {
             std::env::var(var)
                 .ok()
                 .and_then(|v| v.trim().parse::<f32>().ok())
                 .filter(|v| (0.0..=max).contains(v))
         };
-        (
-            unit_lever("WOW_WATER_DEEP_CEILING"),
-            unit_lever("WOW_WATER_BAND_PUSH"),
-            ranged("WOW_WATER_TURB", 4.0),
-            ranged("WOW_WATER_REFRACT", 8.0),
-        )
+        let switch = |var: &str| match std::env::var(var).ok()?.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        };
+        Forced {
+            ceiling: unit_lever("WOW_WATER_DEEP_CEILING"),
+            push: unit_lever("WOW_WATER_BAND_PUSH"),
+            turb: ranged("WOW_WATER_TURB", 4.0),
+            refract: ranged("WOW_WATER_REFRACT", 8.0),
+            probe_refog: switch("WOW_WATER_PROBE_REFOG"),
+            floor_refog: switch("WOW_WATER_FLOOR_REFOG"),
+        }
     });
     let look = BodyLook::default();
     BodyLook {
-        deep_ceiling: ceiling.unwrap_or(look.deep_ceiling),
-        band_push: push.unwrap_or(look.band_push),
-        turb_scale: turb.map_or(look.turb_scale, |t| look.turb_scale.map(|s| s * t)),
-        refract: refract.unwrap_or(look.refract),
+        deep_ceiling: forced.ceiling.unwrap_or(look.deep_ceiling),
+        band_push: forced.push.unwrap_or(look.band_push),
+        turb_scale: forced
+            .turb
+            .map_or(look.turb_scale, |t| look.turb_scale.map(|s| s * t)),
+        refract: forced.refract.unwrap_or(look.refract),
+        probe_refog: forced.probe_refog.unwrap_or(look.probe_refog),
+        floor_refog: forced.floor_refog.unwrap_or(look.floor_refog),
         ..look
     }
 }
