@@ -47,4 +47,3 @@ box = "water"
 [[row]]
 metric = "deep_hue"
 box = "water"
-defer = "R-E3: under the body's own light (P1-35) the hue stays more than 10° off the albedo view; the owner judges it"

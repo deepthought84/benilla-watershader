@@ -16,7 +16,6 @@ box = "moon_path"
 metric = "deep_hue"
 label = "night_hue"
 box = "water"
-defer = "R-E3: under the body's own light (P1-35) the hue stays more than 10° off the albedo view; the owner judges it"
 [[row]]
 metric = "deep_luma"
 box = "water"

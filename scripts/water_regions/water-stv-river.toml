@@ -3,10 +3,10 @@
 scene = "water-stv-river"
 [box]
 water = [600, 450, 1300, 700]
+# The transmittance and Fresnel cuts leave no deep water at this pose: the deep hue reads n/a.
 [[row]]
 metric = "deep_hue"
 box = "water"
-defer = "R-E3: the transmittance and Fresnel cuts leave no deep water at this pose (P1-35)"
 [[row]]
 metric = "luma_sd"
 box = "water"
