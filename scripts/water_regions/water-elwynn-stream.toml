@@ -29,3 +29,17 @@ box = "far_edge"
 [[row]]
 metric = "pop"
 box = "water"
+# The body's light holds still over a 2 s static burst of its views under the canopy's edge: the
+# sky's open share the plane pass traces and the in-scatter (R18, R22).
+[[row]]
+metric = "view_std"
+label = "canopy_edge_sky_vis_std"
+view = "sky_vis"
+box = "far_edge"
+max = 1.0
+[[row]]
+metric = "view_std"
+label = "canopy_edge_in_scatter_std"
+view = "in_scatter"
+box = "far_edge"
+max = 1.0

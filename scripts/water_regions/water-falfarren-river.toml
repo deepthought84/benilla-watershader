@@ -41,3 +41,18 @@ box = "water_wide"
 [[row]]
 metric = "pop"
 box = "water_wide"
+# The body's light holds still over a 2 s static burst of its views along the far bank's canopy
+# edge: the sky's open share and the in-scatter (R18). The river lies off the mirror planes, so its
+# sky reads open and the shade is the terrain's MCSH alone.
+[[row]]
+metric = "view_std"
+label = "bank_edge_sky_vis_std"
+view = "sky_vis"
+box = "bank_edge"
+max = 1.0
+[[row]]
+metric = "view_std"
+label = "bank_edge_in_scatter_std"
+view = "in_scatter"
+box = "bank_edge"
+max = 1.0

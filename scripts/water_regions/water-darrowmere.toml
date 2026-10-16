@@ -8,7 +8,7 @@ far = [800, 460, 1200, 480]
 [[row]]
 metric = "deep_hue"
 box = "water"
-defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
+defer = "R-E3: under the body's own light (P1-35) the hue stays more than 10° off the albedo view; the owner judges it"
 [[row]]
 metric = "deep_luma"
 box = "water"

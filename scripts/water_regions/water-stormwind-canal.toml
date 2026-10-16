@@ -24,7 +24,6 @@ box = "water"
 metric = "deep_hue"
 label = "body_hue"
 box = "water"
-defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
 [[row]]
 metric = "lum_vs_ref"
 box = "water"

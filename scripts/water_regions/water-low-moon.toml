@@ -19,7 +19,7 @@ box = "moon_path"
 metric = "deep_hue"
 label = "night_hue"
 box = "water"
-defer = "P1-35: the interim E = dec(lit) carries the light's colour into the body (R-E3)"
+defer = "R-E3: under the body's own light (P1-35) the hue stays more than 10° off the albedo view; the owner judges it"
 [[row]]
 metric = "deep_luma"
 box = "water"
@@ -35,3 +35,9 @@ box = "water"
 [[row]]
 metric = "tier_consistency"
 box = ["sky_water_a", "sky_water_b"]
+# Night is dark, never black: the darkest water stays above 8 codes (R24).
+[[row]]
+metric = "luma_p5"
+label = "night_floor"
+box = "water"
+min = 8.0
