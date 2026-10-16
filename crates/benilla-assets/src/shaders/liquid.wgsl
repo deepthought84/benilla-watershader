@@ -219,9 +219,10 @@ struct WaterBody {
     shadow: vec4<f32>,
     // x the sun's share (debug), y the deep stop's ceiling, z the night weight (debug), w spare.
     spare: vec4<f32>,
-    // rgb the sky's and the sun's irradiance at the light's full chroma, for foam; w spare.
-    e_sky_raw: vec4<f32>,
-    e_sun_raw: vec4<f32>,
+    // rgb the sky's and the sun's irradiance in the terrain light's colour, for foam and the
+    // underside: open, they add up to the terrain's open-sky light; w spare.
+    e_sky_foam: vec4<f32>,
+    e_sun_foam: vec4<f32>,
 };
 
 // The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect`: one
@@ -2621,8 +2622,9 @@ struct Irr {
 
 /// The illuminant at the surface point `world_pos` over a column `column` yards deep, seen through
 /// `vis` (`g` the sky's open share, `b` the sun's, [`body_visibility`]): the body takes the
-/// chroma-bounded rows, foam the rows at the light's full chroma, both at the terrain's open-sky
-/// luminance (`benilla_water::body::body_light`). On ADT water the sun is also under the terrain's
+/// chroma-bounded rows, foam the rows in the terrain light's colour, both at the terrain's
+/// open-sky luminance (`benilla_water::body::body_light`), so open foam is 1.12's `FOAM_COLOR·lit`
+/// and shadowed foam darkens without changing hue. On ADT water the sun is also under the terrain's
 /// MCSH at the ground its ray meets; in shadow it keeps `e_sky.w` of itself, so shadowed water
 /// darkens as the terrain's `terrainp_s.bls` law darkens the bank beside it (0.7 in gamma).
 fn body_irradiance(world_pos: vec3<f32>, column: f32, vis: vec4<f32>, adt: bool) -> Irr {
@@ -2631,7 +2633,7 @@ fn body_irradiance(world_pos: vec3<f32>, column: f32, vis: vec4<f32>, adt: bool)
     let s_eff = mix(b.e_sky.w, 1.0, s);
     return Irr(
         b.e_sky.rgb * vis.g + b.e_sun.rgb * s_eff,
-        b.e_sky_raw.rgb * vis.g + b.e_sun_raw.rgb * s_eff,
+        b.e_sky_foam.rgb * vis.g + b.e_sun_foam.rgb * s_eff,
     );
 }
 
@@ -2652,10 +2654,11 @@ fn body_visibility(world_pos: vec3<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
 }
 
 /// The light the eye-below look lights the dome's stops with, gamma: the sky's and the sun's
-/// irradiance at the light's full chroma, open and unshadowed, at the terrain's open-sky luminance.
+/// irradiance open and unshadowed, in the terrain light's colour at its luminance, the terrain's
+/// open-sky light (1.12's `lit` for an upward normal).
 fn open_illuminant_g() -> vec3<f32> {
     let b = water_reflect.look.body;
-    return water_enc(b.e_sky_raw.rgb + b.e_sun_raw.rgb);
+    return water_enc(b.e_sky_foam.rgb + b.e_sun_foam.rgb);
 }
 
 /// The water column behind this pixel and its transmittance, the in-scatter's weight and the
@@ -3000,9 +3003,11 @@ fn stylised_water(
     let r_rip = reflect(-to_view, n);
     let sky = sky_floor(reflect(-to_view, flat_n), sqrt(surface_lost2(surf)));
     // Seen from below, the surface reflects the dome's two stops along the rippled ray under the
-    // open illuminant ([`underside_sky`], [`open_illuminant_g`]), in gamma.
+    // open illuminant ([`underside_sky`], [`open_illuminant_g`]), in gamma; a WMO interior pool's
+    // under 1, as it is drawn unlit.
     let eye_above = view.world_position.y > world_pos.y;
-    let sky_g = select(underside_sky(r_rip) * open_illuminant_g(), water_enc(sky), eye_above);
+    let under_e = select(open_illuminant_g(), vec3<f32>(1.0), bi.unlit);
+    let sky_g = select(underside_sky(r_rip) * under_e, water_enc(sky), eye_above);
     // **A surface has one reflection, and Fresnel is how big its share of the fragment is**: the
     // tiers below are answers to *what* is reflected, and they share it. The share is
     // [`water_fresnel`] on the filtered normal at the surface's roughness, under the grazing limit
@@ -3579,7 +3584,7 @@ fn stylised_water(
     );
     layer = layer_cover(layer, soft);
     // Foam is coverage: spray over the surface, hiding what is under it.
-    // Lit by the body's light at the light's full chroma (warm at dusk, blue under the moon).
+    // Lit by the body's light in the terrain light's colour (warm at dusk, blue under the moon).
     if (foam > 0.0) {
         layer = layer_over(water_dec(FOAM_COLOR) * light.foam, foam, layer);
     }

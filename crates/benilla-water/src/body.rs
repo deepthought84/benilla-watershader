@@ -118,14 +118,19 @@ pub struct KindOptics {
     pub sigma_turb: f32,
 }
 
-/// The body's illuminant, linear: the sky's and the sun's parts with the body's chroma (`e_*`)
-/// and with the light's own (`e_*_raw`, for foam), at the terrain's open-sky luminance.
+/// The body's illuminant, linear: the sky's and the sun's parts with the body's chroma (`e_*`),
+/// with the dome's and the sun's own (`e_*_raw`), and with the terrain light's (`e_*_foam`, for
+/// foam and the underside), each at the terrain's open-sky luminance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyLight {
     pub e_sky: [f32; 3],
     pub e_sun: [f32; 3],
     pub e_sky_raw: [f32; 3],
     pub e_sun_raw: [f32; 3],
+    /// The sky's and the sun's luminance in the terrain light's colour: they add up to the
+    /// terrain's open-sky light, tint included, as `FOAM_COLOR·lit` lit foam in 1.12.
+    pub e_sky_foam: [f32; 3],
+    pub e_sun_foam: [f32; 3],
     /// The sun's share kept in MCSH shadow, so shadowed water darkens as the terrain beside it.
     pub s0: f32,
     /// The scale from the dome-and-sun irradiance to the terrain's luminance.
@@ -283,7 +288,9 @@ fn bound_chroma(e: [f32; 3], chroma: f32) -> [f32; 3] {
 /// The body's illuminant: the dome's irradiance and the lighting sun's, each through the
 /// surface's Fresnel, scaled to the luminance of the terrain's own open-sky light
 /// (`clamp(ambient + diffuse·μ_s)`, decoded); the body keeps `illum_chroma` of their chroma by day
-/// and all of it with the celestial sun below the horizon.
+/// and all of it with the celestial sun below the horizon. Foam's parts carry each part's
+/// luminance in that terrain light's colour, so open foam is `FOAM_COLOR·lit` and shadowed foam
+/// darkens without changing hue, as the bank beside it.
 pub fn body_light(
     ambient: [f32; 3],
     diffuse: [f32; 3],
@@ -309,11 +316,21 @@ pub fn body_light(
     );
     let sun_share = luma(e_sun) / (luma(e_sky) + luma(e_sun)).max(1e-4);
     let s0 = ((dec(TERRAIN_SHADOW_G) - (1.0 - sun_share)) / sun_share.max(1e-4)).max(0.0);
+    let lit_lin = dec3(lit_open);
+    let y_lit = luma(lit_lin);
+    let tint = if y_lit > 1e-4 {
+        lit_lin.map(|x| x / y_lit)
+    } else {
+        [1.0; 3]
+    };
+    let foam = |part: [f32; 3]| tint.map(|t| t * luma(part));
     BodyLight {
         e_sky,
         e_sun,
         e_sky_raw,
         e_sun_raw,
+        e_sky_foam: foam(e_sky),
+        e_sun_foam: foam(e_sun),
         s0,
         k_e,
         sun_share,
@@ -324,13 +341,13 @@ pub fn body_light(
 /// The light on the body and on foam at a surface point, `liquid.wgsl`'s `body_irradiance`: the
 /// sky's part through the open share `v_hemi` of the hemisphere, the sun's through `sun` (its
 /// terrain shadow times its open share, 1 lit), never below the shadow floor `s0`. The body takes
-/// the chroma-bounded rows, foam the full-chroma ones.
+/// the chroma-bounded rows, foam the rows in the terrain light's colour.
 pub fn irradiance(e: &BodyLight, v_hemi: f32, sun: f32) -> ([f32; 3], [f32; 3]) {
     let s_eff = e.s0 + (1.0 - e.s0) * sun;
     let part = |sky: [f32; 3], sun: [f32; 3]| -> [f32; 3] {
         std::array::from_fn(|c| sky[c] * v_hemi + sun[c] * s_eff)
     };
-    (part(e.e_sky, e.e_sun), part(e.e_sky_raw, e.e_sun_raw))
+    (part(e.e_sky, e.e_sun), part(e.e_sky_foam, e.e_sun_foam))
 }
 
 /// The lift `liquid.wgsl`'s `body_lift` adds to an albedo `a_g` (gamma): `lift` scaled by the
@@ -382,8 +399,8 @@ pub fn body_lanes(
         ],
         shadow,
         [e.sun_share, look.deep_ceiling, e.night, 0.0],
-        rgb(e.e_sky_raw, 0.0),
-        rgb(e.e_sun_raw, 0.0),
+        rgb(e.e_sky_foam, 0.0),
+        rgb(e.e_sun_foam, 0.0),
     ];
     let mut lanes = [0.0; BODY_FLOATS];
     lanes.copy_from_slice(rows.as_flattened());
@@ -588,12 +605,18 @@ mod tests {
         );
     }
 
-    /// The foam rows keep the light's full chroma at the body's luminance.
+    /// The raw rows keep the dome's and the sun's full chroma at the body's luminance; foam's rows
+    /// hold that luminance in the terrain light's colour and add up, in the open, to the terrain's
+    /// light itself, tint included: open foam is `FOAM_COLOR·lit`, as 1.12 draws it.
     #[test]
-    fn the_foam_rows_carry_the_full_chroma_at_the_same_luminance() {
+    fn the_foam_rows_are_the_terrain_light_at_the_bodys_luminance() {
         let e = noon_light();
-        for (body, raw) in [(e.e_sky, e.e_sky_raw), (e.e_sun, e.e_sun_raw)] {
+        for (body, raw, foam) in [
+            (e.e_sky, e.e_sky_raw, e.e_sky_foam),
+            (e.e_sun, e.e_sun_raw, e.e_sun_foam),
+        ] {
             assert!((luma(body) - luma(raw)).abs() < 1e-5, "{body:?} {raw:?}");
+            assert!((luma(body) - luma(foam)).abs() < 1e-5, "{body:?} {foam:?}");
             assert!(chroma(raw) > chroma(body), "{body:?} {raw:?}");
         }
         // The raw rows are the light itself, rescaled.
@@ -602,6 +625,14 @@ mod tests {
         let sky = sky_irradiance(&dome);
         for (got, sky) in unscaled.e_sky_raw.iter().zip(sky) {
             assert!((got - sky * (1.0 - F_DIFFUSE) * unscaled.k_e).abs() < 1e-6);
+        }
+        let mu = -sun.normalize().y;
+        let lit = dec3(std::array::from_fn(|c| {
+            (ambient[c] + diffuse[c] * mu).clamp(0.0, 1.0)
+        }));
+        for (c, lit) in lit.iter().enumerate() {
+            let open = e.e_sky_foam[c] + e.e_sun_foam[c];
+            assert!((open - lit).abs() < 1e-5, "{e:?} against {lit}");
         }
     }
 
@@ -680,8 +711,9 @@ mod tests {
     /// **One light, two chroma treatments.** At a surface point the body and foam are lit by the
     /// same open shares: in the open at the terrain's open-sky luminance, in MCSH shadow at 0.456
     /// of it (as the bank beside it), under a closed sky by the sun alone; foam's light has the
-    /// body's luminance everywhere, only its chroma differs. The shader's `body_irradiance` is
-    /// this function's text.
+    /// body's luminance everywhere, only its chroma differs, and it keeps the terrain light's hue
+    /// at every open share, so shaded foam darkens and does not turn blue. The shader's
+    /// `body_irradiance` is this function's text.
     #[test]
     fn the_body_and_foam_take_one_light() {
         let (ambient, diffuse, sun, dome) = day();
@@ -704,13 +736,20 @@ mod tests {
                 (luma(body) - luma(foam)).abs() < 1e-5,
                 "v {v}, s {s}: {body:?} against {foam:?}"
             );
+            for c in 0..3 {
+                let tint = foam[c] / luma(foam);
+                assert!(
+                    (tint - open_foam[c] / luma(open_foam)).abs() < 1e-4,
+                    "v {v}, s {s}: {foam:?} against {open_foam:?}"
+                );
+            }
         }
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
         for line in [
             "let s = select(1.0, lighting_sun_mcsh(world_pos, column), adt) * vis.b;",
             "let s_eff = mix(b.e_sky.w, 1.0, s);",
             "b.e_sky.rgb * vis.g + b.e_sun.rgb * s_eff,",
-            "b.e_sky_raw.rgb * vis.g + b.e_sun_raw.rgb * s_eff,",
+            "b.e_sky_foam.rgb * vis.g + b.e_sun_foam.rgb * s_eff,",
         ] {
             assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
         }
@@ -741,7 +780,15 @@ mod tests {
             body_light([0.1; 3], [0.0; 3], Vec3::X, Vec3::Y, &day().3, &look),
         ];
         for e in cases {
-            let all = [e.e_sky, e.e_sun, e.e_sky_raw, e.e_sun_raw].concat();
+            let all = [
+                e.e_sky,
+                e.e_sun,
+                e.e_sky_raw,
+                e.e_sun_raw,
+                e.e_sky_foam,
+                e.e_sun_foam,
+            ]
+            .concat();
             assert!(
                 all.iter()
                     .chain(&[e.s0, e.k_e, e.sun_share])
@@ -983,8 +1030,8 @@ mod tests {
                 "refr",
                 "shadow",
                 "spare",
-                "e_sky_raw",
-                "e_sun_raw"
+                "e_sky_foam",
+                "e_sun_foam"
             ]
         );
         assert_eq!(members.len() * 4, BODY_FLOATS);
@@ -1002,6 +1049,7 @@ mod tests {
         assert_eq!(row(7)[1], 0.72);
         let e = noon_light();
         assert_eq!(row(2), [e.e_sky[0], e.e_sky[1], e.e_sky[2], e.s0]);
-        assert_eq!(row(9)[..3], e.e_sun_raw);
+        assert_eq!(row(8)[..3], e.e_sky_foam);
+        assert_eq!(row(9)[..3], e.e_sun_foam);
     }
 }

@@ -1561,8 +1561,8 @@ mod tests {
                 "refr: vec4<f32>",
                 "shadow: vec4<f32>",
                 "spare: vec4<f32>",
-                "e_sky_raw: vec4<f32>",
-                "e_sun_raw: vec4<f32>",
+                "e_sky_foam: vec4<f32>",
+                "e_sun_foam: vec4<f32>",
             ]
         );
         // The rect row and the floor occlusion's and the body rays' lanes have one writer:

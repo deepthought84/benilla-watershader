@@ -160,15 +160,17 @@ fn main() -> anyhow::Result<()> {
         let enc = |c: [f32; 3]| bytes(c.map(|v| v.max(0.0).powf(1.0 / 2.2)));
         let open: [f32; 3] = std::array::from_fn(|i| e.e_sky[i] + e.e_sun[i]);
         let raw: [f32; 3] = std::array::from_fn(|i| e.e_sky_raw[i] + e.e_sun_raw[i]);
+        let foam: [f32; 3] = std::array::from_fn(|i| e.e_sky_foam[i] + e.e_sun_foam[i]);
         println!(
             "  light  k_E {:.2}  sun share {:.2}  s0 {:.2}  night {:.2}  open E {:?}  raw E {:?}  \
-             lit {:?}",
+             foam E {:?}  lit {:?}",
             e.k_e,
             e.sun_share,
             e.s0,
             e.night,
             enc(open),
             enc(raw),
+            enc(foam),
             bytes(lit),
         );
     }
