@@ -10,7 +10,10 @@
 //! ray; on a mirror plane every pixel's unrippled point lies on the plane, so the same march runs
 //! here once per quarter-resolution texel (an eighth on Low) over the water's rectangle, and the
 //! fragment reads the result bilinearly ([`FloorOcc`]). The march's text is the floor march law,
-//! byte-identical in both shaders (a test compares it).
+//! byte-identical in both shaders (a test compares it). On Medium and High the same pass traces,
+//! from each plane point, how much of the sky and of the lighting sun the frame shows open above
+//! it, for the body's light: world-anchored rays through the nearest-depth pyramid, wanted
+//! wherever plane water is on screen ([`FloorOnScreen::body`]), with the floor's march or alone.
 //!
 //! **Built once, bound every frame.** The pass's bind group lives in [`ComputeBindings`], keyed on
 //! the id of every buffer and view it binds. The view uniform buffer is among them: Bevy
@@ -47,6 +50,7 @@ use benilla_world::liquid::{WaterQuality, MIRROR2_LANES};
 
 use super::floor_share::FloorOnScreen;
 use super::hiz::{WaterHiz, WaterHizLabel};
+use super::lighting::WowLighting;
 use super::look::WaterLook;
 use super::reflect::{WaterReflectBuffer, WaterReflectData};
 use super::scene_color::{WaterSceneColor, WaterSceneColorLabel};
@@ -82,6 +86,8 @@ pub(crate) struct FloorOcc {
     tier: u8,
     /// The stylised look with the floor occlusion on.
     armed: bool,
+    /// The lighting sun's travel direction (`WowLighting::sun_dir`), for the body's sun ray.
+    sun_travel: Vec3,
 }
 
 /// An occlusion image pair of `size` texels, filled with the neutral answer (the sky open, the
@@ -116,12 +122,14 @@ fn drive_floor_occ(
     style: Res<WaterStyle>,
     quality: Res<WaterQuality>,
     look: Res<WaterLook>,
+    light: Res<WowLighting>,
     mut occ: ResMut<FloorOcc>,
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&Camera, With<crate::view::WorldCamera>>,
 ) {
     occ.armed = style.is_stylised() && look.floor_occlusion;
     occ.tier = quality.tier();
+    occ.sun_travel = light.sun_dir;
     let Ok(camera) = cameras.single() else {
         return;
     };
@@ -166,7 +174,8 @@ struct OcclParams {
     /// The first texel of the dispatch and the end of its range (exclusive).
     tile_origin: UVec2,
     tile_end: UVec2,
-    /// The lighting sun's travel direction; written 0 and read by no entry point.
+    /// xyz the lighting sun's travel direction; w 1 where the sky floor's march runs this frame,
+    /// 0 where the pass runs for the body's visibility alone.
     sun_travel: Vec4,
 }
 
@@ -182,7 +191,7 @@ fn occl_tiles(min: UVec2, max: UVec2, scale: u32, size: UVec2) -> (UVec2, UVec2)
 const PARAMS_ROW: u32 = 0;
 const MIRROR2_ROW: u32 = (MIRROR2_LANES.start / 4) as u32;
 
-/// The pass's pipelines: `occl_plane` per tier.
+/// The pass's pipelines: `occl_plane` per tier, tracing the body's visibility from Medium up.
 #[derive(Resource)]
 struct ComputePipelines {
     layout: BindGroupLayoutDescriptor,
@@ -219,16 +228,26 @@ fn init_compute_pipelines(
             label: Some("water_occl_plane".into()),
             layout: vec![layout.clone()],
             shader: shader.clone(),
-            shader_defs: vec![
-                benilla_assets::materials::LiquidKey::TIER_DEFS[tier].into(),
-                ShaderDefVal::UInt("PARAMS_ROW".into(), PARAMS_ROW),
-                ShaderDefVal::UInt("MIRROR2_ROW".into(), MIRROR2_ROW),
-            ],
+            shader_defs: occl_defs(tier as u8),
             entry_point: Some("occl_plane".into()),
             ..default()
         })
     });
     commands.insert_resource(ComputePipelines { layout, occl });
+}
+
+/// `occl_plane`'s defs at quality tier `tier`: the tier's own, the body's visibility rays from
+/// Medium up (`WATER_SKY_VIS`), and the block's rows of the mirror planes.
+fn occl_defs(tier: u8) -> Vec<ShaderDefVal> {
+    let mut defs: Vec<ShaderDefVal> = vec![
+        benilla_assets::materials::LiquidKey::TIER_DEFS[usize::from(tier.min(2))].into(),
+        ShaderDefVal::UInt("PARAMS_ROW".into(), PARAMS_ROW),
+        ShaderDefVal::UInt("MIRROR2_ROW".into(), MIRROR2_ROW),
+    ];
+    if tier >= 1 {
+        defs.push("WATER_SKY_VIS".into());
+    }
+    defs
 }
 
 /// Render world: this frame's dispatches, written by [`prepare_water_compute`].
@@ -238,8 +257,8 @@ pub(crate) struct ComputeFrame {
     /// the floor, occluded or not.
     pub(crate) lut: bool,
     params: UniformBuffer<OcclParams>,
-    /// The occlusion dispatch runs this frame: armed, the floor on screen and occluded, a mirror
-    /// plane active.
+    /// The plane dispatch runs this frame: a mirror plane active and water on screen whose floor
+    /// is occluded (the pass armed) or whose body reads the visibility rays.
     occl: bool,
     /// Its workgroups.
     groups: UVec2,
@@ -247,19 +266,33 @@ pub(crate) struct ComputeFrame {
     tier: u8,
 }
 
-/// Whether the sky floor's cube and the plane occlusion run this frame: the cube while the stylised
-/// look is armed and water on screen can show the floor, whatever its occlusion (every stylised
-/// fragment reads the cube for the floor's share); the occlusion while that floor is occluded too,
-/// the pass armed and a mirror plane active.
+/// This frame's dispatches: the sky floor's cube while the stylised look is armed and water on
+/// screen can show the floor, whatever its occlusion (every stylised fragment reads the cube for
+/// the floor's share); the floor's march over the planes while that floor is occluded too, the
+/// pass armed and a mirror plane active; and the plane pass while the march or the body's
+/// visibility rays want it, with a plane active.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Gates {
+    lut: bool,
+    march: bool,
+    plane: bool,
+}
+
+/// [`Gates`] from the look's and the occlusion's arming, water on screen, what that water's floor
+/// and body want ([`FloorOnScreen`]) and whether a mirror plane is active.
 fn compute_gates(
     look_armed: bool,
     occl_armed: bool,
     water: bool,
     floor: FloorOnScreen,
     plane: bool,
-) -> (bool, bool) {
-    let lut = look_armed && water && floor.sky;
-    (lut, occl_armed && water && floor.occluded && plane)
+) -> Gates {
+    let march = occl_armed && water && floor.occluded && plane;
+    Gates {
+        lut: look_armed && water && floor.sky,
+        march,
+        plane: march || (water && floor.body && plane),
+    }
 }
 
 /// Render world, before the graph: which dispatches run this frame ([`compute_gates`]). The
@@ -281,15 +314,15 @@ fn prepare_water_compute(
         return;
     };
     let plane = |row: u32| data.0[row as usize * 4 + 1] > 0.0;
-    let (lut, occl) = compute_gates(
+    let gates = compute_gates(
         hiz.is_some_and(|h| h.armed),
         occ.armed,
         rect.visible,
         floor.map_or_else(FloorOnScreen::default, |f| *f),
         plane(PARAMS_ROW) || plane(MIRROR2_ROW),
     );
-    frame.lut = lut;
-    if !occl {
+    frame.lut = gates.lut;
+    if !gates.plane {
         return;
     }
     let (origin, end) = occl_tiles(rect.min, rect.max, occl_scale(occ.tier), occ.size);
@@ -299,7 +332,7 @@ fn prepare_water_compute(
     frame.params.set(OcclParams {
         tile_origin: origin,
         tile_end: end,
-        sun_travel: Vec4::ZERO,
+        sun_travel: occ.sun_travel.extend(f32::from(u8::from(gates.march))),
     });
     frame.params.write_buffer(&device, &queue);
     frame.groups = ceil_div(end - origin, 8);
@@ -482,6 +515,7 @@ pub(super) fn register(app: &mut App) {
         size,
         tier: 1,
         armed: false,
+        sun_travel: Vec3::NEG_Y,
     })
     .add_plugins(ExtractResourcePlugin::<FloorOcc>::default())
     .add_systems(
@@ -521,25 +555,76 @@ mod tests {
     use super::*;
 
     /// The sky floor's cube is built wherever the floor shows, its occlusion on or off (a WMO
-    /// interior pool's floor is shown and never occluded); the plane pass only where it is
-    /// occluded on a mirror plane.
+    /// interior pool's floor is shown and never occluded); the floor's march over the planes only
+    /// where it is occluded on a mirror plane; the plane pass for the march or for the body's
+    /// visibility rays alone, on a mirror plane.
     #[test]
     fn the_sky_cube_is_built_wherever_the_floor_shows() {
-        let floor = |sky, occluded| FloorOnScreen { sky, occluded };
-        // (look armed, occlusion armed, water, floor, plane) -> (cube, plane pass)
+        let floor = |sky, occluded, body| FloorOnScreen {
+            sky,
+            occluded,
+            body,
+        };
+        let gates = |lut, march, plane| Gates { lut, march, plane };
+        // (look armed, occlusion armed, water, floor, plane) -> (cube, march, plane pass)
         for (args, want) in [
-            ((true, true, true, floor(true, true), true), (true, true)),
-            ((true, false, true, floor(true, false), true), (true, false)),
-            ((true, true, true, floor(true, false), true), (true, false)),
-            ((true, true, true, floor(true, true), false), (true, false)),
             (
-                (true, true, true, floor(false, false), true),
-                (false, false),
+                (true, true, true, floor(true, true, false), true),
+                gates(true, true, true),
             ),
-            ((true, true, false, floor(true, true), true), (false, false)),
+            (
+                (true, false, true, floor(true, false, false), true),
+                gates(true, false, false),
+            ),
+            (
+                (true, true, true, floor(true, false, false), true),
+                gates(true, false, false),
+            ),
+            (
+                (true, true, true, floor(true, true, true), false),
+                gates(true, false, false),
+            ),
+            (
+                (true, true, true, floor(false, false, false), true),
+                gates(false, false, false),
+            ),
+            (
+                (true, true, false, floor(true, true, true), true),
+                gates(false, false, false),
+            ),
+            // The body's rays alone: the floor served or its occlusion off.
+            (
+                (true, true, true, floor(false, false, true), true),
+                gates(false, false, true),
+            ),
+            (
+                (true, false, true, floor(true, false, true), true),
+                gates(true, false, true),
+            ),
+            (
+                (true, true, true, floor(true, true, true), true),
+                gates(true, true, true),
+            ),
         ] {
             let (look, occl, water, f, plane) = args;
             assert_eq!(compute_gates(look, occl, water, f, plane), want, "{args:?}");
+        }
+    }
+
+    /// The plane pass traces the body's visibility from Medium up; Low leaves it open.
+    #[test]
+    fn the_body_rays_compile_from_medium_up() {
+        for tier in 0..3u8 {
+            let defs = occl_defs(tier);
+            let vis = defs
+                .iter()
+                .any(|d| matches!(d, ShaderDefVal::Bool(name, true) if name == "WATER_SKY_VIS"));
+            assert_eq!(vis, tier >= 1, "tier {tier}");
+            let tiers = defs
+                .iter()
+                .filter(|d| matches!(d, ShaderDefVal::Bool(name, true) if name.starts_with("WATER_TIER_")))
+                .count();
+            assert_eq!(tiers, 1, "tier {tier}");
         }
     }
 
@@ -737,6 +822,61 @@ fn floor_rho_c(travelled: f32) -> f32 {
             ),
             (UVec2::new(2, 2), UVec2::new(8, 8))
         );
+    }
+
+    /// **The body's rays are fixed in the world.** The zenith at half the hemisphere's weight and
+    /// the four compass diagonals 45° up at an eighth each (unit vectors, the weights summing to
+    /// one), and the sun, each in 8 steps from half a yard growing by 1.8 to about 30 yd: a ray
+    /// built from the camera's axes would turn the body's light with the view, so none is read.
+    #[test]
+    fn the_body_rays_are_world_anchored() {
+        let wgsl = include_str!("shaders/water_compute.wgsl");
+        let at = wgsl.find("fn body_vis(").expect("the body's rays");
+        let body = &wgsl[at..at + wgsl[at..].find("\n}\n").unwrap()];
+        for line in [
+            "let hemi = 0.5 * vis_ray(o, vec3<f32>(0.0, 1.0, 0.0), near, top, base)",
+            "+ 0.125 * (vis_ray(o, vec3<f32>(0.5, 0.70710678, 0.5), near, top, base)",
+            "+ vis_ray(o, vec3<f32>(-0.5, 0.70710678, 0.5), near, top, base)",
+            "+ vis_ray(o, vec3<f32>(0.5, 0.70710678, -0.5), near, top, base)",
+            "+ vis_ray(o, vec3<f32>(-0.5, 0.70710678, -0.5), near, top, base));",
+            "sun = vis_ray(o, normalize(to_sun), near, top, base);",
+        ] {
+            assert!(body.contains(line), "body_vis lost `{line}`");
+        }
+        for camera in [
+            "world_from_view",
+            "view_from_world",
+            "clip_from_world",
+            "world_position",
+        ] {
+            assert!(
+                !body.contains(camera),
+                "body_vis reads the camera's `{camera}`"
+            );
+        }
+        // The diagonals' rise as the shader writes it: sin 45°, so they are unit vectors.
+        let rise: f32 = "0.70710678".parse().unwrap();
+        assert!((rise - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-7);
+        assert!((0.5f32 * 0.5 + rise * rise + 0.5 * 0.5 - 1.0).abs() < 1e-6);
+        assert!((0.5f32 + 4.0 * 0.125 - 1.0).abs() < 1e-6);
+        for line in [
+            "const VIS_STEPS: i32 = 8;",
+            "const VIS_FIRST_YD: f32 = 0.5;",
+            "const VIS_GROWTH: f32 = 1.8;",
+            "const VIS_BIAS_YD: f32 = 0.1;",
+            "const VIS_EDGE: f32 = 0.1;",
+            "const VIS_LEVEL_MAX: i32 = 1;",
+        ] {
+            assert!(wgsl.contains(line), "water_compute.wgsl lost `{line}`");
+        }
+        let last = 0.5f32 * 1.8f32.powi(7);
+        assert!((30.0..31.0).contains(&last), "{last}");
+        // Traced only where the tier asks for them, after the floor's march or alone.
+        let entry = &wgsl[wgsl.find("fn occl_plane(").unwrap()..];
+        assert!(
+            entry.contains("#ifdef WATER_SKY_VIS\n    vis = body_vis(p, params.sun_travel.xyz);")
+        );
+        assert!(entry.contains("if (params.sun_travel.w > 0.5) {"));
     }
 
     /// The image's rows the shader reads the planes from are the block's.

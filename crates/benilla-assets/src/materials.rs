@@ -2117,4 +2117,43 @@ mod tests {
              depth"
         );
     }
+
+    /// **The stylised lane is lit by its own light, never the terrain's.** The body and foam take
+    /// the sky's irradiance and the lighting sun's under its MCSH shadow (`body_irradiance`, from
+    /// `benilla_water::body`'s rows); the terrain's `clamp(ambient + diffuse·N·L)` would light
+    /// water under a canopy or a deck as if it stood in the open. Neither the stylised branch of
+    /// `fragment` nor the functions it lights with name a `lit` or read the terrain's ambient or
+    /// diffuse row.
+    #[test]
+    fn the_stylised_lane_reads_no_terrain_light() {
+        let src = include_str!("shaders/liquid.wgsl");
+        let function = |head: &str| -> &str {
+            let at = src
+                .find(head)
+                .unwrap_or_else(|| panic!("liquid.wgsl lost `{head}`"));
+            let rest = &src[at..];
+            &rest[..rest.find("\n}\n").expect("a closing brace at column 0")]
+        };
+        let frag = function("fn fragment(");
+        let branch = &frag[frag
+            .find("#ifdef WATER_STYLISED")
+            .expect("the stylised branch of fragment")..];
+        let branch = &branch[..branch.find("#endif").unwrap()];
+        for (name, text) in [
+            ("stylised_water", function("fn stylised_water(")),
+            ("water_body_light", function("fn water_body_light(")),
+            ("body_irradiance", function("fn body_irradiance(")),
+            ("open_illuminant_g", function("fn open_illuminant_g(")),
+            ("the stylised branch of fragment", branch),
+        ] {
+            let seen = identifiers(text);
+            for banned in ["lit", "light_ambient", "light_diffuse"] {
+                assert!(!seen.contains(banned), "{name} reads `{banned}`");
+            }
+        }
+        assert!(
+            function("fn water_body_light(").contains("body_irradiance("),
+            "the body's light is no longer the irradiance"
+        );
+    }
 }

@@ -321,6 +321,18 @@ pub fn body_light(
     }
 }
 
+/// The light on the body and on foam at a surface point, `liquid.wgsl`'s `body_irradiance`: the
+/// sky's part through the open share `v_hemi` of the hemisphere, the sun's through `sun` (its
+/// terrain shadow times its open share, 1 lit), never below the shadow floor `s0`. The body takes
+/// the chroma-bounded rows, foam the full-chroma ones.
+pub fn irradiance(e: &BodyLight, v_hemi: f32, sun: f32) -> ([f32; 3], [f32; 3]) {
+    let s_eff = e.s0 + (1.0 - e.s0) * sun;
+    let part = |sky: [f32; 3], sun: [f32; 3]| -> [f32; 3] {
+        std::array::from_fn(|c| sky[c] * v_hemi + sun[c] * s_eff)
+    };
+    (part(e.e_sky, e.e_sun), part(e.e_sky_raw, e.e_sun_raw))
+}
+
 /// The lift `liquid.wgsl`'s `body_lift` adds to an albedo `a_g` (gamma): `lift` scaled by the
 /// albedo's hue, its peak channel never above `lift`.
 pub fn body_lift(a_g: [f32; 3], lift: f32) -> [f32; 3] {
@@ -663,6 +675,45 @@ mod tests {
             branches.iter().all(|&n| n > 0),
             "both sides of the law: {branches:?}"
         );
+    }
+
+    /// **One light, two chroma treatments.** At a surface point the body and foam are lit by the
+    /// same open shares: in the open at the terrain's open-sky luminance, in MCSH shadow at 0.456
+    /// of it (as the bank beside it), under a closed sky by the sun alone; foam's light has the
+    /// body's luminance everywhere, only its chroma differs. The shader's `body_irradiance` is
+    /// this function's text.
+    #[test]
+    fn the_body_and_foam_take_one_light() {
+        let (ambient, diffuse, sun, dome) = day();
+        let e = body_light(ambient, diffuse, sun, Vec3::Y, &dome, &BodyLook::default());
+        let lit_open = luma(dec3(std::array::from_fn(|c| {
+            (ambient[c] + diffuse[c] * (-sun.normalize().y)).clamp(0.0, 1.0)
+        })));
+        let (open, open_foam) = irradiance(&e, 1.0, 1.0);
+        assert!((luma(open) - lit_open).abs() < 1e-4 * lit_open.max(1.0));
+        let (shade, _) = irradiance(&e, 1.0, 0.0);
+        // The terrain's law, or the sky's share alone where that is more (`s0` 0).
+        let law = dec(0.7).max(1.0 - e.sun_share);
+        assert!((luma(shade) / luma(open) - law).abs() < 1e-3, "{e:?}");
+        let (closed, _) = irradiance(&e, 0.0, 1.0);
+        assert!((luma(closed) - luma(e.e_sun)).abs() < 1e-6);
+        assert_ne!(open, open_foam, "foam keeps the light's chroma");
+        for (v, s) in [(1.0, 1.0), (0.3, 1.0), (1.0, 0.0), (0.0, 0.25), (0.6, 0.5)] {
+            let (body, foam) = irradiance(&e, v, s);
+            assert!(
+                (luma(body) - luma(foam)).abs() < 1e-5,
+                "v {v}, s {s}: {body:?} against {foam:?}"
+            );
+        }
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        for line in [
+            "let s = select(1.0, lighting_sun_mcsh(world_pos, column), adt) * vis.b;",
+            "let s_eff = mix(b.e_sky.w, 1.0, s);",
+            "b.e_sky.rgb * vis.g + b.e_sun.rgb * s_eff,",
+            "b.e_sky_raw.rgb * vis.g + b.e_sun_raw.rgb * s_eff,",
+        ] {
+            assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
+        }
     }
 
     /// A zeroed light, a dark sky with no sun and a sunless dome are all finite: every division

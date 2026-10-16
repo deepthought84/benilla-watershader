@@ -48,6 +48,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::{RenderDevice, RenderQueue};
 use bevy::render::{Render, RenderApp, RenderSystems};
 
+use super::floor_share::FloorOnScreen;
 use super::WaterChunkInfo;
 use super::WaterStyle;
 use crate::view::WorldCamera;
@@ -1428,7 +1429,7 @@ fn upload_reflect(
     buffer: Option<Res<WaterReflectBuffer>>,
     data: Option<Res<WaterReflectData>>,
     rect: Option<Res<super::world_view::WaterScreenRect>>,
-    floor: Option<Res<super::floor_share::FloorOnScreen>>,
+    floor: Option<Res<FloorOnScreen>>,
 ) {
     let (Some(buffer), Some(data)) = (buffer, data) else {
         return;
@@ -1450,14 +1451,16 @@ fn upload_reflect(
         (LOOK_WATER_RECT * 4) as u64,
         bytemuck::cast_slice(&r),
     );
-    // `quality.y`'s one writer, for the same reason: whether the floor is occluded this frame is
-    // known after visibility. Off, the fragment does not march, and nothing reads the pyramids and
-    // the plane pass's images, which this frame did not build.
-    let on = f32::from(floor.is_some_and(|f| f.occluded));
+    // `quality.y`'s and `quality.z`'s one writer, for the same reason: whether the floor is
+    // occluded, and whether the body's visibility rays are traced, this frame is known after
+    // visibility. Off, the fragment neither marches nor reads the rays, and nothing reads the
+    // pyramids and the plane pass's images, which this frame did not build.
+    let floor = floor.map_or_else(FloorOnScreen::default, |f| *f);
+    let on = [f32::from(floor.occluded), f32::from(floor.body)];
     queue.write_buffer(
         &buffer.0,
         ((LOOK_QUALITY + 1) * 4) as u64,
-        bytemuck::bytes_of(&on),
+        bytemuck::cast_slice(&on),
     );
 }
 
@@ -1562,8 +1565,8 @@ mod tests {
                 "e_sun_raw: vec4<f32>",
             ]
         );
-        // The rect row and the floor occlusion's lane have one writer: `upload_reflect` in the
-        // render world, over the zeros `look_lanes` leaves there.
+        // The rect row and the floor occlusion's and the body rays' lanes have one writer:
+        // `upload_reflect` in the render world, over the zeros `look_lanes` leaves there.
         let src = include_str!("reflect.rs");
         let upload = &src[src.find("fn upload_reflect(").unwrap()..];
         let upload = &upload[..upload.find("\n}\n").unwrap()];
@@ -1576,6 +1579,7 @@ mod tests {
         let rect = LOOK_WATER_RECT - LOOK_LANES.start;
         assert_eq!(lanes[rect..rect + 4], [0.0; 4]);
         assert_eq!(lanes[LOOK_QUALITY + 1 - LOOK_LANES.start], 0.0);
+        assert_eq!(lanes[LOOK_QUALITY + 2 - LOOK_LANES.start], 0.0);
     }
 
     /// The members of the WGSL struct `name`, in order, comments and trailing commas dropped.

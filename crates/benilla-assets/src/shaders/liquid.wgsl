@@ -228,8 +228,9 @@ struct WaterBody {
 // writer per row, and a row no writer fills reads 0.
 struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
-    // occlusion this frame (1 on, with water on screen the floor can serve; written by the render
-    // world), zw spare.
+    // occlusion this frame (1 on, with water on screen the floor can serve), z the body's
+    // visibility rays traced this frame (1 on Medium and High with plane water on screen); y and
+    // z written by the render world; w spare.
     quality: vec4<f32>,
     // x the reflection's grazing ceiling (1 = none), y the glint weight in linear light, z a glow
     // excess forced onto every water pixel, w spare.
@@ -2536,8 +2537,6 @@ struct BodyIn {
     unlit: bool,
     // ADT water, which the terrain's shadow covers.
     adt: bool,
-    // The illuminant (gamma): the terrain's light law, ambient plus sun diffuse, on the mesh normal.
-    lit_interim: vec3<f32>,
 };
 
 /// The water column under a pixel and what it does to light.
@@ -2611,6 +2610,52 @@ fn lighting_sun_mcsh(world_pos: vec3<f32>, column: f32) -> f32 {
     let uv = fract((g + vec2<f32>(MAP_HALF_YD)) / MCSH_SPAN_YD);
     let shadowed = textureSampleLevel(water_shadow, ripples_samp, uv, 0.0).r;
     return select(1.0, 1.0 - shadowed, inside);
+}
+
+/// The light on the body and on foam, linear: the sky's irradiance seen through the open share of
+/// the hemisphere and the lighting sun's under its shadow. One light, two chroma treatments.
+struct Irr {
+    body: vec3<f32>,
+    foam: vec3<f32>,
+};
+
+/// The illuminant at the surface point `world_pos` over a column `column` yards deep, seen through
+/// `vis` (`g` the sky's open share, `b` the sun's, [`body_visibility`]): the body takes the
+/// chroma-bounded rows, foam the rows at the light's full chroma, both at the terrain's open-sky
+/// luminance (`benilla_water::body::body_light`). On ADT water the sun is also under the terrain's
+/// MCSH at the ground its ray meets; in shadow it keeps `e_sky.w` of itself, so shadowed water
+/// darkens as the terrain's `terrainp_s.bls` law darkens the bank beside it (0.7 in gamma).
+fn body_irradiance(world_pos: vec3<f32>, column: f32, vis: vec4<f32>, adt: bool) -> Irr {
+    let b = water_reflect.look.body;
+    let s = select(1.0, lighting_sun_mcsh(world_pos, column), adt) * vis.b;
+    let s_eff = mix(b.e_sky.w, 1.0, s);
+    return Irr(
+        b.e_sky.rgb * vis.g + b.e_sun.rgb * s_eff,
+        b.e_sky_raw.rgb * vis.g + b.e_sun_raw.rgb * s_eff,
+    );
+}
+
+/// How much of the sky and of the lighting sun the frame shows open above the surface point
+/// `world_pos` (`g` the sky, `b` the sun; `r` the reflected ray's open sky): on a mirror plane the
+/// compute pass's world-anchored rays at the pixel, read bilinearly and weighed by the plane's
+/// share; 1 off the planes, under the eye, and on a frame the rays were not traced (Low, or no
+/// plane water on screen), where MCSH and its shadow floor alone shade the body. The specular ray's
+/// verdict is never a diffuse visibility.
+fn body_visibility(world_pos: vec3<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
+    let wp = occl_plane_weight(world_pos.y);
+    if (water_reflect.look.quality.z < 0.5 || wp <= 0.0 || view.world_position.y <= world_pos.y) {
+        return vec4<f32>(1.0);
+    }
+    let uv = (frag_coord - view.viewport.xy) / view.viewport.zw;
+    let o = textureSampleLevel(water_occl, scene_samp, uv, 0.0);
+    return mix(vec4<f32>(1.0), vec4<f32>(o.rgb, 1.0), wp);
+}
+
+/// The light the eye-below look lights the dome's stops with, gamma: the sky's and the sun's
+/// irradiance at the light's full chroma, open and unshadowed, at the terrain's open-sky luminance.
+fn open_illuminant_g() -> vec3<f32> {
+    let b = water_reflect.look.body;
+    return water_enc(b.e_sky_raw.rgb + b.e_sun_raw.rgb);
 }
 
 /// The water column behind this pixel and its transmittance, the in-scatter's weight and the
@@ -2710,9 +2755,10 @@ fn water_body_optics(
     return o;
 }
 
-/// The body's in-scatter: the albedo under the illuminant, the lift on it in gamma, the ripple's
-/// shading. The illuminant is `bi.lit_interim` (1 on an unlit interior); `vis` is the screen-space
-/// visibility, which this light does not read, `wave_tilt` the facet's tilt along the sun's bearing.
+/// The body's in-scatter: the albedo under the illuminant ([`body_irradiance`]; 1 on an unlit
+/// interior, as the reference draws it), the lift on it in gamma, the ripple's shading. `vis` is
+/// the open share of the sky and the sun ([`body_visibility`]), `wave_tilt` the facet's tilt along
+/// the sun's bearing.
 fn water_body_light(
     o: BodyOptics,
     world_pos: vec3<f32>,
@@ -2722,16 +2768,43 @@ fn water_body_light(
     room_fog: u32,
 ) -> BodyLight {
     var l: BodyLight;
-    // The illuminant in gamma; `enc(a·E) = enc(a)·enc(E)` under the pure power law.
-    let e_g = select(bi.lit_interim, vec3<f32>(1.0), bi.unlit);
-    let e = water_dec(e_g);
-    let lit_g = o.a_g * e_g + body_lift(o.a_g, bi.lift);
-    l.in_scatter = water_dec(lit_g) * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
-    l.irradiance = e;
-    l.foam_irradiance = e;
+    var e = body_irradiance(world_pos, o.z, vis, bi.adt);
+    if (bi.unlit) {
+        e = Irr(vec3<f32>(1.0), vec3<f32>(1.0));
+    }
+    // `enc(a·E) = enc(a)·enc(E)` under the pure power law.
+    let in_g = o.a_g * water_enc(e.body) + body_lift(o.a_g, bi.lift);
+    l.in_scatter = water_dec(in_g) * (1.0 + BODY_RIPPLE_SHADE * wave_tilt);
+    l.irradiance = e.body;
+    l.foam_irradiance = e.foam;
     l.fog_f = 1.0;
     l.fog_g = vec3<f32>(0.0);
     return l;
+}
+
+/// The in-scatter and foam's illuminant as the composite takes them.
+struct LightHeld {
+    in_scatter: vec3<f32>,
+    foam: vec3<f32>,
+};
+
+/// The body's in-scatter and foam's illuminant in half precision, three words: like the bed
+/// ([`body_hold`]) they cross the reflection tiers, where the shader's register peak lies at the
+/// edge of an occupancy step.
+fn light_hold(l: BodyLight) -> vec3<u32> {
+    return vec3<u32>(
+        pack2x16float(l.in_scatter.rg),
+        pack2x16float(vec2<f32>(l.in_scatter.b, l.foam_irradiance.r)),
+        pack2x16float(l.foam_irradiance.gb),
+    );
+}
+
+/// [`light_hold`]'s words back as floats.
+fn light_release(h: vec3<u32>) -> LightHeld {
+    let a = unpack2x16float(h.x);
+    let b = unpack2x16float(h.y);
+    let c = unpack2x16float(h.z);
+    return LightHeld(vec3<f32>(a, b.x), vec3<f32>(b.y, c));
 }
 
 #ifdef WATER_VIEW
@@ -2776,6 +2849,12 @@ const WV_REFRACT_REJECT: u32 = 26u;
 // The lighting sun's terrain shadow at the surface over the pixel's column, white lit
 // ([`lighting_sun_mcsh`]).
 const WV_MCSH: u32 = 27u;
+// The body's light: the sky's and the lighting sun's open share as the body reads them (1 off
+// the mirror planes), and foam's illuminant left of the screen's centre against the body's right
+// of it, enc.
+const WV_SKY_VIS: u32 = 28u;
+const WV_SUN_VIS: u32 = 29u;
+const WV_FOAM_LIGHT: u32 = 30u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -2815,7 +2894,6 @@ fn stylised_water(
     planar: vec4<f32>,
     /// The current, world XZ yards a second — see `ATTRIBUTE_WOW_FLOW`.
     flow: vec2<f32>,
-    lit: vec3<f32>,
     // The body's stops, optics rows and light ([`water_body_optics`]).
     bi: BodyIn,
     room_fog: u32,
@@ -2906,7 +2984,12 @@ fn stylised_water(
         optics.w_in,
     );
 #endif
-    let body_light = water_body_light(optics, world_pos, vec4<f32>(1.0), bi, wave_tilt, room_fog);
+    // The light on the body: the sky and the lighting sun through what the frame shows standing
+    // over the surface, and the sun under the terrain's shadow.
+    let vis = body_visibility(world_pos, frag_coord);
+    let body_light = water_body_light(optics, world_pos, vis, bi, wave_tilt, room_fog);
+    // Held to the composite in half precision ([`light_hold`]).
+    let light_held = light_hold(body_light);
 
     // What the surface reflects where no tier has a better answer: the sky, the dome and its clouds
     // as drawn, unlit and linear ([`sky_floor`]). The sky is at infinity, where the mirrors' law
@@ -2916,10 +2999,10 @@ fn stylised_water(
     // and the body as on mirror water.
     let r_rip = reflect(-to_view, n);
     let sky = sky_floor(reflect(-to_view, flat_n), sqrt(surface_lost2(surf)));
-    // Seen from below, the surface reflects the dome's two stops along the rippled ray, lit as the
-    // terrain is ([`underside_sky`]), in gamma.
+    // Seen from below, the surface reflects the dome's two stops along the rippled ray under the
+    // open illuminant ([`underside_sky`], [`open_illuminant_g`]), in gamma.
     let eye_above = view.world_position.y > world_pos.y;
-    let sky_g = select(underside_sky(r_rip) * lit, water_enc(sky), eye_above);
+    let sky_g = select(underside_sky(r_rip) * open_illuminant_g(), water_enc(sky), eye_above);
     // **A surface has one reflection, and Fresnel is how big its share of the fragment is**: the
     // tiers below are answers to *what* is reflected, and they share it. The share is
     // [`water_fresnel`] on the filtered normal at the surface's roughness, under the grazing limit
@@ -3469,6 +3552,14 @@ fn stylised_water(
         return vec4<f32>(optics.accept, off / REFRACT_MAX_PX, leak, 1.0);
     } else if (view_id == WV_MCSH) {
         return vec4<f32>(vec3<f32>(lighting_sun_mcsh(world_pos, optics.z)), 1.0);
+    } else if (view_id == WV_SKY_VIS) {
+        return vec4<f32>(vec3<f32>(vis.g), 1.0);
+    } else if (view_id == WV_SUN_VIS) {
+        return vec4<f32>(vec3<f32>(vis.b), 1.0);
+    } else if (view_id == WV_FOAM_LIGHT) {
+        let left = frag_coord.x < view.viewport.x + 0.5 * view.viewport.z;
+        let e = select(body_light.irradiance, body_light.foam_irradiance, left);
+        return vec4<f32>(water_enc(e), 1.0);
     }
 #endif
 #ifdef WATER_REFRACT
@@ -3477,18 +3568,20 @@ fn stylised_water(
     let body = BodyHeld(vec3<f32>(0.0), optics.t_bed, optics.w_in);
 #endif
     // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
+    let light = light_release(light_held);
     var layer = layer_surface(
         f_surf,
         refl_g,
         spec_l,
-        body_light.in_scatter,
+        light.in_scatter,
         vec3<f32>(body.w_in),
         body.t_bed,
     );
     layer = layer_cover(layer, soft);
     // Foam is coverage: spray over the surface, hiding what is under it.
+    // Lit by the body's light at the light's full chroma (warm at dusk, blue under the moon).
     if (foam > 0.0) {
-        layer = layer_over(water_dec(FOAM_COLOR * lit), foam, layer);
+        layer = layer_over(water_dec(FOAM_COLOR) * light.foam, foam, layer);
     }
     layer = layer_fog(layer, world_pos, room_fog);
 #ifdef WATER_REFRACT
@@ -3697,31 +3790,21 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // depth are resolved, before any of the reference's three combines — because those two are the
     // only world inputs it takes.
     //
-    // Each arm keeps its own colour source and its own lighting, so what changes is the treatment
-    // and never the palette: the ADT ramp lerps the zone swatch by depth; a WMO exterior canal
-    // takes the deep river band flat, having no bathymetry to lerp over; and a WMO interior pool
-    // keeps its authored `MOMT.diffColor` body, unlit, because that arm has no normal to light with
-    // and its rooms are not lit by the scene's sun.
+    // Each arm keeps its own colour source, so what changes is the treatment and never the
+    // palette: the ADT ramp lerps the zone swatch by depth; a WMO exterior canal takes the deep
+    // river band flat, having no bathymetry to lerp over; and a WMO interior pool keeps its
+    // authored `MOMT.diffColor` body, unlit, because that arm has no normal to light with and its
+    // rooms are not lit by the scene's sun. The other two are lit by the sky and the lighting sun
+    // under the terrain's shadow ([`body_irradiance`]), at the terrain's open-sky luminance.
 #ifdef WATER_STYLISED
     if (w.path.y > 0.5) {
         var body_shallow = shallow;
         var body_deep = deep;
-        var lit = vec3<f32>(1.0);
         if (w.path.x > 1.5) {
             body_shallow = vec4<f32>(in.vcolor.rgb, shallow.w);
             body_deep = vec4<f32>(in.vcolor.rgb, deep.w);
-        } else {
-            if (w.path.x > 0.5) {
-                body_shallow = deep;
-            }
-            let n_lit = normalize(in.world_normal);
-            lit = clamp(
-                wow_light.light_ambient.rgb
-                    + wow_light.light_diffuse.rgb
-                        * max(dot(n_lit, -normalize(wow_light.light_sun.xyz)), 0.0),
-                vec3<f32>(0.0),
-                vec3<f32>(1.0),
-            );
+        } else if (w.path.x > 0.5) {
+            body_shallow = deep;
         }
         // What stands behind this water pixel, from the complete linear depth (`liquid::hiz`): the
         // static world, entity-path models and units included.
@@ -3746,7 +3829,6 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
             unlit,
             w.path.x < 0.5,
-            lit,
         );
         return stylised_water(
             in.world_position.xyz,
@@ -3757,7 +3839,6 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             in.surface_normal,
             in.planar,
             in.flow,
-            lit,
             bi,
             in.room_fog,
         );

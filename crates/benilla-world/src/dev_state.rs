@@ -106,8 +106,11 @@ impl Default for WaterDebug {
 /// `fresnel` its reflectance; the grading's `grade`, `refl_ungraded` and `refl_graded` its
 /// reflection; `refracted_bed` the bed the composite passes and `refract_reject` the refracted
 /// lookup's weight, offset and leak (Medium and High refract; Low shows the unrefracted bed);
-/// `mcsh` the lighting sun's terrain shadow at the surface, white lit.
-pub const WATER_VIEWS: [&str; 28] = [
+/// `mcsh` the lighting sun's terrain shadow at the surface, white lit; `sky_vis` and `sun_vis` the
+/// open share of the sky and of the lighting sun the body is lit through (1 off the mirror planes
+/// and on Low); `foam_light` foam's illuminant left of the screen's centre against the body's right
+/// of it.
+pub const WATER_VIEWS: [&str; 31] = [
     "off",
     "mirror1",
     "mirror2",
@@ -136,6 +139,9 @@ pub const WATER_VIEWS: [&str; 28] = [
     "refracted_bed",
     "refract_reject",
     "mcsh",
+    "sky_vis",
+    "sun_vis",
+    "foam_light",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.

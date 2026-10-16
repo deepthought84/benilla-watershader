@@ -17,16 +17,21 @@
 //! floor's verdict and `rho_c` on every fragment the eye is above (`floor_occlusion_wanted`),
 //! whatever its tiers.
 //!
-//! The answer, [`FloorOnScreen`], has two halves. `sky` builds the cube: every stylised fragment
+//! The answer, [`FloorOnScreen`], has three parts. `sky` builds the cube: every stylised fragment
 //! reads it for the floor's share, occluded or not, a WMO interior pool's too. `occluded`, the same
 //! water outside WMO interiors with the occlusion on, arms the pyramids' reduce chain and the plane
 //! pass, and the render world writes it into the look's `quality.y` lane
 //! (`reflect::upload_reflect`): on a frame it is off the fragment does not march either, so the
-//! floor is never occluded from a pyramid this frame did not build.
+//! floor is never occluded from a pyramid this frame did not build. `body`, on Medium and High
+//! with a mirror plane active and water outside WMO interiors below the eye, arms the pyramids and
+//! the plane pass for the body's sky and sun visibility, written into `quality.z` the same way:
+//! off, the body reads its sky and sun open.
 
 use benilla_assets::materials::{LiquidMaterial, ATTRIBUTE_WOW_PLANAR};
 use benilla_formats::NO_SPOT;
-use benilla_world::liquid::{LiquidSurface, MIRROR2_LANES, PROBE_LANES, PROBE_SLOT_MAX};
+use benilla_world::liquid::{
+    LiquidSurface, WaterQuality, MIRROR2_LANES, PROBE_LANES, PROBE_SLOT_MAX,
+};
 use bevy::camera::primitives::{Aabb, Frustum};
 use bevy::math::Affine3A;
 use bevy::mesh::{Indices, VertexAttributeValues};
@@ -243,18 +248,38 @@ pub(crate) struct FloorOnScreen {
     /// (`floor_occlusion_wanted`). It arms the pyramids' reduce chain, the plane pass and the
     /// fragment's march.
     pub(crate) occluded: bool,
+    /// The body reads its sky and sun visibility from the plane pass's rays: the tier traces them
+    /// (Medium, High), a mirror plane is active and water outside a WMO interior lies below the
+    /// eye (`body_visibility`). It arms the pyramids' reduce chain and the plane pass.
+    pub(crate) body: bool,
 }
 
 impl FloorOnScreen {
     /// From the look (`shown`: stylised, water on screen), the occlusion knob, whether a debug view
-    /// wants the floor wherever water is, and whether any visible water, and any visible water
-    /// outside a WMO interior, leaves the floor a share or is graded from above.
-    fn decide(shown: bool, occlusion: bool, forced: bool, any: bool, exterior: bool) -> Self {
+    /// wants the floor wherever water is, whether any visible water, and any visible water outside
+    /// a WMO interior, leaves the floor a share or is graded from above, and whether the body's
+    /// visibility rays have plane water to trace for ([`body_rays`]).
+    fn decide(
+        shown: bool,
+        occlusion: bool,
+        forced: bool,
+        any: bool,
+        exterior: bool,
+        body: bool,
+    ) -> Self {
         Self {
             sky: shown && (forced || any),
             occluded: shown && occlusion && (forced || exterior),
+            body: shown && body,
         }
     }
+}
+
+/// Whether the body's visibility rays run: the tier traces them (Medium and High), a mirror plane
+/// is active (they start from its points) and visible water outside a WMO interior lies below the
+/// eye, or a debug view wants them wherever water is.
+fn body_rays(tier: u8, plane: bool, forced: bool, below: bool) -> bool {
+    tier >= 1 && plane && (forced || below)
 }
 
 /// The reflection tiers this frame, as the block's lanes hold them: the elected mirror planes,
@@ -387,8 +412,8 @@ fn floor_surfaces<'a, T: Copy>(
 }
 
 /// Which readers want the depth pyramids: the screen-space march while its switch is on, the
-/// floor occlusion while the floor is on screen.
-fn pyramid_readers(ssr: bool, floor: bool) -> WaterHizConsumers {
+/// floor occlusion while the floor is on screen, the body's visibility rays while they run.
+fn pyramid_readers(ssr: bool, floor: bool, body: bool) -> WaterHizConsumers {
     let mut readers = 0;
     if ssr {
         readers |= WaterHizConsumers::SSR;
@@ -396,19 +421,23 @@ fn pyramid_readers(ssr: bool, floor: bool) -> WaterHizConsumers {
     if floor {
         readers |= WaterHizConsumers::FLOOR_OCCLUSION;
     }
+    if body {
+        readers |= WaterHizConsumers::BODY_VISIBILITY;
+    }
     WaterHizConsumers(readers)
 }
 
 /// Each frame, after the water's rectangle and the reflection block: whether any water on screen
-/// can show the sky floor, and whether it is occluded there ([`FloorOnScreen`]), and so which
-/// readers want the depth pyramids ([`WaterHizConsumers`]). A debug view wants the floor wherever
-/// water is on screen; the grading, whose pivot reads the floor's verdict and `rho_c` on every
-/// fragment the eye is above, wherever visible water lies below the eye. `RUST_LOG=benilla_water::floor_share=debug`
-/// logs each change.
+/// can show the sky floor, whether it is occluded there and whether the body traces its visibility
+/// ([`FloorOnScreen`]), and so which readers want the depth pyramids ([`WaterHizConsumers`]). A
+/// debug view wants the floor wherever water is on screen; the grading, whose pivot reads the
+/// floor's verdict and `rho_c` on every fragment the eye is above, and the body's rays, wherever
+/// visible water lies below the eye. `RUST_LOG=benilla_water::floor_share=debug` logs each change.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub(crate) fn drive_floor_readers(
     style: Res<WaterStyle>,
     look: Res<WaterLook>,
+    quality: Res<WaterQuality>,
     dev: Res<DebugState>,
     rect: Res<WaterScreenRect>,
     data: Res<WaterReflectData>,
@@ -431,9 +460,11 @@ pub(crate) fn drive_floor_readers(
     let forced = dev.water.view != 0;
     let graded = look.grade_strength > 0.0;
     let tiers = Tiers::from_lanes(&data.0);
-    let (any, exterior) = (shown && !forced)
+    let plane = data.0[1] > 0.0 || data.0[MIRROR2_LANES.start + 1] > 0.0;
+    let (any, exterior, below) = (shown && !forced)
         .then(|| {
             let (eye, frustum) = eye.single().ok()?;
+            let eye_y = eye.translation().y;
             let in_view = |min: Vec3, max: Vec3| {
                 frustum.intersects_obb(
                     &Aabb::from_min_max(min, max),
@@ -444,7 +475,7 @@ pub(crate) fn drive_floor_readers(
             };
             // Magma and slime draw no reflection. A WMO interior pool reads the floor's cube
             // but its floor is never occluded (`floor_occlusion_wanted`).
-            let water = surfaces
+            let water: Vec<_> = surfaces
                 .iter()
                 .filter_map(|(entity, seen, summary, material)| {
                     let m = materials.get(&material.0)?;
@@ -453,14 +484,14 @@ pub(crate) fn drive_floor_readers(
                         summary,
                         m.extension.path.x >= 1.5,
                     ))
-                });
-            Some(floor_surfaces(
-                &tiers,
-                eye.translation().y,
-                &in_view,
-                graded,
-                water,
-            ))
+                })
+                .collect();
+            let (any, exterior) =
+                floor_surfaces(&tiers, eye_y, &in_view, graded, water.iter().copied());
+            let below = water
+                .iter()
+                .any(|&(_, summary, interior)| !interior && summary.is_none_or(|s| eye_y > s.low));
+            Some((any, exterior, below))
         })
         .flatten()
         .unwrap_or_default();
@@ -470,6 +501,7 @@ pub(crate) fn drive_floor_readers(
         forced,
         any.is_some(),
         exterior.is_some(),
+        body_rays(quality.tier(), plane, forced, below),
     );
     if floor.set_if_neq(on) {
         match exterior.or(any) {
@@ -479,7 +511,7 @@ pub(crate) fn drive_floor_readers(
             None => debug!("water: the sky floor {on:?}"),
         }
     }
-    consumers.set_if_neq(pyramid_readers(dev.water.ssr, on.occluded));
+    consumers.set_if_neq(pyramid_readers(dev.water.ssr, on.occluded, on.body));
 }
 
 pub(super) fn register(app: &mut App) {
@@ -758,12 +790,13 @@ mod tests {
         assert_eq!(walk(vec![(&bare, true), (&served, true)]), (Some(0), None));
         assert_eq!(walk(vec![(&served, true)]), (None, None));
         // An interior-only frame: the cube is built, nothing is occluded.
-        let interior = FloorOnScreen::decide(true, true, false, true, false);
+        let interior = FloorOnScreen::decide(true, true, false, true, false, false);
         assert_eq!(
             interior,
             FloorOnScreen {
                 sky: true,
-                occluded: false
+                occluded: false,
+                body: false,
             }
         );
     }
@@ -806,50 +839,92 @@ mod tests {
     }
 
     /// The cube is the floor's whatever the occlusion knob says; the occlusion needs the knob, and
-    /// neither runs without the stylised look and water on screen.
+    /// neither runs without the stylised look and water on screen; the body's rays need neither
+    /// the floor nor the knob.
     #[test]
     fn the_sky_cube_does_not_wait_for_the_occlusion() {
-        let both = FloorOnScreen {
-            sky: true,
-            occluded: true,
+        let on = |sky, occluded, body| FloorOnScreen {
+            sky,
+            occluded,
+            body,
         };
-        let sky = FloorOnScreen {
-            sky: true,
-            occluded: false,
-        };
-        // (shown, occlusion, forced, any, exterior)
+        // (shown, occlusion, forced, any, exterior, body)
         for (args, want) in [
-            ((true, true, false, true, true), both),
-            ((true, false, false, true, true), sky),
-            ((true, false, true, false, false), sky),
-            ((true, true, true, false, false), both),
-            ((true, true, false, false, false), FloorOnScreen::default()),
-            ((false, true, true, true, true), FloorOnScreen::default()),
+            (
+                (true, true, false, true, true, false),
+                on(true, true, false),
+            ),
+            (
+                (true, false, false, true, true, false),
+                on(true, false, false),
+            ),
+            (
+                (true, false, true, false, false, false),
+                on(true, false, false),
+            ),
+            (
+                (true, true, true, false, false, false),
+                on(true, true, false),
+            ),
+            (
+                (true, true, false, false, false, false),
+                FloorOnScreen::default(),
+            ),
+            (
+                (false, true, true, true, true, true),
+                FloorOnScreen::default(),
+            ),
+            (
+                (true, false, false, false, false, true),
+                on(false, false, true),
+            ),
+            ((true, true, false, true, true, true), on(true, true, true)),
         ] {
-            let (shown, occlusion, forced, any, exterior) = args;
+            let (shown, occlusion, forced, any, exterior, body) = args;
             assert_eq!(
-                FloorOnScreen::decide(shown, occlusion, forced, any, exterior),
+                FloorOnScreen::decide(shown, occlusion, forced, any, exterior, body),
                 want,
                 "{args:?}"
             );
         }
     }
 
+    /// The body's visibility rays run on Medium and High, from an active mirror plane's points,
+    /// for water below the eye or a debug view; Low reads the sky and sun open.
+    #[test]
+    fn the_body_rays_run_from_medium_up_over_plane_water() {
+        // (tier, plane, forced, below)
+        for (args, want) in [
+            ((1, true, false, true), true),
+            ((2, true, false, true), true),
+            ((0, true, false, true), false),
+            ((1, false, false, true), false),
+            ((1, true, false, false), false),
+            ((2, true, true, false), true),
+            ((0, true, true, true), false),
+        ] {
+            let (tier, plane, forced, below) = args;
+            assert_eq!(body_rays(tier, plane, forced, below), want, "{args:?}");
+        }
+    }
+
     /// The sky floor's occlusion walks the depth pyramids, so it asks for them while the floor is
-    /// on screen, beside the march's switch and without it.
+    /// on screen, beside the march's switch and without it; so do the body's rays while they run.
     #[test]
     fn the_floor_on_screen_asks_for_the_pyramid() {
         use WaterHizConsumers as C;
-        for (ssr, floor, want) in [
-            (false, true, C::FLOOR_OCCLUSION),
-            (true, true, C::SSR | C::FLOOR_OCCLUSION),
-            (true, false, C::SSR),
-            (false, false, 0),
+        for (ssr, floor, body, want) in [
+            (false, true, false, C::FLOOR_OCCLUSION),
+            (true, true, false, C::SSR | C::FLOOR_OCCLUSION),
+            (true, false, false, C::SSR),
+            (false, false, false, 0),
+            (false, false, true, C::BODY_VISIBILITY),
+            (false, true, true, C::FLOOR_OCCLUSION | C::BODY_VISIBILITY),
         ] {
             assert_eq!(
-                pyramid_readers(ssr, floor).0,
+                pyramid_readers(ssr, floor, body).0,
                 want,
-                "ssr {ssr}, floor {floor}"
+                "ssr {ssr}, floor {floor}, body {body}"
             );
         }
     }
