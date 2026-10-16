@@ -14,6 +14,9 @@
 //! from each plane point, how much of the sky and of the lighting sun the frame shows open above
 //! it, for the body's light: world-anchored rays through the nearest-depth pyramid, wanted
 //! wherever plane water is on screen ([`FloorOnScreen::body`]), with the floor's march or alone.
+//! The pass then writes the occlusion image through `occl_vis_smooth`, which spreads each texel's
+//! visibility over its plane neighbours, so a shadow on the water does not step along the texel
+//! grid.
 //!
 //! **Built once, bound every frame.** The pass's bind group lives in [`ComputeBindings`], keyed on
 //! the id of every buffer and view it binds. The view uniform buffer is among them: Bevy
@@ -80,6 +83,9 @@ pub(crate) struct FloorOcc {
     pub(crate) occl: Handle<Image>,
     /// `Rgba16Float`: rgb the occluder's radiance times `1 − v`, linear; a `rho_c`. Bound at 121.
     pub(crate) col: Handle<Image>,
+    /// `Rgba8Unorm`: the plane pass's answer before the body's visibility is smoothed, where the
+    /// rays run ([`traces_body`]); read by the compute pass alone.
+    vis: Handle<Image>,
     /// Their size in texels.
     size: UVec2,
     /// The quality tier the pass compiles for, 0 Low, 1 Medium, 2 High.
@@ -90,9 +96,10 @@ pub(crate) struct FloorOcc {
     sun_travel: Vec3,
 }
 
-/// An occlusion image pair of `size` texels, filled with the neutral answer (the sky open, the
-/// verdict unknown, no occluder), which is what the water reads before the first dispatch.
-fn occl_images(size: UVec2) -> (Image, Image) {
+/// The occlusion images of `size` texels (the answer, the occluder, the unsmoothed answer), filled
+/// with the neutral answer (the sky open, the verdict unknown, no occluder), which is what the
+/// water reads before the first dispatch.
+fn occl_images(size: UVec2) -> (Image, Image, Image) {
     let make = |format: TextureFormat, texel: &[u8]| {
         let mut image = Image::new_fill(
             Extent3d {
@@ -113,6 +120,7 @@ fn occl_images(size: UVec2) -> (Image, Image) {
     (
         make(TextureFormat::Rgba8Unorm, &[255, 255, 255, 0]),
         make(TextureFormat::Rgba16Float, &[0; 8]),
+        make(TextureFormat::Rgba8Unorm, &[255, 255, 255, 0]),
     )
 }
 
@@ -138,9 +146,10 @@ fn drive_floor_occ(
     };
     let want = ceil_div(px, occl_scale(occ.tier)).max(UVec2::ONE);
     if want != occ.size {
-        let (occl, col) = occl_images(want);
+        let (occl, col, vis) = occl_images(want);
         occ.occl = images.add(occl);
         occ.col = images.add(col);
+        occ.vis = images.add(vis);
         occ.size = want;
     }
 }
@@ -191,11 +200,14 @@ fn occl_tiles(min: UVec2, max: UVec2, scale: u32, size: UVec2) -> (UVec2, UVec2)
 const PARAMS_ROW: u32 = 0;
 const MIRROR2_ROW: u32 = (MIRROR2_LANES.start / 4) as u32;
 
-/// The pass's pipelines: `occl_plane` per tier, tracing the body's visibility from Medium up.
+/// The pass's pipelines: `occl_plane` per tier, tracing the body's visibility from Medium up, and
+/// `occl_vis_smooth`, which smooths that visibility into the occlusion image.
 #[derive(Resource)]
 struct ComputePipelines {
     layout: BindGroupLayoutDescriptor,
     occl: [CachedComputePipelineId; 3],
+    smooth_layout: BindGroupLayoutDescriptor,
+    smooth: CachedComputePipelineId,
 }
 
 fn init_compute_pipelines(
@@ -233,7 +245,42 @@ fn init_compute_pipelines(
             ..default()
         })
     });
-    commands.insert_resource(ComputePipelines { layout, occl });
+    // `water_compute.wgsl`'s `occl_vis_smooth`: the occlusion image, the dispatch's tiles and the
+    // plane pass's unsmoothed answer.
+    let smooth_layout = BindGroupLayoutDescriptor::new(
+        "water_vis_smooth_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::COMPUTE,
+            (
+                (
+                    7,
+                    texture_storage_2d(TextureFormat::Rgba8Unorm, StorageTextureAccess::WriteOnly),
+                ),
+                (9, uniform_buffer::<OcclParams>(false)),
+                (10, float(false)),
+            ),
+        ),
+    );
+    let smooth = cache.queue_compute_pipeline(ComputePipelineDescriptor {
+        label: Some("water_occl_vis_smooth".into()),
+        layout: vec![smooth_layout.clone()],
+        shader,
+        shader_defs: occl_defs(1),
+        entry_point: Some("occl_vis_smooth".into()),
+        ..default()
+    });
+    commands.insert_resource(ComputePipelines {
+        layout,
+        occl,
+        smooth_layout,
+        smooth,
+    });
+}
+
+/// Whether the plane pass traces the body's visibility rays at quality tier `tier` (Medium up),
+/// and so writes its answer through `occl_vis_smooth`.
+fn traces_body(tier: u8) -> bool {
+    tier >= 1
 }
 
 /// `occl_plane`'s defs at quality tier `tier`: the tier's own, the body's visibility rays from
@@ -244,7 +291,7 @@ fn occl_defs(tier: u8) -> Vec<ShaderDefVal> {
         ShaderDefVal::UInt("PARAMS_ROW".into(), PARAMS_ROW),
         ShaderDefVal::UInt("MIRROR2_ROW".into(), MIRROR2_ROW),
     ];
-    if tier >= 1 {
+    if traces_body(tier) {
         defs.push("WATER_SKY_VIS".into());
     }
     defs
@@ -340,7 +387,8 @@ fn prepare_water_compute(
     frame.occl = true;
 }
 
-/// Every resource the pass's bind group binds, by id.
+/// Every resource the plane pass's bind group binds, by id; `occl` the image at binding 7 (the
+/// unsmoothed answer where the rays run).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct ComputeKey {
     view_uniforms: BufferId,
@@ -355,11 +403,21 @@ struct ComputeKey {
     params: BufferId,
 }
 
-/// Render world: the pass's bind group and what it was built for.
+/// Every resource the smoothing's bind group binds, by id.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct SmoothKey {
+    occl: TextureViewId,
+    params: BufferId,
+    vis: TextureViewId,
+}
+
+/// Render world: the pass's bind groups and what they were built for.
 #[derive(Resource, Default)]
 struct ComputeBindings {
     key: Option<ComputeKey>,
     group: Option<BindGroup>,
+    smooth_key: Option<SmoothKey>,
+    smooth_group: Option<BindGroup>,
 }
 
 /// Render world, after the parameters: (re)build the bind group only where a buffer or view it
@@ -388,16 +446,20 @@ fn prepare_compute_bindings(
         return;
     };
     let get = |h: &Handle<Image>| images.get(h);
-    let (Some(near), Some(far), Some(lin), Some(snapshot), Some(occl), Some(col)) = (
+    let (Some(near), Some(far), Some(lin), Some(snapshot), Some(occl), Some(col), Some(vis)) = (
         get(&hiz.image),
         get(&hiz.far),
         get(&hiz.lin),
         get(&snap.image),
         get(&occ.occl),
         get(&occ.col),
+        get(&occ.vis),
     ) else {
         return;
     };
+    let smooth = traces_body(frame.tier);
+    // Where the rays run, the plane pass writes the unsmoothed answer and the smoothing the image.
+    let target = if smooth { vis } else { occl };
     let (Some(view_buffer), Some(view_binding)) = (
         view_uniforms.uniforms.buffer(),
         view_uniforms.uniforms.binding(),
@@ -416,10 +478,28 @@ fn prepare_compute_bindings(
         snapshot: snapshot.texture_view.id(),
         sampler: snapshot.sampler.id(),
         lanes: lanes.0.id(),
-        occl: occl.texture_view.id(),
+        occl: target.texture_view.id(),
         col: col.texture_view.id(),
         params: params.id(),
     };
+    let smooth_key = SmoothKey {
+        occl: occl.texture_view.id(),
+        params: params.id(),
+        vis: vis.texture_view.id(),
+    };
+    if smooth && bindings.smooth_key != Some(smooth_key) {
+        bindings.smooth_group = Some(device.create_bind_group(
+            "water_vis_smooth_bind",
+            &cache.get_bind_group_layout(&pipes.smooth_layout),
+            &BindGroupEntries::with_indices((
+                (7, &occl.texture_view),
+                (9, params_binding.clone()),
+                (10, &vis.texture_view),
+            )),
+        ));
+        debug!("water_compute: the smoothing's bind group for {smooth_key:?}");
+        bindings.smooth_key = Some(smooth_key);
+    }
     if bindings.key == Some(key) {
         return;
     }
@@ -434,7 +514,7 @@ fn prepare_compute_bindings(
             &snapshot.texture_view,
             &snapshot.sampler,
             lanes.0.as_entire_binding(),
-            &occl.texture_view,
+            &target.texture_view,
             &col.texture_view,
             params_binding,
         )),
@@ -477,6 +557,17 @@ impl Node for WaterComputeNode {
             bindings.group.as_ref(),
             cache.get_compute_pipeline(pipes.occl[usize::from(frame.tier)]),
         );
+        // Where the rays run, the plane pass's answer reaches the image only through the
+        // smoothing: both run, or neither.
+        let smooth = (
+            bindings.smooth_group.as_ref(),
+            cache.get_compute_pipeline(pipes.smooth),
+        );
+        let smooth = match (traces_body(frame.tier), smooth) {
+            (false, _) => Some(None),
+            (true, (Some(group), Some(pipeline))) => Some(Some((group, pipeline))),
+            (true, _) => None,
+        };
         // `render/water_compute` on Vulkan and DX12: the perf journal's `gpu_water`.
         let diagnostics = render_context.diagnostic_recorder();
         let mut pass =
@@ -491,11 +582,18 @@ impl Node for WaterComputeNode {
         if frame.lut {
             super::sky_lut::dispatch_lut(&mut pass, world);
         }
-        // Compiling, or the bind group not built yet: the images keep their last answer.
-        if let (true, (Some(offset), Some(group), Some(pipeline))) = (frame.occl, occl) {
+        // Compiling, or the bind groups not built yet: the images keep their last answer.
+        if let (true, (Some(offset), Some(group), Some(pipeline)), Some(smooth)) =
+            (frame.occl, occl, smooth)
+        {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, group, &[offset.offset]);
             pass.dispatch_workgroups(frame.groups.x, frame.groups.y, 1);
+            if let Some((group, pipeline)) = smooth {
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(frame.groups.x, frame.groups.y, 1);
+            }
         }
         timed.end(&mut pass);
         Ok(())
@@ -504,14 +602,15 @@ impl Node for WaterComputeNode {
 
 pub(super) fn register(app: &mut App) {
     let size = UVec2::ONE;
-    let (occl, col) = {
-        let (occl, col) = occl_images(size);
+    let (occl, col, vis) = {
+        let (occl, col, vis) = occl_images(size);
         let mut images = app.world_mut().resource_mut::<Assets<Image>>();
-        (images.add(occl), images.add(col))
+        (images.add(occl), images.add(col), images.add(vis))
     };
     app.insert_resource(FloorOcc {
         occl,
         col,
+        vis,
         size,
         tier: 1,
         armed: false,
@@ -620,6 +719,11 @@ mod tests {
                 .iter()
                 .any(|d| matches!(d, ShaderDefVal::Bool(name, true) if name == "WATER_SKY_VIS"));
             assert_eq!(vis, tier >= 1, "tier {tier}");
+            assert_eq!(
+                vis,
+                traces_body(tier),
+                "tier {tier}: the smoothing follows the rays"
+            );
             let tiers = defs
                 .iter()
                 .filter(|d| matches!(d, ShaderDefVal::Bool(name, true) if name.starts_with("WATER_TIER_")))
@@ -873,10 +977,92 @@ fn floor_rho_c(travelled: f32) -> f32 {
         assert!((30.0..31.0).contains(&last), "{last}");
         // Traced only where the tier asks for them, after the floor's march or alone.
         let entry = &wgsl[wgsl.find("fn occl_plane(").unwrap()..];
-        assert!(
-            entry.contains("#ifdef WATER_SKY_VIS\n    vis = body_vis(p, params.sun_travel.xyz);")
-        );
+        assert!(entry.contains(
+            "#ifdef WATER_SKY_VIS\n    vis = body_vis(p, params.sun_travel.xyz) * VIS_STORE;"
+        ));
         assert!(entry.contains("if (params.sun_travel.w > 0.5) {"));
+    }
+
+    /// The sun ray climbs toward the sun: `OcclParams.sun_travel` carries the lighting sun's travel
+    /// direction, which points down, and the shader turns it round; its w is the floor's march, so
+    /// a frame that wants the rays alone skips the march.
+    #[test]
+    fn the_sun_ray_climbs_and_the_march_rides_its_flag() {
+        for minute in (0..1440).step_by(30) {
+            let travel = benilla_world::lighting::sun_direction(minute as f32);
+            assert!(travel.y < 0.0, "minute {minute}: {travel}");
+        }
+        let src = include_str!("water_compute.rs");
+        let src = &src[..src.find("#[cfg(test)]").unwrap()];
+        assert!(src.contains("occ.sun_travel = light.sun_dir;"));
+        assert!(
+            src.contains("sun_travel: occ.sun_travel.extend(f32::from(u8::from(gates.march))),")
+        );
+        let wgsl = include_str!("shaders/water_compute.wgsl");
+        assert!(wgsl
+            .contains("let to_sun = -sun_travel;\n    var sun = 1.0;\n    if (to_sun.y > 1e-4) {"));
+        assert!(wgsl.contains("if (params.sun_travel.w > 0.5) {\n        let m = floor_march("));
+    }
+
+    /// `occl_vis_smooth` at texel `q` of the plane pass's grid (`None` where the texel has no plane
+    /// point): a 3×3 tent over the plane texels, its edge clamped to the grid.
+    fn smooth_vis(grid: &[Vec<Option<f32>>], q: (usize, usize)) -> Option<f32> {
+        grid[q.1][q.0]?;
+        let (w, h) = (grid[0].len() as i32, grid.len() as i32);
+        let (mut sum, mut weight) = (0.0, 0.0);
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                let x = (q.0 as i32 + dx).clamp(0, w - 1) as usize;
+                let y = (q.1 as i32 + dy).clamp(0, h - 1) as usize;
+                if let Some(v) = grid[y][x] {
+                    let k = ((2 - dx.abs()) * (2 - dy.abs())) as f32;
+                    sum += k * v;
+                    weight += k;
+                }
+            }
+        }
+        Some(sum / weight)
+    }
+
+    /// The rays' binary verdicts become a ramp across a shadow's edge and a lone blocked texel a
+    /// fleck at a quarter of its depth; a texel with no plane point (a hull, a deck) neither
+    /// lightens the water beside it nor takes a value. The plane pass stores the visibility under
+    /// byte 255, the marker of a texel with no plane point, and the smoothing reads it back so.
+    #[test]
+    fn the_body_visibility_is_smoothed_over_plane_texels_only() {
+        let edge: Vec<Vec<Option<f32>>> = (0..5)
+            .map(|_| {
+                (0..6)
+                    .map(|x| Some(if x < 3 { 0.0 } else { 1.0 }))
+                    .collect()
+            })
+            .collect();
+        let row: Vec<f32> = (0..6).map(|x| smooth_vis(&edge, (x, 2)).unwrap()).collect();
+        assert_eq!(row, [0.0, 0.0, 0.25, 0.75, 1.0, 1.0]);
+        let mut fleck = vec![vec![Some(1.0); 5]; 5];
+        fleck[2][2] = Some(0.0);
+        assert_eq!(smooth_vis(&fleck, (2, 2)), Some(0.75));
+        let mut hull = vec![vec![Some(0.2); 5]; 5];
+        hull[0] = vec![None; 5];
+        assert!((smooth_vis(&hull, (2, 1)).unwrap() - 0.2).abs() < 1e-6);
+        assert_eq!(smooth_vis(&hull, (2, 0)), None);
+
+        let wgsl = include_str!("shaders/water_compute.wgsl");
+        let at = wgsl.find("fn occl_vis_smooth(").expect("the smoothing");
+        let body = &wgsl[at..at + wgsl[at..].find("\n}\n").unwrap()];
+        for line in [
+            "if (c.g > VIS_PLANE_MAX) {\n        textureStore(water_occl, vec2<i32>(q), c);",
+            "clamp(vec2<i32>(q) + vec2<i32>(dx, dy), lo, hi)",
+            "let w = f32((2 - abs(dx)) * (2 - abs(dy))) * select(0.0, 1.0, n.g <= VIS_PLANE_MAX);",
+            "vec4<f32>(c.r, sum / (weight * VIS_STORE), c.a)",
+        ] {
+            assert!(body.contains(line), "occl_vis_smooth lost `{line}`");
+        }
+        assert!(wgsl.contains("const VIS_STORE: f32 = 254.0 / 255.0;"));
+        assert!(wgsl.contains("const VIS_PLANE_MAX: f32 = 254.5 / 255.0;"));
+        // Open water stores byte 254, under the marker's 255.
+        let open = (1.0f32 * 254.0 / 255.0 * 255.0).round();
+        assert!(open / 255.0 <= 254.5 / 255.0 && 1.0 > 254.5 / 255.0);
     }
 
     /// The image's rows the shader reads the planes from are the block's.

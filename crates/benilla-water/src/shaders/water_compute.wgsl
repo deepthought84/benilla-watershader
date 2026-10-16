@@ -6,7 +6,8 @@
 // marches the reflected ray through the pyramids by the floor march law, the same text the water's
 // fragment runs per pixel off the planes; the fragment reads the two images bilinearly at its
 // rippled lookup point. On Medium and High (`WATER_SKY_VIS`) the same point also traces how much
-// of the sky and of the lighting sun the frame shows open above it, for the body's light.
+// of the sky and of the lighting sun the frame shows open above it, for the body's light, and
+// `occl_vis_smooth` then smooths that answer over the neighbouring plane texels.
 
 #import bevy_render::view::View
 
@@ -20,7 +21,8 @@
 // The reflection block (`liquid.wgsl`'s `WaterReflect`) as rows.
 @group(0) @binding(6) var<storage, read> lanes: array<vec4<f32>>;
 // r the open sky v, g and b the body's sky and sun visibility (1 where they are not traced), a 1
-// where the march reached a verdict.
+// where the march reached a verdict. On Medium and High the plane pass writes it into `vis_raw`
+// instead, its visibility scaled by `VIS_STORE`, and `occl_vis_smooth` writes this image.
 @group(0) @binding(7) var water_occl: texture_storage_2d<rgba8unorm, write>;
 // rgb the occluder's radiance times 1 − v, linear; a rho_c.
 @group(0) @binding(8) var floor_occ: texture_storage_2d<rgba16float, write>;
@@ -398,6 +400,10 @@ const VIS_LEVEL_MAX: i32 = 1;
 /// The screen border's width, in UV, over which a block found there fades toward open, so an
 /// occluder entering the frame fades in rather than pops.
 const VIS_EDGE: f32 = 0.1;
+/// The plane pass stores the body's visibility scaled to at most byte 254, under the 255 of a texel
+/// with no plane point (`(1, 1, 1, 0)`), so [`occl_vis_smooth`] can tell the two apart.
+const VIS_STORE: f32 = 254.0 / 255.0;
+const VIS_PLANE_MAX: f32 = 254.5 / 255.0;
 
 /// The share of the ray `origin + t·dir` the frame leaves open: 1 where it leaves the frame or
 /// passes its last step unblocked. A step is blocked where the nearest surface the pyramid holds
@@ -504,8 +510,47 @@ fn occl_plane(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     var vis = vec2<f32>(1.0);
 #ifdef WATER_SKY_VIS
-    vis = body_vis(p, params.sun_travel.xyz);
+    vis = body_vis(p, params.sun_travel.xyz) * VIS_STORE;
 #endif
     textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, vis, o.known));
     textureStore(floor_occ, vec2<i32>(q), vec4<f32>(o.rgb, o.rho_c));
 }
+
+#ifdef WATER_SKY_VIS
+// ---- the body's visibility, smoothed ----
+//
+// Each ray's verdict is binary and a texel spans four view pixels, so read bilinearly an
+// occluder's shadow on the water would step along the texel grid and a reed blade would leave a
+// hard fleck. On Medium and High the plane pass writes into `vis_raw` and this entry writes the
+// occlusion image: the sky floor's answer as the pass found it, the body's visibility as a 3×3
+// tent over the neighbouring plane texels only, so a texel with no plane point (a deck, a hull, the
+// bank) never lightens the water beside it.
+
+@group(0) @binding(10) var vis_raw: texture_2d<f32>;
+
+@compute @workgroup_size(8, 8, 1)
+fn occl_vis_smooth(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let q = params.tile_origin + gid.xy;
+    if (any(q >= params.tile_end) || any(q >= textureDimensions(vis_raw))) {
+        return;
+    }
+    let c = textureLoad(vis_raw, vec2<i32>(q), 0);
+    if (c.g > VIS_PLANE_MAX) {
+        textureStore(water_occl, vec2<i32>(q), c);
+        return;
+    }
+    let lo = vec2<i32>(params.tile_origin);
+    let hi = vec2<i32>(min(params.tile_end, textureDimensions(vis_raw))) - 1;
+    var sum = vec2<f32>(0.0);
+    var weight = 0.0;
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+            let n = textureLoad(vis_raw, clamp(vec2<i32>(q) + vec2<i32>(dx, dy), lo, hi), 0);
+            let w = f32((2 - abs(dx)) * (2 - abs(dy))) * select(0.0, 1.0, n.g <= VIS_PLANE_MAX);
+            sum = sum + w * n.gb;
+            weight = weight + w;
+        }
+    }
+    textureStore(water_occl, vec2<i32>(q), vec4<f32>(c.r, sum / (weight * VIS_STORE), c.a));
+}
+#endif
