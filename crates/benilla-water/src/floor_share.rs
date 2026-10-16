@@ -906,6 +906,15 @@ mod tests {
             let (tier, plane, forced, below) = args;
             assert_eq!(body_rays(tier, plane, forced, below), want, "{args:?}");
         }
+        // `below` is any shown exterior water whose surface lies under the eye; a surface with
+        // no summary counts.
+        let src = include_str!("floor_share.rs");
+        let drive = &src[src.find("fn drive_floor_readers(").unwrap()..];
+        let drive = &drive[..drive.find("\n}\n").unwrap()];
+        assert!(drive.contains(
+            ".any(|&(_, summary, interior)| !interior && summary.is_none_or(|s| eye_y > s.low));"
+        ));
+        assert!(drive.contains("body_rays(quality.tier(), plane, forced, below)"));
     }
 
     /// The sky floor's occlusion walks the depth pyramids, so it asks for them while the floor is

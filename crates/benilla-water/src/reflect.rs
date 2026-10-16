@@ -1572,6 +1572,18 @@ mod tests {
         let upload = &upload[..upload.find("\n}\n").unwrap()];
         assert!(upload.contains("(LOOK_WATER_RECT * 4) as u64"));
         assert!(upload.contains("((LOOK_QUALITY + 1) * 4) as u64"));
+        // `quality.y` holds the floor's occlusion and `quality.z` the body's rays, and each
+        // shader reader takes its own lane.
+        assert!(upload.contains("[f32::from(floor.occluded), f32::from(floor.body)]"));
+        let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
+        let shader_fn = |name: &str| {
+            let at = wgsl.find(&format!("\nfn {name}(")).unwrap();
+            &wgsl[at..at + wgsl[at..].find("\n}\n").unwrap()]
+        };
+        let floor = shader_fn("floor_occlusion_wanted");
+        assert!(floor.contains("look.quality.y > 0.5") && !floor.contains("quality.z"));
+        let rays = shader_fn("body_visibility");
+        assert!(rays.contains("look.quality.z < 0.5") && !rays.contains("quality.y"));
         let lanes = super::super::look::look_lanes(
             &super::super::look::WaterLook::default(),
             &super::super::look::LookInputs::default(),
