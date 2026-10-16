@@ -490,9 +490,37 @@ class Bursts(unittest.TestCase):
             x, y = int(round(c[0])), int(round(c[1]))
             img[y - 12 : y + 13, x - 12 : x + 13] = 200
             frames.append(img)
-        r = wm.pan_luma_std(frames, poses, anchor, half=(6, 6))
+        r = wm.pan_luma_std(frames, poses, anchor, "in_scatter", half=(6, 6))
         self.assertEqual(r["shots"], 6)
         self.assertEqual(r["value"], 0.0)
+        self.assertEqual(r["basis"], "view in_scatter luma")
+
+    def test_a_pan_row_reads_its_views_burst_and_poses(self):
+        anchor = (100.0, 0.0, 0.0)
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "wg-pan.toml").write_text(
+                '[[row]]\nmetric = "pan_luma_std"\nanchor = [100.0, 0.0, 0.0]\nmax = 2.0\n'
+                '[[row]]\nmetric = "pan_luma_std"\nlabel = "lit"\nanchor = [100.0, 0.0, 0.0]\n'
+                'view = "in_scatter"\nmax = 2.0\n'
+            )
+            lines = ["shot,ex,ey,ez,lx,ly,lz"]
+            for i in range(6):
+                eye, look = (0.0, 0.0, 2.0), (100.0, 10.0 - 4.0 * i, 0.0)
+                lines.append(f"{i}," + ",".join(f"{v}" for v in (*eye, *look)))
+                img = flat([50, 80, 100], w=320, h=180)
+                c = wm.project(anchor, eye, look, (320, 180))
+                x, y = int(round(c[0])), int(round(c[1]))
+                img[y - 12 : y + 13, x - 12 : x + 13] = 200
+                save(img, d / f"wg-pan@in_scatter-{i:03d}.png")
+                save(flat([50, 80, 100], w=320, h=180), d / f"wg-pan-{i:03d}.png")
+            (d / "wg-pan@in_scatter.poses.csv").write_text("\n".join(lines) + "\n")
+            res = wm.measure(d, d, ["wg-pan"])["wg-pan"]
+            self.assertIsNone(res["pan_luma_std"]["value"])  # no view named: not the final frame
+            self.assertIn("names its `view`", res["pan_luma_std"]["error"])
+            self.assertEqual(res["lit"]["value"], 0.0)
+            self.assertEqual(res["lit"]["shots"], 6)
+            self.assertEqual(res["lit"]["basis"], "view in_scatter luma")
 
     def test_the_camera_centre_projects_to_the_image_centre(self):
         x, y = wm.project((10.0, 0.0, 2.0), (0.0, 0.0, 2.0), (1.0, 0.0, 2.0), (1600, 900))

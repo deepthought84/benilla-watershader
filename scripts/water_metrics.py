@@ -24,7 +24,8 @@ Files a scene reads from <dir> (only the ones its rows need):
     <scene>~noliquid.png        the pose with no liquid drawn ($WATER_NOLIQUID: the world's own
                                 edges, which tier_seam leaves out)
     <scene>~unbanded@albedo.png the albedo view with the bands off ($WOW_WATER_BAND_PUSH=0)
-    <scene>.poses.csv           a moving burst's camera per shot: shot,ex,ey,ez,lx,ly,lz (WoW yd)
+    <scene>.poses.csv           a moving burst's camera per shot: shot,ex,ey,ez,lx,ly,lz (WoW yd);
+                                a view's burst has its own, <scene>@<view>.poses.csv
 
 Region file, scripts/water_regions/<scene>.toml, one per golden water scene: pixel boxes only,
 never install data. Its first comment names what the scene shows and its flake boxes.
@@ -1123,10 +1124,11 @@ def project(point, eye, look, size, fovy_deg=CAM_FOVY_DEG):
     return ((nx + 1) / 2 * w, (1 - ny) / 2 * h)
 
 
-def pan_luma_std(frames, poses, anchor, half=(8, 8), fovy_deg=CAM_FOVY_DEG):
-    """A world-anchored box's luma through a moving burst: the box (`half` px each way) around
-    `anchor` (WoW yd) reprojected per shot from its camera pose; the std of its mean luma over the
-    shots where it lies in frame."""
+def pan_luma_std(frames, poses, anchor, view, half=(8, 8), fovy_deg=CAM_FOVY_DEG):
+    """A world-anchored box's luma through a moving burst of a WATER_VIEW (R22 reads the in-scatter
+    view, so the reflection's sweep across the frame does not count): the box (`half` px each way)
+    around `anchor` (WoW yd) reprojected per shot from its camera pose; the std of its mean luma over
+    the shots where it lies in frame."""
     means = []
     for f, (eye, look) in zip(frames, poses):
         h, w = f.shape[:2]
@@ -1138,7 +1140,8 @@ def pan_luma_std(frames, poses, anchor, half=(8, 8), fovy_deg=CAM_FOVY_DEG):
         if b[0] < 0 or b[1] < 0 or b[2] > w or b[3] > h:
             continue
         means.append(float(crop(luma(f), b).mean()))
-    return {"value": float(np.std(means)) if means else None, "shots": len(means)}
+    return {"value": float(np.std(means)) if means else None, "shots": len(means),
+            "basis": f"view {view} luma"}
 
 
 def halo_count(img, box, thr=12.0):
@@ -1277,7 +1280,7 @@ ROWS: dict[str, Row] = {
     "clip_fraction": Row(clip_fraction, STILL, "lower"),
     "burst_clip_fraction": Row(burst_clip_fraction, [("burst", "full")], "lower"),
     "view_std": Row(view_std, [("burst", "rgb", "view")], "lower"),
-    "pan_luma_std": Row(pan_luma_std, [("burst", "full"), ("poses",)], "lower"),
+    "pan_luma_std": Row(pan_luma_std, [("burst", "full", "view"), ("poses",)], "lower"),
     "halo_count": Row(halo_count, STILL, "lower"),
 }
 
@@ -1411,6 +1414,8 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
     box = params.get("box")
     args: dict = {}
     missing: list[str] = []
+    # A burst's clock and poses are its own: a view's burst logs them beside its shots.
+    burst_sfx = base
     for need in row.needs:
         kind = need[0]
         if kind == "still":
@@ -1433,6 +1438,7 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
                     raise ValueError(f"{name} reads a WATER_VIEW burst: the row names its `view`")
                 args["view"] = view
             sfx = f"{base}@{view}" if view else base
+            burst_sfx = sfx
             shots = scene.burst_paths(sfx)
             if len(shots) < 2:
                 missing.append(f"{scene.name}{sfx}-NNN.png (a burst)")
@@ -1448,15 +1454,15 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
                 else:
                     args["frames"] = frames
         elif kind == "times":
-            t = scene.burst_times(base)
+            t = scene.burst_times(burst_sfx)
             if t is None:
                 every = float(spec.get("every", 2))
-                t = [i * every / 60.0 for i in range(len(scene.burst_paths(base)))]
+                t = [i * every / 60.0 for i in range(len(scene.burst_paths(burst_sfx)))]
             args["times"] = t
         elif kind == "poses":
-            args["poses"] = scene.poses(base)
+            args["poses"] = scene.poses(burst_sfx)
             if args["poses"] is None:
-                missing.append(f"{scene.name}{base}.poses.csv")
+                missing.append(f"{scene.name}{burst_sfx}.poses.csv")
         elif kind == "view":
             _, arg, default, required = need
             view = params.pop(arg, default)

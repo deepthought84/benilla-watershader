@@ -1,9 +1,11 @@
 # The yaw and pitch pan at wg-elwynn-falls-pool (20° and 10° either side over the burst).
 # Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
 # rows measure the image's motion as much as the water's. pan_luma_std holds a box anchored on
-# the pool (the eye stands still, so any point on the ray through x800 y640 of the unpanned frame
-# is that water) and reprojected per shot: the body's light, which the mirror plane's world-anchored
-# rays shade, must not turn with the camera (R22).
+# the far water in the rocks' sun shadow, which only the mirror plane's sun ray finds (sun_vis 0
+# in the unpanned frame; the eye stands still, so any point on the ray through x760 y556 of that
+# frame is that water), reprojected per shot on the in-scatter view: the body's light must not
+# turn with the camera (R22). With the camera pitched down the rocks leave the frame, the ray
+# reads open, and the shadow lifts (61 to 80 luma): the screen-space rays' own limit.
 scene = "water-elwynn-falls-pan"
 [box]
 water = [100, 540, 1500, 720]
@@ -17,5 +19,6 @@ box = "water"
 gate = false
 [[row]]
 metric = "pan_luma_std"
-anchor = [-8292.45, -340.0, 142.03]
+anchor = [-8269.01, -338.05, 142.03]
+view = "in_scatter"
 max = 2.0

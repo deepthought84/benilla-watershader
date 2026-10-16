@@ -42,8 +42,9 @@ box = "water_wide"
 metric = "pop"
 box = "water_wide"
 # The body's light holds still over a 2 s static burst of its views along the far bank's canopy
-# edge: the sky's open share and the in-scatter (R18). The river lies off the mirror planes, so its
-# sky reads open and the shade is the terrain's MCSH alone.
+# edge (R18). The river lies off the mirror planes, where the body reads the sky and the sun open
+# (C10): the sky_vis row is 0 by construction and checks only that rule, and the in-scatter row
+# measures the terrain's MCSH and the ripple. The rays' own stillness is Elwynn stream's row.
 [[row]]
 metric = "view_std"
 label = "bank_edge_sky_vis_std"

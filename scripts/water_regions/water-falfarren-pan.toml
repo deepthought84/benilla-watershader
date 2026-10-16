@@ -2,7 +2,9 @@
 # Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
 # rows measure the image's motion as much as the water's. pan_luma_std holds a box anchored on
 # the river (the eye stands still, so any point on the ray through x1000 y760 of the unpanned
-# frame is that water) and reprojected per shot: the body's light must not turn with the camera.
+# frame is that water), reprojected per shot on the in-scatter view. The river lies off the
+# mirror planes, where the body reads the sky and the sun open (C10), so the row checks that the
+# terrain's MCSH and the ripple hold still under the pan; the rays' own are the Elwynn pans'.
 scene = "water-falfarren-pan"
 [box]
 water = [600, 650, 1500, 880]
@@ -17,4 +19,5 @@ gate = false
 [[row]]
 metric = "pan_luma_std"
 anchor = [2679.6, -2520.31, 167.09]
+view = "in_scatter"
 max = 2.0

@@ -1,7 +1,11 @@
 # The pan burst at wg-elwynn-stream: water-noon's camera swept 20° either side over the burst.
 # Informational (gate = false): the box is fixed on screen while the camera sweeps, so the
-# rows measure the image's motion as much as the water's; pan_luma_std, a world-anchored box
-# reprojected per shot, gates a pan once the in-scatter view exists.
+# rows measure the image's motion as much as the water's. pan_luma_std holds a box anchored on
+# the far water under the far island's canopy, which the mirror plane's world-anchored rays shade
+# (sky_vis 0.87, sun_vis 0.11 in the unpanned frame; the eye stands still, so any point on the ray
+# through x980 y420 of that frame is that water), reprojected per shot on the in-scatter view:
+# the body's light must not turn with the camera (R22). Sky rays along the camera's right turn
+# with it and fail the row (2.6).
 scene = "water-elwynn-stream-pan"
 [box]
 water = [300, 520, 1300, 850]
@@ -13,3 +17,8 @@ gate = false
 metric = "pop"
 box = "water"
 gate = false
+[[row]]
+metric = "pan_luma_std"
+anchor = [-9502.59, -363.87, 61.40]
+view = "in_scatter"
+max = 2.0
