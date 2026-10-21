@@ -142,6 +142,36 @@ pub(super) fn publish_sun_visibility(
     vis.set_if_neq(super::SunVisibility(env));
 }
 
+/// Publish [`super::SunGlintVisibility`] for the Improved Water preview's glint: the gate of
+/// [`publish_sun_visibility`] on its own `FlareGate`, without the lens flare's day/night envelope,
+/// so the glint holds while the sun is up and the flare has ramped out.
+pub(super) fn publish_sun_glint_visibility(
+    light: Res<WowLighting>,
+    mut gate: FlareGate,
+    mut vis: ResMut<super::SunGlintVisibility>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+) {
+    let Some(cam_gt) = cam.iter().next() else {
+        return;
+    };
+    let to_light = light.celestial_dir.normalize_or_zero();
+    if to_light == Vec3::ZERO {
+        return;
+    }
+    let occ1 = occ1_sun(gate.clouds.coverage(to_light * GLARE_DIST));
+    let half = (0.5 * SUN_SIZE * light.sun_disc_scale).atan();
+    let env = gate.envelope(
+        cam_gt.translation(),
+        to_light,
+        1.0,
+        occ1,
+        half,
+        SUN_FLARE_RISE,
+        false,
+    );
+    vis.set_if_neq(super::SunGlintVisibility(env));
+}
+
 /// Publish [`super::MoonVisibility`]: the moon is up and cloud is not over it, slewed like the sun.
 pub(super) fn publish_moon_visibility(
     time: Res<Time>,

@@ -137,6 +137,12 @@ impl Default for SunVisibility {
 #[derive(Resource, Clone, Copy, Debug, PartialEq, Default)]
 pub struct MoonVisibility(pub f32);
 
+/// How much of the sun the Improved Water preview's glint reaches (`benilla_assets::preview`'s
+/// `glint`): [`SunVisibility`]'s horizon, cloud and terrain gate without the lens flare's day/night
+/// envelope. 0 where the preview's glint is off.
+#[derive(Resource, Clone, Copy, Debug, PartialEq, Default)]
+pub struct SunGlintVisibility(pub f32);
+
 /// The celestial layer: spawns the sun, moons and stars at startup and places them each frame.
 pub(crate) struct SunPlugin;
 
@@ -144,6 +150,7 @@ impl Plugin for SunPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SunVisibility>()
             .init_resource::<MoonVisibility>()
+            .init_resource::<SunGlintVisibility>()
             .add_plugins(MaterialPlugin::<CelestialMaterial>::default())
             .add_plugins(MaterialPlugin::<StarMaterial>::default())
             .init_resource::<SunGlare>()
@@ -161,6 +168,15 @@ impl Plugin for SunPlugin {
                     follow::publish_moon_visibility,
                 )
                     .in_set(crate::billboard::BillboardPlace),
+            )
+            // The preview glint's own gate, only while it runs.
+            .add_systems(
+                PostUpdate,
+                follow::publish_sun_glint_visibility
+                    .in_set(crate::billboard::BillboardPlace)
+                    .run_if(|| {
+                        benilla_assets::preview::on(benilla_assets::preview::GLINT)
+                    }),
             )
             // After both resolves, so the skybox, the murk and these bodies agree within a frame.
             .add_systems(
