@@ -2060,8 +2060,9 @@ fn planar_read(
 #endif
 
 /// How far a rough surface's reflection climbs toward higher sky, as a share of its unresolved α
-/// along the view, at full lobe (`flags.w` = 1) and grazing.
-const RR_LIFT: f32 = 0.7;
+/// along the view, at full lobe (`preview.mask.y` = 1) and grazing; half the physical 0.7, so a
+/// far shore's reflection keeps its height.
+const RR_LIFT: f32 = 0.35;
 
 /// The extra spread, in capture texels, under which a mirror is read exactly as before
 /// ([`sample_mirror`]'s tent).
@@ -2127,7 +2128,7 @@ struct RoughLobe {
 
 /// The lobe of a surface with roughness tensor `a2` (world XZ: xx, zz, xz, `WaterSurface::a2`)
 /// seen along `to_view` over its flat normal `flat_n`, at `gain` of the physical lobe
-/// (`water_reflect.flags.w`; 0 is none). The tensor less α0² on each axis is what the surface no
+/// ([`pv_rough_gain`]; 0 is none). The tensor less α0² on each axis is what the surface no
 /// longer resolves, read along the view's bearing and across it.
 fn rough_lobe(a2: vec3<f32>, to_view: vec3<f32>, flat_n: vec3<f32>, gain: f32) -> RoughLobe {
     let a0 = water_reflect.look.surf.x;
@@ -2334,7 +2335,7 @@ fn rough_mirror_dist(second: bool, ruv: vec2<f32>, level: f32, d_eye: f32) -> f3
 /// over the lobe its distance `d_hit` ([`rough_mirror_hit`], negative unknown) lets the screen
 /// show, lifted toward higher sky; within [`RR_CALM_TEXELS`] of no blur, [`sample_mirror`]'s read
 /// exactly. `a` is the weight, strength times coverage times [`plane_trust`] times the eye's
-/// fade. With the lever off (`flags.w` 0) or no chain, [`planar_read`] itself.
+/// fade. With the lever off ([`pv_rough_gain`] 0) or no chain, [`planar_read`] itself.
 fn planar_read_rough(
     params: vec4<f32>,
     second: bool,
@@ -2883,7 +2884,7 @@ const WG_CAP_WARP: f32 = 10.0;
 
 /// The share of Cox and Munk's (1954) wind-driven slope variance, 0.00512 per m/s on a clean
 /// surface, that lies below the capillary octave and joins the roughness as GGX α².
-const WG_CM: f32 = 0.35;
+const WG_CM: f32 = 0.12;
 
 /// Σ w² of the long octaves (0.85, 1.0) and of the short ones (1.0, 0.7, 0.2).
 const WG_W2_LONG: f32 = 1.7225;
@@ -3080,7 +3081,9 @@ fn wg_train(
     let s = amp * (sin(th) + WG_SWELL_STOKES * sin(2.0 * th));
     var o: Swell;
     o.slope = d * (s * keep);
-    o.slope_lo = d * (s * keep * smoothstep(4.0, 8.0, feat));
+    // Half of it slides the reflections' lookup point, so a long swell bends them without
+    // tearing them apart (waves-glint's risk 1).
+    o.slope_lo = d * (0.5 * s * keep * smoothstep(4.0, 8.0, feat));
     let lost = amp * amp * (1.0 + WG_SWELL_STOKES * WG_SWELL_STOKES) * (1.0 - keep * keep);
     o.lost = vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y) * lost;
     return o;
@@ -4279,7 +4282,7 @@ const SC_CAP_SHORE: vec2<f32> = vec2<f32>(8.0, 20.0);
 
 /// The bubble pattern's scale on the shore and at contacts, and on whitecaps (lookups a yard).
 const SC_FOAM_SCALE: f32 = 0.6;
-const SC_CAP_SCALE: f32 = 0.22;
+const SC_CAP_SCALE: f32 = 0.7;
 /// Foam's albedo, gamma: cream where it is thick, a cool lace where it is thin.
 const SC_FOAM_CREAM: vec3<f32> = vec3<f32>(0.96, 0.92, 0.83);
 const SC_FOAM_LACE: vec3<f32> = vec3<f32>(0.78, 0.79, 0.90);
@@ -4486,9 +4489,11 @@ fn sc_crest(xz: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> f32 {
         octave_uv(dx, rot1, f1, z),
         octave_uv(dy, rot1, f1, z),
     ).b;
-    let c0 = saturate((b0 - 0.5) * 3.5 + 0.5);
-    let c1 = saturate((b1 - 0.5) * 3.5 + 0.5);
-    return c1 * smoothstep(0.3, 0.7, c0);
+    // The heights as z-scores of the map's spread (0.5 ± 0.17), unclipped, so only the true crests
+    // of the 40.8 yd octave count, and only where the group's long octave is high too.
+    let z0 = (b0 - 0.5) / 0.17;
+    let z1 = (b1 - 0.5) / 0.17;
+    return saturate((z1 - 1.0) / 1.5) * smoothstep(-0.2, 1.0, z0);
 }
 
 /// One tap of the wall search: the depth `o` pixels off, and whether the point it shows rises
@@ -4685,10 +4690,12 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
 #ifndef WATER_TIER_LOW
     if (ocean && sea > 0.05 && i.shore_far > SC_CAP_SHORE.x) {
         let crest = sc_crest(xz, i.d_xz_dx, i.d_xz_dy);
-        let thr = mix(0.93, 0.72, sea);
-        let cap = smoothstep(thr, thr + 0.1, crest)
+        // Sparse below a fresh breeze, a few per cent of the sea at a full one.
+        let caps_sea = smoothstep(0.2, 0.8, sea);
+        let thr = mix(0.9, 0.35, caps_sea);
+        let cap = smoothstep(thr, 1.0, crest)
             * smoothstep(SC_CAP_SHORE.x, SC_CAP_SHORE.y, i.shore_far)
-            * (0.6 + 0.4 * sea);
+            * (0.3 + 0.4 * caps_sea);
         if (cap > 0.0) {
             let lace = sc_pattern(xz, vec2<f32>(0.0), i.d_xz_dx, i.d_xz_dy, SC_CAP_SCALE);
             let mc = sc_bubble_mask(cap, lace.v, lace.fw);

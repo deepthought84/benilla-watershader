@@ -174,9 +174,7 @@ impl Plugin for SunPlugin {
                 PostUpdate,
                 follow::publish_sun_glint_visibility
                     .in_set(crate::billboard::BillboardPlace)
-                    .run_if(|| {
-                        benilla_assets::preview::on(benilla_assets::preview::GLINT)
-                    }),
+                    .run_if(|| benilla_assets::preview::on(benilla_assets::preview::GLINT)),
             )
             // After both resolves, so the skybox, the murk and these bodies agree within a frame.
             .add_systems(

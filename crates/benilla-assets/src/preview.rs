@@ -51,6 +51,9 @@ pub const SURF: u32 = 1 << 5;
 /// Every feature bit.
 pub const ALL: u32 = (1 << NAMES.len()) - 1;
 
+/// The features that draw something so far; the other names are reserved for later rounds.
+pub const LIVE: u32 = WAVES | GLINT | ROUGH | ROUGH_SKY | SHORE | SURF;
+
 /// The bit of the feature called `name` (any case), if there is one.
 pub fn bit(name: &str) -> Option<u32> {
     NAMES
@@ -121,7 +124,7 @@ pub fn describe(mask: u32) -> String {
     let on: Vec<&str> = NAMES
         .iter()
         .enumerate()
-        .filter(|(i, _)| mask & (1 << i) != 0)
+        .filter(|(i, _)| mask & LIVE & (1 << i) != 0)
         .map(|(_, n)| *n)
         .collect();
     format!("on: {}", on.join(" "))

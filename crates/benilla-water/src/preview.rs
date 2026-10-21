@@ -81,7 +81,7 @@ fn drive_preview(
     static SUB: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
     let (cone, sea_forced) = *SUB.get_or_init(|| {
         (
-            lever::number("ROUGH_CONE", 0.35, 0.0, 2.0),
+            lever::number("ROUGH_CONE", 0.2, 0.0, 2.0),
             lever::number("SEA", -1.0, 0.0, 1.0),
         )
     });
