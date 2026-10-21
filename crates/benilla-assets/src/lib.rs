@@ -15,11 +15,13 @@ use bevy::prelude::*;
 
 pub mod column_grid;
 pub mod coords;
+pub mod dev_shaders;
 /// The Improved Water composite's blend algebra, mirrored on the CPU for its tests.
 #[cfg(test)]
 mod liquid_composite;
 pub mod materials;
 pub mod minimap_grid;
+pub mod preview;
 mod spatial_cache;
 pub mod trace;
 

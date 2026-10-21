@@ -497,6 +497,11 @@ impl LiquidKey {
         if self.has(Self::SSR) {
             defs.push("WATER_SSR");
         }
+        // The Improved Water preview (`crate::preview`), on every stylised pipeline while any of
+        // its features runs; the features branch on the reflection block's mask row.
+        if crate::preview::any() {
+            defs.push("WATER_PREVIEW");
+        }
         defs
     }
 
@@ -783,10 +788,14 @@ pub const ATTRIBUTE_WOW_FLOW: bevy::mesh::MeshVertexAttribute =
 
 impl MaterialExtension for LiquidExt {
     fn vertex_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid.wgsl".into()
+        ShaderRef::Path(crate::dev_shaders::shader_path(
+            "embedded://benilla_assets/shaders/liquid.wgsl",
+        ))
     }
     fn fragment_shader() -> ShaderRef {
-        "embedded://benilla_assets/shaders/liquid.wgsl".into()
+        ShaderRef::Path(crate::dev_shaders::shader_path(
+            "embedded://benilla_assets/shaders/liquid.wgsl",
+        ))
     }
 
     /// Admits [`ATTRIBUTE_WOW_SHORE_OFFSET`], [`ATTRIBUTE_WOW_SURFACE_NORMAL`],

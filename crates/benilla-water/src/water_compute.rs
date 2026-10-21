@@ -234,7 +234,9 @@ fn init_compute_pipelines(
             ),
         ),
     );
-    let shader = asset_server.load("embedded://benilla_water/shaders/water_compute.wgsl");
+    let shader = asset_server.load(benilla_assets::dev_shaders::shader_path(
+        "embedded://benilla_water/shaders/water_compute.wgsl",
+    ));
     let occl = std::array::from_fn(|tier| {
         cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("water_occl_plane".into()),

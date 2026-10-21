@@ -435,8 +435,9 @@ fn init_pipelines(
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
-    let shader: Handle<Shader> =
-        asset_server.load("embedded://benilla_world/shaders/ffx_glow.wgsl");
+    let shader: Handle<Shader> = asset_server.load(benilla_assets::dev_shaders::shader_path(
+        "embedded://benilla_world/shaders/ffx_glow.wgsl",
+    ));
     // Filter passes bind (tex, sampler); the combine adds the blur, the uniform and the wave LUT.
     let layout_filter = BindGroupLayoutDescriptor::new(
         "ffx_glow_filter_layout",

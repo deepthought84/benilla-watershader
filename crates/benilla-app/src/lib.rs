@@ -357,6 +357,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
         );
     }
 
+    // `$WOW_DEV_SHADERS`: the water's shaders off the working tree, also before `AssetPlugin`.
+    benilla_assets::dev_shaders::register_dev_shader_sources(&mut app);
+
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
