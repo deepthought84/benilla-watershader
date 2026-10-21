@@ -1049,6 +1049,8 @@ pub(super) fn setup_liquid(
                     ripples: ripples.clone(),
                     reflection: pass.reflection.clone(),
                     reflection2: pass.reflection2.clone(),
+                    reflection_chain: pass.reflection_chain.clone(),
+                    reflection_chain2: pass.reflection_chain2.clone(),
                     scene_color: pass.scene_color.clone(),
                     probe: pass.probe.clone(),
                     hiz: pass.hiz.clone(),

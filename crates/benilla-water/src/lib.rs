@@ -25,6 +25,8 @@ mod hiz;
 mod liquid_planar;
 mod look;
 mod mcsh;
+mod mirror_chain;
+mod preview;
 mod probe;
 mod reflect;
 mod ripple_sim;
@@ -65,18 +67,22 @@ impl Plugin for ImprovedWaterPlugin {
         bevy::asset::embedded_asset!(app, "shaders/water_compute.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/sky_lut.wgsl");
         bevy::asset::embedded_asset!(app, "shaders/scene_snapshot.wgsl");
+        bevy::asset::embedded_asset!(app, "shaders/mirror_chain.wgsl");
         // The surface's clock, the mirrors' block and targets, then the wave simulation, the depth
         // passes and the probes, each pass inert unless the Improved Water look is selected.
         clock::register(app);
         app.init_resource::<look::WaterLook>();
         mcsh::register(app);
         reflect::register(app);
+        preview::register(app);
         ripple_sim::register(app);
         world_view::register(app);
         hiz::register(app);
         scene_color::register(app);
         sky_lut::register(app);
         water_compute::register(app);
+        // After the water's compute pass, whose node its pass follows.
+        mirror_chain::register(app);
         floor_share::register(app);
         depth::register(app);
         probe::register(app);
@@ -151,6 +157,8 @@ fn publish_pass_images(
     commands.insert_resource(WaterPassImages {
         reflection: reflect.image.clone(),
         reflection2: reflect.image2.clone(),
+        reflection_chain: reflect.chain.clone(),
+        reflection_chain2: reflect.chain2.clone(),
         scene_color: scene_color.image.clone(),
         probe: probe.cube.clone(),
         hiz: hiz.image.clone(),

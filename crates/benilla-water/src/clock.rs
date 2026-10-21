@@ -47,6 +47,11 @@ impl WaterClock {
     pub(crate) fn lanes(&self) -> [f32; CLOCK_FLOATS] {
         clock_lanes(self.secs)
     }
+
+    /// Seconds of water time, for the phases kept elsewhere (`super::preview`).
+    pub(crate) fn secs(&self) -> f64 {
+        self.secs
+    }
 }
 
 /// The block at `secs`: `0..16` the eight map offsets as `(u, v)` pairs, ripples then foam, each
@@ -65,7 +70,7 @@ fn clock_lanes(secs: f64) -> [f32; CLOCK_FLOATS] {
 
 /// `x mod 1`, taken in f64 and then narrowed; a remainder that rounds up to 1 in f32 is 0, the
 /// same phase.
-fn cycle(x: f64) -> f32 {
+pub(crate) fn cycle(x: f64) -> f32 {
     let f = x.rem_euclid(1.0) as f32;
     if f < 1.0 {
         f

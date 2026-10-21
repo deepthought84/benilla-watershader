@@ -116,9 +116,10 @@ pub(crate) const PROBE_NEAR: f32 = 0.1;
 /// halves them again.
 const PROBE_FACE: u32 = 1024;
 
-/// Whether the cube is prefiltered into blurred mips; it is read sharp.
+/// Whether the cube is prefiltered into blurred mips: only for the preview's rough reflections,
+/// which read the chain where the surface is rough; it is read sharp otherwise.
 pub(crate) fn probe_blur() -> bool {
-    false
+    benilla_assets::preview::on(benilla_assets::preview::ROUGH)
 }
 
 /// How many mip levels the probe cube carries, derived from its face size.

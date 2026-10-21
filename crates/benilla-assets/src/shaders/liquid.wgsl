@@ -225,8 +225,43 @@ struct WaterBody {
     e_sun_foam: vec4<f32>,
 };
 
-// The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect`: one
-// writer per row, and a row no writer fills reads 0.
+// The Improved Water preview's rows (`benilla_water`'s `preview`), the last member of
+// `WaterReflect`: zero where the preview, or the feature a row feeds, is off. Declared for every
+// liquid pipeline, since the buffer has this shape for all of them; read under `WATER_PREVIEW`.
+struct WaterPreview {
+    // x the feature bits (`benilla_assets::preview`, exact in an f32), y the rough reflection's
+    // cone share, z the sea state's override (0: derived from the wind), w spare.
+    mask: vec4<f32>,
+    // x caustics, y lights, z sparkles, w river foam.
+    gains: vec4<f32>,
+    // Phases in [0, 1): x the river's, y the weather's, z the wake's; w spare.
+    clocks: vec4<f32>,
+    // xy the wind's to-direction in world XZ (unit), z its speed in yd/s with the storm in it, w
+    // the storm blend.
+    wind: vec4<f32>,
+    // x rain, y snow, z the sea state 0..1, w the river mist's gain.
+    weather: vec4<f32>,
+    // xyz the three swell trains' phases as fractions of their periods, w the glint's own sun
+    // reach without the flare's envelope (0: `sun.w`).
+    swell: vec4<f32>,
+    // xy the gust field's offset and zw the slick field's, in their tiles.
+    gust: vec4<f32>,
+    // xy the capillary octave's drift in its tiles, zw spare.
+    cap: vec4<f32>,
+    // The five ripple octaves' downwind drifts under `waves`: (d0, d1), (d2, d3), (d4, spare).
+    drift: array<vec4<f32>, 3>,
+    // Eight fall lines, two rows each.
+    falls: array<vec4<f32>, 16>,
+    // The swimmers' and rings' rows.
+    wake: array<vec4<f32>, 26>,
+    // The view from below the surface.
+    under: array<vec4<f32>, 16>,
+    // Room for shader-only iteration.
+    spare: array<vec4<f32>, 8>,
+};
+
+// The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect` but the
+// preview's: one writer per row, and a row no writer fills reads 0.
 struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
     // occlusion this frame (1 on, with water on screen the floor can serve), z the body's
@@ -333,6 +368,8 @@ struct WaterReflect {
     cycle: vec4<f32>,
     // The stylised look's rows (`benilla_water`'s `look`).
     look: WaterLook,
+    // The Improved Water preview's rows (`benilla_water`'s `preview`).
+    preview: WaterPreview,
 };
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var<storage, read> water_reflect: WaterReflect;
@@ -931,6 +968,57 @@ fn stylised_lava(sheet: vec3<f32>, world_xz: vec2<f32>, t: f32) -> vec3<f32> {
 }
 
 #ifdef WATER_STYLISED
+#ifdef WATER_PREVIEW
+// ---- the Improved Water preview: its feature bits and shared helpers ---------------------------
+//
+// One def (`WATER_PREVIEW`) on every stylised pipeline while any feature runs; each feature then
+// branches on its bit of `preview.mask.x` (`benilla_assets::preview`), a storage read, so the
+// branch is uniform and costs no recompile.
+const PV_WAVES: u32 = 1u;
+const PV_GLINT: u32 = 2u;
+const PV_ROUGH: u32 = 4u;
+const PV_ROUGH_SKY: u32 = 8u;
+const PV_SHORE: u32 = 16u;
+const PV_SURF: u32 = 32u;
+
+/// The preview's feature bits this run.
+fn pv_bits() -> u32 {
+    return u32(max(water_reflect.preview.mask.x, 0.0));
+}
+
+/// Whether any of `bits` runs.
+fn pv_on(bits: u32) -> bool {
+    return (pv_bits() & bits) != 0u;
+}
+
+/// Ripple octave `i`'s downwind drift under `waves` (`preview.drift`), in its tiles.
+fn pv_drift(i: i32) -> vec2<f32> {
+    let r = water_reflect.preview.drift[i / 2];
+    return select(r.xy, r.zw, (i & 1) == 1);
+}
+
+/// Ripple octave `i`'s drift as the surface reads it: downwind under `waves`, today's otherwise.
+fn pv_octave_drift(i: i32) -> vec2<f32> {
+    return select(water_reflect.drift[i], pv_drift(i), pv_on(PV_WAVES));
+}
+
+/// The sea state, 0..1: the wind's (`preview.weather.z`), or the override the CPU folded in.
+fn pv_sea() -> f32 {
+    return saturate(water_reflect.preview.weather.z);
+}
+
+/// How much of the sun the glint reaches: its own gate where one runs (`preview.swell.w`), the
+/// lens flare's (`sun.w`) otherwise.
+fn pv_glint_reach() -> f32 {
+    let r = water_reflect.preview.swell.w;
+    return select(water_reflect.sun.w, r, r > 0.0);
+}
+
+/// The rough reflections' share of the physical lobe, 0 with `rough` off.
+fn pv_rough_gain() -> f32 {
+    return select(0.0, max(water_reflect.preview.mask.y, 0.0), pv_on(PV_ROUGH));
+}
+#endif // WATER_PREVIEW
 // ── The stylised region ────────────────────────────────────────────────────────────────────────
 //
 // Everything from here to `stylised_water`'s end compiles only into the stylised water pipelines
@@ -1917,6 +2005,542 @@ fn planar_read(
     }
 }
 
+#ifdef WATER_PREVIEW
+// ---- the reflections processed by roughness (Phase 3 preview: REF-2, REF-4, REF-5, REF-6, REF-12) -
+//
+// A module for `liquid.wgsl`'s stylised region. It is pasted after `planar_read`, inside
+// `#ifdef WATER_STYLISED` (which always carries `WATER_SCENE_DEPTH`), and reads that file's
+// bindings and helpers: `water_reflect`, `view`, `reflection_tex`/`reflection_tex2`,
+// `reflection_samp`, `probe_tex`/`probe_samp`, `floor_occ`/`scene_samp`, `sample_mirror`,
+// `sample_mirror2`, `plane_trust`, `probe_dir_march`, `probe_dir_depth`, `probe_fog_shares`,
+// `probe_refog`, `FLOOR_CONTACT_REACH`, `ProbeSlot`. Nothing in it takes a derivative or an
+// implicit-LOD sample, so every function may be called under the per-fragment branches.
+//
+// What a rough surface reflects. A surface whose slopes spread α per axis (GGX, α² = 2σ²) sends
+// its reflected ray √2·α wide; a reflection doubles a facet's tilt. A tilt in the plane of
+// incidence turns the ray up or down by twice the tilt, a tilt across it turns the ray sideways by
+// twice the tilt times μ = n·v, so at a grazing view the lobe is tall and narrow: the vertical
+// streak. Only what the surface no longer resolves blurs: the roughness tensor less the calm
+// surface's α0² (`surface_lost2`'s law per axis), so near water, where every octave resolves,
+// reads the mirror exactly as before, and the ripple's slide of the lookup point stays the
+// reflection's only motion there.
+//
+// The lobe is an angle at the water; the image it blurs is seen from elsewhere. Something `D`
+// yards behind the reflecting point, seen by the eye `d_eye` yards in front of it, spreads over
+// `D/(d_eye + D)` of the lobe on the screen: 0 at a contact, the whole lobe for the sky. That is
+// what keeps a post, a hull and a bank attached to their reflections while the far shore softens.
+// Seen from a probe's capture point `d_geom` yards from the same thing, the lobe spreads `D/d_geom`
+// of its angle in the cube.
+//
+// Rough facets the eye sees lean toward it, so a rough surface sees higher sky: the lobe's centre
+// climbs by about 0.7·α at grazing, scaled with the blur and taken through the same contact share,
+// so a reflection stays on its waterline.
+//
+// The blur reads prefiltered images, never a wide kernel on a sharp one: the mirrors' chains
+// (`reflection_chain`, five levels from half the capture's size, premultiplied by coverage) and
+// the probe cube's cone chain (`probe_filter.wgsl`). A level is picked by the lobe's narrow side;
+// a column of taps, evenly spaced up the screen's vertical through the lookup point and never
+// further apart than twice the level's own spread, makes the tall side. Taps that close sum to a
+// smooth profile, so nothing is drawn twice, and none is jittered, so a still camera gets a still
+// image.
+
+// The planar mirrors' roughness chains (`benilla_water`'s mirror chain dispatch in the water
+// compute pass): each capture downsampled through five levels from half its size by a [1 3 3 1]
+// tent, coverage-premultiplied as the capture is (it clears to transparent black), so level k
+// holds the capture blurred to about `RR_CHAIN_SIGMA0`·2^k capture texels. Read through
+// `reflection_samp` (linear, clamped, trilinear).
+@group(#{MATERIAL_BIND_GROUP}) @binding(123) var reflection_chain: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(124) var reflection_chain2: texture_2d<f32>;
+#ifdef WATER_MIRROR_DIST
+// The mirrors' hit distances (REF-1): the mirrored eye's path length to what each capture texel
+// shows, yards, 10000 for the dome, the nearest of each 2×2 capture texels at half the capture's
+// size, each further level the nearest of four. Read by `textureLoad`.
+@group(#{MATERIAL_BIND_GROUP}) @binding(125) var reflection_dist: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(126) var reflection_dist2: texture_2d<f32>;
+#endif
+
+/// How far a rough surface's reflection climbs toward higher sky, as a share of its unresolved α
+/// along the view, at full lobe (`flags.w` = 1) and grazing.
+const RR_LIFT: f32 = 0.7;
+
+/// The extra spread, in capture texels, under which a mirror is read exactly as before
+/// ([`sample_mirror`]'s tent).
+const RR_CALM_TEXELS: f32 = 0.5;
+
+/// [`sample_mirror`]'s own spread at radius 1, capture texels, one σ: four bilinear taps on the
+/// diagonals at ±1 texel (σ² = 1 + 1/6).
+const RR_TENT_SIGMA: f32 = 1.08;
+
+/// The chain's level-0 spread in capture texels, one σ: the [1 3 3 1] tent (σ² = 0.75) read
+/// bilinearly at twice the capture's texel (σ² = 4/6). Each level below doubles it, within a
+/// tenth.
+const RR_CHAIN_SIGMA0: f32 = 1.2;
+
+/// The extra spread, capture texels, of a mirror read at no plane trust: a badly fitted surface
+/// blurs as it fades into the tiers beneath.
+const RR_TRUST_BLUR: f32 = 4.0;
+
+/// The eye's height over the higher of the water and the mirror plane, yards, from which the
+/// mirror fades in, and at which it is whole. The capture's oblique clip degenerates within a
+/// quarter yard of its plane.
+const RR_EYE_FADE: vec2<f32> = vec2<f32>(0.3, 0.9);
+
+/// The angle the screen's axes are measured over at a lookup point, radians.
+const RR_AXIS_ANGLE: f32 = 0.01;
+
+/// The probe chain's spread per level, radians, one σ a side: level k convolves level k − 1 with a
+/// cosine cone (`probe::probe_cone`: 3, 6, 12, 22 and 36°), whose taps spread cone/2 a side. Each
+/// pair is log2 of the level's spread and one over log2 of the step to the next.
+const RR_PROBE_SIGMA1: f32 = 0.026;
+const RR_PROBE_L1: f32 = -5.2653;
+const RR_PROBE_L2: f32 = -4.0933;
+const RR_PROBE_L3: f32 = -3.0613;
+const RR_PROBE_L4: f32 = -2.1436;
+const RR_PROBE_K1: f32 = 0.8532;
+const RR_PROBE_K2: f32 = 0.9690;
+const RR_PROBE_K3: f32 = 1.0897;
+const RR_PROBE_K4: f32 = 1.2916;
+
+// The column's taps per tier: up to about 1.4:1, 2.4:1 and 3.6:1 of stretch before the level
+// rises. Low's two mirror taps cost what `sample_mirror`'s four bilinear taps do, and its probe is
+// one mip-biased read.
+#ifdef WATER_TIER_HIGH
+const RR_MIRROR_TAPS: i32 = 6;
+const RR_PROBE_TAPS: i32 = 4;
+#else
+#ifdef WATER_TIER_LOW
+const RR_MIRROR_TAPS: i32 = 2;
+const RR_PROBE_TAPS: i32 = 1;
+#else
+const RR_MIRROR_TAPS: i32 = 4;
+const RR_PROBE_TAPS: i32 = 3;
+#endif
+#endif
+
+/// The reflected lobe at a fragment, radians: its spread up (in the plane of incidence) and
+/// across, one σ, and how far its centre climbs toward higher sky.
+struct RoughLobe {
+    up: f32,
+    side: f32,
+    lift: f32,
+};
+
+/// The lobe of a surface with roughness tensor `a2` (world XZ: xx, zz, xz, `WaterSurface::a2`)
+/// seen along `to_view` over its flat normal `flat_n`, at `gain` of the physical lobe
+/// (`water_reflect.flags.w`; 0 is none). The tensor less α0² on each axis is what the surface no
+/// longer resolves, read along the view's bearing and across it.
+fn rough_lobe(a2: vec3<f32>, to_view: vec3<f32>, flat_n: vec3<f32>, gain: f32) -> RoughLobe {
+    let a0 = water_reflect.look.surf.x;
+    let lost = vec3<f32>(max(a2.x - a0 * a0, 0.0), max(a2.y - a0 * a0, 0.0), a2.z);
+    // The view's bearing over the surface; looking straight down every bearing is the same.
+    let bearing = to_view.xz;
+    let bl = length(bearing);
+    let t = select(vec2<f32>(1.0, 0.0), bearing / max(bl, 1e-6), bl > 1e-4);
+    let along = lost.x * t.x * t.x + lost.y * t.y * t.y + 2.0 * lost.z * t.x * t.y;
+    let across = lost.x * t.y * t.y + lost.y * t.x * t.x - 2.0 * lost.z * t.x * t.y;
+    let a_up = sqrt(max(along, 0.0));
+    let mu = saturate(dot(flat_n, to_view));
+    let k = 1.41421356 * max(gain, 0.0);
+    return RoughLobe(
+        k * a_up,
+        k * sqrt(max(across, 0.0)) * mu,
+        RR_LIFT * max(gain, 0.0) * a_up * (1.0 - mu),
+    );
+}
+
+/// The share of the lobe a reflected thing `d_hit` yards behind the water shows to an eye `d_eye`
+/// yards in front of it: `D/(d_eye + D)`. A negative `d_hit` is not known, and takes the whole
+/// lobe.
+fn rough_contact(d_hit: f32, d_eye: f32) -> f32 {
+    if (d_hit < 0.0) {
+        return 1.0;
+    }
+    return d_hit / max(d_hit + d_eye, 1e-3);
+}
+
+/// How far behind mirror water the reflected thing lies, yards, at the fragment `frag_coord`: the
+/// compute pass's plane march along the flat reflected ray (`floor_occ.a`, its `rho_c`, with
+/// [`floor_rho_c`] undone: `D = R·√(ρ/(1 − ρ))`), the bank, post or deck it met, or how far it got
+/// before it left the frame, which the thing lies at least as far as. A texel with no plane point
+/// holds 0, a contact. Negative, not known, on a frame the pass did not march.
+fn rough_mirror_hit(frag_coord: vec2<f32>) -> f32 {
+    if (water_reflect.look.quality.y < 0.5) {
+        return -1.0;
+    }
+    let uv = frag_coord_to_uv(frag_coord);
+    let rho = clamp(textureSampleLevel(floor_occ, scene_samp, uv, 0.0).a, 0.0, 0.999);
+    return FLOOR_CONTACT_REACH * sqrt(rho / (1.0 - rho));
+}
+
+/// `dir` turned toward the zenith by about `lift` radians near the horizon, less toward the top.
+fn rough_lift_dir(dir: vec3<f32>, lift: f32) -> vec3<f32> {
+    if (lift <= 0.0) {
+        return dir;
+    }
+    return normalize(dir + vec3<f32>(0.0, lift, 0.0));
+}
+
+/// The α the sky floor is read with under the lobe, so the floor and the mirrors blur one sky
+/// alike: the lobe's spread up as an α (σ = √2·α), never more than the floor's own `alpha`.
+fn rough_floor_alpha(lobe: RoughLobe, alpha: f32) -> f32 {
+    return min(lobe.up * 0.70710678, alpha);
+}
+
+/// How much a mirror shows at the eye's height `eye_y` over a surface at `surface_y` served by the
+/// plane `plane_y`: none at or below either, whole from [`RR_EYE_FADE`]'s end.
+fn rough_eye_fade(eye_y: f32, surface_y: f32, plane_y: f32) -> f32 {
+    return smoothstep(RR_EYE_FADE.x, RR_EYE_FADE.y, eye_y - max(surface_y, plane_y));
+}
+
+/// The capture's UV per radian at the lookup point `p` (world: the lifted point the main camera
+/// projects to `uv`), in the capture's `1 − u` frame: `xy` toward higher reflected elevation, down
+/// the screen along the perspective's vertical through `p`, `zw` across it. The projection's
+/// centre scale where `p` does not project (`usable` false, or an axis behind the eye).
+fn rough_mirror_axes(p: vec3<f32>, uv: vec2<f32>, usable: bool) -> vec4<f32> {
+    let centre = vec4<f32>(
+        0.0,
+        0.5 * view.clip_from_view[1][1],
+        0.5 * view.clip_from_view[0][0],
+        0.0,
+    );
+    if (!usable) {
+        return centre;
+    }
+    let to_p = p - view.world_position.xyz;
+    let dist = length(to_p);
+    let v = to_p / max(dist, 1e-4);
+    // Up across the ray in its vertical plane, and the horizontal across the ray; |v × up| is
+    // |up − v·v.y| for a unit ray.
+    let up_raw = vec3<f32>(0.0, 1.0, 0.0) - v * v.y;
+    let ul = length(up_raw);
+    if (ul < 1e-4) {
+        return centre;
+    }
+    let up_dir = up_raw / ul;
+    let side_dir = cross(v, vec3<f32>(0.0, 1.0, 0.0)) / ul;
+    let reach = RR_AXIS_ANGLE * dist;
+    // Lower in the mirrored world is higher in the reflected one.
+    let a = position_world_to_ndc(p - up_dir * reach);
+    let b = position_world_to_ndc(p + side_dir * reach);
+    if (a.z <= 0.0 || b.z <= 0.0) {
+        return centre;
+    }
+    let da = (ndc_to_uv(a.xy) - uv) / RR_AXIS_ANGLE;
+    let db = (ndc_to_uv(b.xy) - uv) / RR_AXIS_ANGLE;
+    return vec4<f32>(-da.x, da.y, -db.x, db.y);
+}
+
+/// Whether mirror `second`'s chain is this capture's: half its size, rounded down. A material
+/// holding the placeholder, or a chain not yet rebuilt after a resize, is not.
+fn rough_chain_ready(second: bool) -> bool {
+    var cap: vec2<u32>;
+    var chain: vec2<u32>;
+    if (second) {
+        cap = textureDimensions(reflection_tex2);
+        chain = textureDimensions(reflection_chain2);
+    } else {
+        cap = textureDimensions(reflection_tex);
+        chain = textureDimensions(reflection_chain);
+    }
+    return all(chain == max(cap / 2u, vec2<u32>(1u)));
+}
+
+/// The chain level for a lobe `sv` capture texels up and `ss` across, one σ, read by a column of
+/// `taps`: the level whose spread is the lobe's across, or the least the column can stretch to its
+/// up, at most `top`. `x` the level, `y` its spread in capture texels.
+fn rough_chain_level(sv: f32, ss: f32, taps: i32, top: f32) -> vec2<f32> {
+    let n = f32(taps);
+    let reach = sqrt(1.0 + (n * n - 1.0) / 3.0);
+    let want = max(max(ss, sv / reach), RR_CHAIN_SIGMA0);
+    let lod = clamp(log2(want / RR_CHAIN_SIGMA0), 0.0, top);
+    return vec2<f32>(lod, RR_CHAIN_SIGMA0 * exp2(lod));
+}
+
+/// Mirror `second`'s chain read over a lobe `sv_x` capture texels up and `ss_x` across (one σ,
+/// beyond the tent's own) at `uv`, with `dv` and `ds` the UV of one capture texel up and across:
+/// [`RR_MIRROR_TAPS`] taps evenly up the vertical at [`rough_chain_level`]'s level, their spread
+/// with the level's making `sv`, alternate taps a quarter of the level's spread to either side so
+/// a coarse level's bilinear facets do not line up down the column. The mean is premultiplied by
+/// coverage, as [`sample_mirror`]'s is.
+fn rough_mirror_column(
+    second: bool,
+    uv: vec2<f32>,
+    dv: vec2<f32>,
+    ds: vec2<f32>,
+    sv_x: f32,
+    ss_x: f32,
+    texel: vec2<f32>,
+) -> vec4<f32> {
+    let n = f32(RR_MIRROR_TAPS);
+    let sv = sqrt(sv_x * sv_x + RR_TENT_SIGMA * RR_TENT_SIGMA);
+    let ss = sqrt(ss_x * ss_x + RR_TENT_SIGMA * RR_TENT_SIGMA);
+    let levels = select(
+        textureNumLevels(reflection_chain),
+        textureNumLevels(reflection_chain2),
+        second,
+    );
+    let lv = rough_chain_level(sv, ss, RR_MIRROR_TAPS, f32(levels - 1u));
+    var gap = 0.0;
+    var zig = 0.0;
+    if (RR_MIRROR_TAPS > 1) {
+        gap = min(sqrt(max(sv * sv - lv.y * lv.y, 0.0) * 12.0 / (n * n - 1.0)), 2.0 * lv.y);
+        zig = 0.25 * lv.y;
+    }
+    // One capture texel in from each edge: half a chain texel, where the bilinear read stays
+    // inside.
+    let edge = 1.0 / texel;
+    var acc = vec4<f32>(0.0);
+    for (var i = 0; i < RR_MIRROR_TAPS; i = i + 1) {
+        let along = (f32(i) - 0.5 * (n - 1.0)) * gap;
+        let aside = select(-zig, zig, (i & 1) == 1);
+        let q = clamp(uv + dv * along + ds * aside, edge, vec2<f32>(1.0) - edge);
+        if (second) {
+            acc = acc + textureSampleLevel(reflection_chain2, reflection_samp, q, lv.x);
+        } else {
+            acc = acc + textureSampleLevel(reflection_chain, reflection_samp, q, lv.x);
+        }
+    }
+    acc = acc / n;
+    return vec4<f32>(acc.rgb / max(acc.a, 1.0e-4), acc.a);
+}
+
+#ifdef WATER_MIRROR_DIST
+/// How far behind the water the nearest thing mirror `second` shows over a lobe's reach lies,
+/// yards: its distance chain at `level` (each texel the nearest of the capture texels under it)
+/// at `ruv`, less the eye's `d_eye`, the mirrored eye's path to the plane along the same ray.
+/// Negative for the dome.
+fn rough_mirror_dist(second: bool, ruv: vec2<f32>, level: f32, d_eye: f32) -> f32 {
+    var path = 0.0;
+    if (second) {
+        let l = i32(clamp(level, 0.0, f32(textureNumLevels(reflection_dist2) - 1u)));
+        let size = vec2<f32>(textureDimensions(reflection_dist2, l));
+        let px = vec2<i32>(clamp(ruv, vec2<f32>(0.0), vec2<f32>(0.9999)) * size);
+        path = textureLoad(reflection_dist2, px, l).r;
+    } else {
+        let l = i32(clamp(level, 0.0, f32(textureNumLevels(reflection_dist) - 1u)));
+        let size = vec2<f32>(textureDimensions(reflection_dist, l));
+        let px = vec2<i32>(clamp(ruv, vec2<f32>(0.0), vec2<f32>(0.9999)) * size);
+        path = textureLoad(reflection_dist, px, l).r;
+    }
+    if (path > 9000.0) {
+        return -1.0;
+    }
+    return max(path - d_eye, 0.0);
+}
+#endif
+
+/// One planar mirror's read for this fragment over the surface's lobe: [`planar_read`]'s gates,
+/// plane-error reprojection and slide of the lookup point by the ripple, then the capture read
+/// over the lobe its distance `d_hit` ([`rough_mirror_hit`], negative unknown) lets the screen
+/// show, lifted toward higher sky; within [`RR_CALM_TEXELS`] of no blur, [`sample_mirror`]'s read
+/// exactly. `a` is the weight, strength times coverage times [`plane_trust`] times the eye's
+/// fade. With the lever off (`flags.w` 0) or no chain, [`planar_read`] itself.
+fn planar_read_rough(
+    params: vec4<f32>,
+    second: bool,
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    frag_coord: vec2<f32>,
+    tilt: f32,
+    lobe: RoughLobe,
+    d_hit: f32,
+) -> vec4<f32> {
+    if (pv_rough_gain() <= 0.0 || !rough_chain_ready(second)) {
+        return planar_read(params, second, world_pos, n, frag_coord, tilt);
+    }
+    let trust = plane_trust(abs(world_pos.y - params.x), params.w, tilt);
+    let eye = view.world_position.xyz;
+    let fade = rough_eye_fade(eye.y, world_pos.y, params.x);
+    if (params.y <= 0.0 || trust <= 0.0 || fade <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    // `planar_read`'s lookup: the rippled point lifted by twice its plane error, as the main
+    // camera projects it, read at `1 − u`.
+    let mirror_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
+    let p = mirror_pos + vec3<f32>(0.0, 2.0 * (params.x - mirror_pos.y), 0.0);
+    let lifted = position_world_to_ndc(p);
+    let usable = lifted.z > 0.0 && all(abs(lifted.xy) < vec2<f32>(1.5));
+    let uv = select(frag_coord_to_uv(frag_coord), ndc_to_uv(lifted.xy), usable);
+    let ruv = vec2<f32>(1.0 - uv.x, uv.y);
+    let axes = rough_mirror_axes(p, uv, usable);
+    var texel: vec2<f32>;
+    if (second) {
+        texel = vec2<f32>(textureDimensions(reflection_tex2));
+    } else {
+        texel = vec2<f32>(textureDimensions(reflection_tex));
+    }
+    // Capture texels per radian up and across.
+    let jv = max(length(axes.xy * texel), 1e-3);
+    let js = max(length(axes.zw * texel), 1e-3);
+    let d_eye = distance(eye, world_pos);
+#ifdef WATER_MIRROR_DIST
+    // The nearest thing over the widest the lobe can reach, a level past the column's.
+    let wide = rough_chain_level(lobe.up * jv, lobe.side * js, RR_MIRROR_TAPS, 4.0);
+    let h = rough_contact(rough_mirror_dist(second, ruv, wide.x + 2.0, d_eye), d_eye);
+#else
+    let h = rough_contact(d_hit, d_eye);
+#endif
+    let trust_px = RR_TRUST_BLUR * (1.0 - trust);
+    let sv = sqrt((lobe.up * h * jv) * (lobe.up * h * jv) + trust_px * trust_px);
+    let ss = sqrt((lobe.side * h * js) * (lobe.side * h * js) + trust_px * trust_px);
+    let centre = ruv + axes.xy * (lobe.lift * h);
+    var mirrored: vec4<f32>;
+    if (max(sv, ss) < RR_CALM_TEXELS) {
+        let c = clamp(centre, vec2<f32>(0.002), vec2<f32>(0.998));
+        if (second) {
+            mirrored = sample_mirror2(c, water_reflect.flags.x);
+        } else {
+            mirrored = sample_mirror(c, water_reflect.flags.x);
+        }
+    } else {
+        mirrored = rough_mirror_column(
+            second,
+            centre,
+            axes.xy / jv,
+            axes.zw / js,
+            sv,
+            ss,
+            texel,
+        );
+    }
+    return vec4<f32>(mirrored.rgb, saturate(min(params.y, 1.0) * mirrored.a * trust * fade));
+}
+
+/// The probe chain level whose spread is `sigma` radians: between the sharp capture and level 1
+/// a straight blend, past it one level for each step of [`RR_PROBE_SIGMA1`]'s table, at most 5.
+fn rough_probe_lod(sigma: f32) -> f32 {
+    if (sigma <= RR_PROBE_SIGMA1) {
+        return max(sigma, 0.0) / RR_PROBE_SIGMA1;
+    }
+    let l = log2(sigma);
+    if (l <= RR_PROBE_L2) {
+        return 1.0 + (l - RR_PROBE_L1) * RR_PROBE_K1;
+    }
+    if (l <= RR_PROBE_L3) {
+        return 2.0 + (l - RR_PROBE_L2) * RR_PROBE_K2;
+    }
+    if (l <= RR_PROBE_L4) {
+        return 3.0 + (l - RR_PROBE_L3) * RR_PROBE_K3;
+    }
+    return min(4.0 + (l - RR_PROBE_L4) * RR_PROBE_K4, 5.0);
+}
+
+/// [`rough_probe_lod`] undone: the spread of the probe chain at `lod`, radians.
+fn rough_probe_sigma(lod: f32) -> f32 {
+    if (lod <= 1.0) {
+        return max(lod, 0.0) * RR_PROBE_SIGMA1;
+    }
+    if (lod <= 2.0) {
+        return exp2(RR_PROBE_L1 + (lod - 1.0) / RR_PROBE_K1);
+    }
+    if (lod <= 3.0) {
+        return exp2(RR_PROBE_L2 + (lod - 2.0) / RR_PROBE_K2);
+    }
+    if (lod <= 4.0) {
+        return exp2(RR_PROBE_L3 + (lod - 3.0) / RR_PROBE_K3);
+    }
+    return exp2(RR_PROBE_L4 + (min(lod, 5.0) - 4.0) / RR_PROBE_K4);
+}
+
+/// The probe's calm read along `dir` in slot `idx`: the capture at level 0 and, at a softening
+/// `spread` radians, four more reads around it, averaged ([`sample_probe`]'s).
+fn rough_probe_soft(dir: vec3<f32>, idx: i32, spread: f32) -> vec3<f32> {
+    let centre = textureSampleLevel(probe_tex, probe_samp, dir, idx, 0.0).rgb;
+    if (spread <= 0.0) {
+        return centre;
+    }
+    let helper = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(dir.y) > 0.9);
+    let t1 = normalize(cross(dir, helper)) * spread;
+    let t2 = cross(dir, t1);
+    var sum = centre;
+    sum = sum + textureSampleLevel(probe_tex, probe_samp, dir + t1, idx, 0.0).rgb;
+    sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t1, idx, 0.0).rgb;
+    sum = sum + textureSampleLevel(probe_tex, probe_samp, dir + t2, idx, 0.0).rgb;
+    sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t2, idx, 0.0).rgb;
+    return sum * 0.2;
+}
+
+/// One probe's contribution over the lobe: [`sample_probe`]'s correction of the reflected
+/// direction against the cube's stored distances and its fog re-base, the colour read on the
+/// cube's chain. The lobe at the water `p` spreads `D/d_geom` of its angle seen from the capture
+/// point, `D` the hit's distance from `p` and `d_geom` from the capture point (the whole lobe for
+/// sky); within the calm softening's own spread, [`sample_probe`]'s read at level 0. With the lever
+/// off or a cube without a chain (`probe_box_max.z` 0), [`sample_probe`] itself.
+fn sample_probe_rough(
+    sl: ProbeSlot,
+    idx: i32,
+    p: vec3<f32>,
+    r: vec3<f32>,
+    steps: i32,
+    lobe: RoughLobe,
+) -> vec3<f32> {
+    let top = water_reflect.probe_box_max.z;
+    if (pv_rough_gain() <= 0.0 || top < 1.0) {
+        return sample_probe(sl, idx, p, r, steps);
+    }
+    var dir: vec3<f32>;
+    if (water_reflect.probe_extra.z > 1.5) {
+        dir = probe_dir_march(p, r, sl.at.xyz, idx);
+    } else {
+        dir = probe_dir_depth(p, r, sl.at.xyz, idx, steps);
+    }
+    let d_geom = textureSampleLevel(probe_tex, probe_samp, dir, idx, 0.0).a;
+    let shares = probe_fog_shares(dir, d_geom, sl.at.xyz, p);
+    let hit = sl.at.xyz + dir * d_geom;
+    let scale = select(clamp(distance(p, hit) / max(d_geom, 1e-3), 0.0, 2.0), 1.0, d_geom > 9000.0);
+    let up = lobe.up * scale;
+    let side = lobe.side * scale;
+    let d = rough_lift_dir(dir, lobe.lift * scale);
+    let texel0 = water_reflect.probe_box_min.y;
+    let spread = water_reflect.march.z * texel0;
+    if (max(up, side) < max(spread, texel0)) {
+        return probe_refog(rough_probe_soft(d, idx, spread), shares);
+    }
+    if (textureSampleLevel(probe_tex, probe_samp, d, idx, 1.0).a <= 0.0) {
+        return probe_refog(rough_probe_soft(d, idx, spread), shares);
+    }
+    let n = f32(RR_PROBE_TAPS);
+    let reach = sqrt(1.0 + (n * n - 1.0) / 3.0);
+    let lod = min(rough_probe_lod(max(side, up / reach)), top);
+    let s_lod = max(rough_probe_sigma(lod), texel0);
+    var gap = 0.0;
+    var zig = 0.0;
+    if (RR_PROBE_TAPS > 1) {
+        gap = min(sqrt(max(up * up - s_lod * s_lod, 0.0) * 12.0 / (n * n - 1.0)), 2.0 * s_lod);
+        zig = 0.25 * s_lod;
+    }
+    // Up across `d` in its vertical plane, and the horizontal across it.
+    let up_raw = vec3<f32>(0.0, 1.0, 0.0) - d * d.y;
+    let ul = length(up_raw);
+    let e_up = select(vec3<f32>(1.0, 0.0, 0.0), up_raw / max(ul, 1e-6), ul > 1e-4);
+    let e_side = cross(d, e_up);
+    var sum = vec3<f32>(0.0);
+    for (var i = 0; i < RR_PROBE_TAPS; i = i + 1) {
+        let along = (f32(i) - 0.5 * (n - 1.0)) * gap;
+        let aside = select(-zig, zig, (i & 1) == 1);
+        sum = sum
+            + textureSampleLevel(probe_tex, probe_samp, d + e_up * along + e_side * aside, idx, lod).rgb;
+    }
+    return probe_refog(sum / n, shares);
+}
+
+#ifdef WATER_VIEW
+/// The lobe as a debug view: r its spread up over 0.1 rad, g across over 0.02 rad, b the share of
+/// it a reflected thing `d_hit` yards behind the water shows the eye `d_eye` in front. The id is
+/// past the ids the other preview modules take; the integration assigns the final one.
+const WV_REFL_ROUGH: u32 = 35u;
+
+fn rough_lobe_view(lobe: RoughLobe, d_hit: f32, d_eye: f32) -> vec3<f32> {
+    return vec3<f32>(
+        saturate(lobe.up / 0.1),
+        saturate(lobe.side / 0.02),
+        rough_contact(d_hit, d_eye),
+    );
+}
+#endif
+#endif // WATER_PREVIEW
+
+
 /// **The current**, Valve's two-phase flow map (Vlachos, "Water Flow in Portal 2", 2010): the ripple
 /// is carried along the current for one period and restarted, twice, half a period apart, each
 /// weighted by a triangle that is zero at its own restart, so neither reset is ever seen. The
@@ -2185,6 +2809,568 @@ fn glint_lobe_p1(
     let h = normalize(to_light + to_view);
     return pow(max(dot(n, h), 0.0), p_eff) * (p_eff + 2.0) / (p + 2.0);
 }
+
+#ifdef WATER_PREVIEW
+// ---- the living surface (WAV-1, WAV-3, WAV-4, WAV-5) -------------------------------------------
+//
+// The five ripple octaves stay as `water_surface` reads them, through their mips and the loss
+// table, the three shorter ones on the flow map. Around them: each kind of water weighs them
+// (`wg_wave_kind`), the wind and a world-space gust and slick field scale them (`wg_gains`), the
+// wind shapes their slope so crests lie across it (`wg_wind_frame`), three analytic swell trains
+// travel under them at their own phase speeds (`wg_swell`), a capillary octave rides on top
+// (`wg_capillary`), and the wind's sub-pixel roughness joins the roughness tensor. Everything the
+// pixel cannot resolve becomes GGX α², so the far field stays alive as roughness.
+
+/// The prevailing wind's to-direction in world XZ, unit (`benilla_water::wind`'s
+/// `WIND_PREVAILING`). The swell trains, the gust lattice and the octaves' drifts are built on it
+/// and never turn, so nothing far from the origin swims when the wind veers; the live direction
+/// (`waves.wind.xy`) shapes the slope and the glint.
+const WG_WIND0: vec2<f32> = vec2<f32>(0.6, 0.8);
+/// The prevailing wind's left normal, `(−WG_WIND0.y, WG_WIND0.x)`.
+const WG_WIND0_PERP: vec2<f32> = vec2<f32>(-0.8, 0.6);
+/// The wind speed at which the octaves keep their authored weights, yards a second (4 m/s).
+const WG_U_REF: f32 = 4.4;
+/// Yards a second per metre a second.
+const WG_YD_PER_M: f32 = 1.0936;
+
+/// The gains per kind of water on the long octaves (0, 1), the short octaves (2-4), the swell
+/// trains and the capillary layer: the sea is the roughest water and carries swell, still fresh
+/// water is fetch-limited with a little swell, flowing water carries none and keeps its detail on
+/// the current, a WMO exterior canal and a WMO interior pool are calm.
+const WG_KIND_OCEAN: vec4<f32> = vec4<f32>(1.35, 1.15, 1.0, 1.0);
+const WG_KIND_LAKE: vec4<f32> = vec4<f32>(0.85, 1.05, 0.35, 1.0);
+const WG_KIND_RIVER: vec4<f32> = vec4<f32>(0.45, 1.0, 0.0, 0.6);
+const WG_KIND_CANAL: vec4<f32> = vec4<f32>(0.5, 0.8, 0.0, 0.7);
+const WG_KIND_POOL: vec4<f32> = vec4<f32>(0.4, 0.6, 0.0, 0.4);
+
+/// The gust and slick fields' tiles in yards, along and across the prevailing wind. The map's
+/// height features span 0.23 of a tile, so cat's paws of about 19 × 14 yd and slick lanes of about
+/// 59 × 20 yd.
+const WG_GUST_TILE: vec2<f32> = vec2<f32>(84.0, 60.0);
+const WG_SLICK_TILE: vec2<f32> = vec2<f32>(260.0, 90.0);
+/// The slick field's own stretch of the map, so it never lines up with the gusts.
+const WG_SLICK_SHIFT: vec2<f32> = vec2<f32>(0.37, 0.71);
+/// Where each field is cut on the map's height (B, 0.5 ± 0.17), and the coverage each cut leaves
+/// on average, which a pixel too coarse to resolve the field takes instead.
+const WG_GUST_CUT: vec2<f32> = vec2<f32>(0.54, 0.66);
+const WG_SLICK_CUT: vec2<f32> = vec2<f32>(0.66, 0.74);
+const WG_GUST_MEAN: f32 = 0.33;
+const WG_SLICK_MEAN: f32 = 0.12;
+/// The map's height change per texel at its feature scale (0.17 · 2π / 58): the cut widens by
+/// this per texel of footprint, so its edge never falls inside a pixel.
+const WG_FIELD_SLOPE: f32 = 0.018;
+
+/// The three swell trains: their to-directions (the prevailing wind turned by +0.20, −0.33 and
+/// +0.55 rad), wavelengths in yards and slope amplitudes a·k at gain 1. Their periods,
+/// 2π/√(g·k) with g = 10.73 yd/s², are the clock's (`benilla_water::clock`'s `SWELL_PERIOD_S`).
+const WG_SWELL_DIR0: vec2<f32> = vec2<f32>(0.4291, 0.9033);
+const WG_SWELL_DIR1: vec2<f32> = vec2<f32>(0.8269, 0.5624);
+const WG_SWELL_DIR2: vec2<f32> = vec2<f32>(0.0934, 0.9956);
+const WG_SWELL_LAMBDA: vec3<f32> = vec3<f32>(23.0, 13.7, 8.3);
+const WG_SWELL_SLOPE: vec3<f32> = vec3<f32>(0.050, 0.042, 0.034);
+/// The trains' second-order (Stokes) term: sharp crests, flat troughs.
+const WG_SWELL_STOKES: f32 = 0.22;
+/// The trains' whole slope variance at gain 1, as GGX α²: Σ (a·k)² · (1 + Stokes²).
+const WG_SWELL_FULL2: f32 = 0.005682;
+
+/// The capillary octave: the map tiled every 0.42 yd (features of about 3 cm) on its own lattice
+/// turned −75°, its weight at gain 1, and how far octave 2's slope warps its lookup, in tiles per
+/// unit of slope, so its tile never repeats in place.
+const WG_CAP_TILE: f32 = 0.42;
+const WG_CAP_ROT: vec2<f32> = vec2<f32>(0.2588, -0.9659);
+const WG_CAP_WEIGHT: f32 = 0.16;
+const WG_CAP_WARP: f32 = 10.0;
+
+/// The share of Cox and Munk's (1954) wind-driven slope variance, 0.00512 per m/s on a clean
+/// surface, that lies below the capillary octave and joins the roughness as GGX α².
+const WG_CM: f32 = 0.35;
+
+/// Σ w² of the long octaves (0.85, 1.0) and of the short ones (1.0, 0.7, 0.2).
+const WG_W2_LONG: f32 = 1.7225;
+const WG_W2_SHORT: f32 = 1.53;
+
+/// What one kind of water does with the wind, before the gusts: the gains on the long octaves,
+/// the short octaves, the swell and the capillary layer, how far the wind shapes the slope, and
+/// whether the wind reaches the water at all (0 in a WMO room).
+struct WaveKind {
+    gain: vec4<f32>,
+    aniso: f32,
+    exposed: f32,
+};
+
+/// The surface's gains at a pixel: the kind's, under the wind and the gust field; `rough2` the
+/// wind's sub-pixel roughness as GGX α², `aniso` the kind's wind shaping.
+struct WaveGains {
+    long_oct: f32,
+    short_oct: f32,
+    swell: f32,
+    cap: f32,
+    rough2: f32,
+    aniso: f32,
+};
+
+/// The swell trains at a pixel: their slope as the octaves carry it (the normal's horizontal
+/// part, −∇h), its resolved low band, and the slope variance the footprint no longer resolves as
+/// GGX α² (xx, zz, xz).
+struct Swell {
+    slope: vec2<f32>,
+    slope_lo: vec2<f32>,
+    lost: vec3<f32>,
+};
+
+/// The capillary octave at a pixel: its slope (× weight × keep) and the slope variance its fade
+/// drops, in the map's units.
+struct Capillary {
+    slope: vec2<f32>,
+    lost: f32,
+};
+
+/// The wind lane: its direction (unit, the prevailing one while the lane is empty), its speed in
+/// yards a second and the storm blend.
+fn wg_wind() -> vec4<f32> {
+    let lane = water_reflect.preview.wind;
+    let len = length(lane.xy);
+    let dir = select(WG_WIND0, lane.xy / max(len, 1e-4), len > 1e-4);
+    return vec4<f32>(dir, max(lane.z, 0.0), saturate(lane.w));
+}
+
+/// The kind of water under the pixel and what it does with the wind: the sea, still fresh water
+/// or flowing water (blended by the current's speed, yards a second), a WMO exterior canal or a
+/// WMO interior pool; shallow water (the bed `sb` within a yard and a half), water near the shore
+/// (`shore` yards from the waterline) and sloped water (`tilt`, [`surface_tilt`]) calm the long
+/// octaves and the swell.
+fn wg_wave_kind(flow: vec2<f32>, shore: f32, sb: SceneBehind, tilt: f32) -> WaveKind {
+    let river = smoothstep(0.05, 0.4, length(flow));
+    var base = mix(select(WG_KIND_LAKE, WG_KIND_OCEAN, w.kind.y > 0.5), WG_KIND_RIVER, river);
+    base = select(base, WG_KIND_CANAL, w.path.x > 0.5);
+    base = select(base, WG_KIND_POOL, w.path.x > 1.5);
+    let indoor = w.path.x > 1.5;
+    // The column under the pixel, deep where the bed is not known.
+    let depth = select(8.0, max(sb.vertical, 0.0), sb.known);
+    let deep_long = 0.35 + 0.65 * smoothstep(0.15, 1.5, depth);
+    let deep_short = 0.6 + 0.4 * smoothstep(0.05, 0.6, depth);
+    let fetch = mix(0.45, 1.0, smoothstep(1.0, 20.0, shore));
+    let level = 1.0 - smoothstep(0.03, 0.12, tilt);
+    var k: WaveKind;
+    k.gain = base * vec4<f32>(
+        deep_long * fetch * level,
+        deep_short * mix(0.6, 1.0, level),
+        deep_long * fetch * level,
+        deep_short,
+    );
+    k.aniso = mix(1.0, 0.4, river) * select(1.0, 0.0, indoor);
+    k.exposed = select(1.0, 0.0, indoor);
+    return k;
+}
+
+/// The gust and slick fields at world `xz`: x how gusty (0 calm to 1 a cat's paw), y how slick
+/// (glassy, where no gust is). Two taps of the ripple map's height in the prevailing wind's frame,
+/// carried downwind by the clock (`waves.gust`), each cut at a threshold its own footprint
+/// widens, and taken at its mean coverage where the pixel covers more than the field resolves.
+/// Low takes the means.
+fn wg_gust(xz: vec2<f32>, px: PixelFootprint) -> vec2<f32> {
+#ifdef WATER_TIER_LOW
+    return vec2<f32>(WG_GUST_MEAN, WG_SLICK_MEAN);
+#else
+    let q = vec2<f32>(dot(xz, WG_WIND0), dot(xz, WG_WIND0_PERP));
+    let ofs = water_reflect.preview.gust;
+    let texels = f32(textureDimensions(ripples).x);
+    let lod_g = log2(max(px.major * texels / WG_GUST_TILE.y, 1e-6)) + view.mip_bias;
+    let lod_s = log2(max(px.major * texels / WG_SLICK_TILE.y, 1e-6)) + view.mip_bias;
+    let bg = textureSampleLevel(
+        ripples,
+        ripples_samp,
+        q / WG_GUST_TILE + ofs.xy,
+        max(lod_g, 0.0),
+    ).b;
+    let bs = textureSampleLevel(
+        ripples,
+        ripples_samp,
+        q / WG_SLICK_TILE + ofs.zw + WG_SLICK_SHIFT,
+        max(lod_s, 0.0),
+    ).b;
+    let edge_g = WG_FIELD_SLOPE * exp2(clamp(lod_g, 0.0, 6.0));
+    let edge_s = WG_FIELD_SLOPE * exp2(clamp(lod_s, 0.0, 6.0));
+    let gust = smoothstep(WG_GUST_CUT.x - edge_g, WG_GUST_CUT.y + edge_g, bg);
+    let slick = smoothstep(WG_SLICK_CUT.x - edge_s, WG_SLICK_CUT.y + edge_s, bs);
+    let g = mix(WG_GUST_MEAN, gust, 1.0 - smoothstep(3.0, 5.0, lod_g));
+    let s = mix(WG_SLICK_MEAN, slick, 1.0 - smoothstep(3.0, 5.0, lod_s)) * (1.0 - g);
+    return vec2<f32>(g, s);
+#endif
+}
+
+/// The gains at a pixel of kind `k` under the gust field `gs` ([`wg_gust`]) and the wind `wind`
+/// ([`wg_wind`]). The wind scales every slope by √(U / U_ref) (slope variance grows with the wind
+/// speed); a gust lifts the short octaves up to ×1.9 and the capillaries ×2.4, a slick takes them
+/// down to a fifth and a tenth; the swell is remote and ignores both. Cox and Munk's sub-pixel
+/// share grows with the local wind.
+fn wg_gains(k: WaveKind, gs: vec2<f32>, wind: vec4<f32>) -> WaveGains {
+    let g = gs.x * k.exposed;
+    let s = gs.y * k.exposed;
+    let gw = mix(1.0, sqrt(clamp(wind.z / WG_U_REF, 0.25, 3.0)), k.exposed);
+    var o: WaveGains;
+    o.long_oct = k.gain.x * gw * mix(0.95, 1.15, g) * (1.0 - 0.25 * s);
+    o.short_oct = k.gain.y * gw * mix(0.8, 1.9, g) * (1.0 - 0.8 * s);
+    o.swell = k.gain.z * gw;
+    o.cap = k.gain.w * gw * mix(0.6, 2.4, g) * (1.0 - 0.9 * s);
+    o.rough2 = WG_CM * 0.00512 * (wind.z / WG_YD_PER_M) * (1.0 + 1.3 * g) * (1.0 - 0.85 * s)
+        * k.gain.w * k.exposed;
+    o.aniso = k.aniso;
+    return o;
+}
+
+/// The wind's shaping of the octaves' slope, symmetric (xx, zz, xz): `1 + 0.25·a` along the
+/// to-direction `dir`, `1 − 0.3·a` across it, so crests lie across the wind at about the same mean
+/// variance.
+fn wg_wind_frame(dir: vec2<f32>, a: f32) -> vec3<f32> {
+    let along = 1.0 + 0.25 * a;
+    let across = 1.0 - 0.3 * a;
+    return vec3<f32>(
+        along * dir.x * dir.x + across * dir.y * dir.y,
+        along * dir.y * dir.y + across * dir.x * dir.x,
+        (along - across) * dir.x * dir.y,
+    );
+}
+
+/// The symmetric `m` (xx, zz, xz) times `v`.
+fn wg_sym_mul(m: vec3<f32>, v: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(m.x * v.x + m.z * v.y, m.z * v.x + m.y * v.y);
+}
+
+/// `M·C·M` for the symmetric `m` and `c` (xx, zz, xz): the covariance `c` of a slope that `m`
+/// shapes.
+fn wg_sym_sandwich(m: vec3<f32>, c: vec3<f32>) -> vec3<f32> {
+    let p00 = m.x * c.x + m.z * c.z;
+    let p01 = m.x * c.z + m.z * c.y;
+    let p10 = m.z * c.x + m.y * c.z;
+    let p11 = m.z * c.z + m.y * c.y;
+    return vec3<f32>(p00 * m.x + p01 * m.z, p10 * m.z + p11 * m.y, p00 * m.z + p01 * m.y);
+}
+
+/// The share by which the gains scale what the octaves lose at this footprint: each octave's w²
+/// by how much its feature fade has dropped (`1 − keep²`), long ones at the long gain², short
+/// ones at the short gain²; the short gain² where nothing has faded, as the mips take the finest
+/// octaves first. `k` the keeps of octaves 0-3, `k4` octave 4's.
+fn wg_loss_gain(k: vec4<f32>, k4: f32, g: WaveGains) -> f32 {
+    let lost = vec4<f32>(0.7225, 1.0, 1.0, 0.49) * (vec4<f32>(1.0) - k * k);
+    let lost4 = 0.04 * (1.0 - k4 * k4);
+    let den = lost.x + lost.y + lost.z + lost.w + lost4;
+    let gl2 = g.long_oct * g.long_oct;
+    let gs2 = g.short_oct * g.short_oct;
+    let num = (lost.x + lost.y) * gl2 + (lost.z + lost.w + lost4) * gs2;
+    return select(gs2, num / max(den, 1e-4), den > 1e-4);
+}
+
+/// One swell train along `d` (unit) of wavelength `lambda` yards, slope amplitude `amp`, at phase
+/// `phase` (fractions of its period): its slope, as the octaves carry it, faded by its wavelength
+/// in pixels along `d`, and what the fade drops as GGX α² along `d`.
+fn wg_train(
+    xz: vec2<f32>,
+    px: PixelFootprint,
+    d: vec2<f32>,
+    lambda: f32,
+    amp: f32,
+    phase: f32,
+) -> Swell {
+    let c = dot(px.e, d);
+    let fp = sqrt(c * c * px.major * px.major + (1.0 - c * c) * px.minor * px.minor);
+    let feat = lambda / max(fp, 1e-6);
+    let keep = smoothstep(water_reflect.look.surf.z, water_reflect.look.surf.w, feat);
+    let th = TAU * fract(dot(xz, d) / lambda - phase);
+    let s = amp * (sin(th) + WG_SWELL_STOKES * sin(2.0 * th));
+    var o: Swell;
+    o.slope = d * (s * keep);
+    o.slope_lo = d * (s * keep * smoothstep(4.0, 8.0, feat));
+    let lost = amp * amp * (1.0 + WG_SWELL_STOKES * WG_SWELL_STOKES) * (1.0 - keep * keep);
+    o.lost = vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y) * lost;
+    return o;
+}
+
+/// The three swell trains at `gain` ([`wg_train`]), at the clock's phases (`waves.swell`); none
+/// where the gain is 0 (rivers, canals, pools).
+fn wg_swell(xz: vec2<f32>, px: PixelFootprint, gain: f32) -> Swell {
+    if (gain <= 0.0) {
+        return Swell(vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0));
+    }
+    let p = water_reflect.preview.swell;
+    let a = wg_train(xz, px, WG_SWELL_DIR0, WG_SWELL_LAMBDA.x, WG_SWELL_SLOPE.x * gain, p.x);
+    let b = wg_train(xz, px, WG_SWELL_DIR1, WG_SWELL_LAMBDA.y, WG_SWELL_SLOPE.y * gain, p.y);
+    let c = wg_train(xz, px, WG_SWELL_DIR2, WG_SWELL_LAMBDA.z, WG_SWELL_SLOPE.z * gain, p.z);
+    return Swell(
+        a.slope + b.slope + c.slope,
+        a.slope_lo + b.slope_lo + c.slope_lo,
+        a.lost + b.lost + c.lost,
+    );
+}
+
+/// The capillary octave at `gain`: the map on its own lattice, drifting with the clock
+/// (`waves.cap`), its lookup warped by octave 2's slope `warp`; through its mip and its feature
+/// fade like any octave ([`octave_slope`]), so call it in uniform control flow. Low has none.
+fn wg_capillary(xz: vec2<f32>, px: PixelFootprint, warp: vec2<f32>, gain: f32) -> Capillary {
+#ifdef WATER_TIER_LOW
+    return Capillary(vec2<f32>(0.0), 0.0);
+#else
+    let f = 1.0 / WG_CAP_TILE;
+    let fp = octave_footprint(px, f);
+    let uv = octave_uv(xz, WG_CAP_ROT, f, water_reflect.preview.cap.xy) + warp * WG_CAP_WARP;
+    let wt = WG_CAP_WEIGHT * gain;
+    var c: Capillary;
+    c.slope = octave_slope(uv, fp, wt, WG_CAP_ROT);
+    c.lost = wt * wt * water_reflect.look.ripple_mean.z * (1.0 - fp.keep * fp.keep);
+    return c;
+#endif
+}
+
+/// [`water_surface`] with the wind in it: the same five octaves on the same lattices, drifts,
+/// flow phases and loss table, weighed by `wk` ([`wg_wave_kind`]) under the gusts and the wind,
+/// shaped along the wind, with the capillary octave and the swell trains added and every faded
+/// slope, the wind's sub-pixel share among them, in the roughness tensor. The same
+/// `WaterSurface`, so every reader of it is unchanged; called in uniform control flow.
+fn water_surface_wg(
+    xz: vec2<f32>,
+    flow: vec2<f32>,
+    wake_slope: vec2<f32>,
+    wk: WaveKind,
+) -> WaterSurface {
+    let px = pixel_footprint(xz);
+    let ph0 = water_reflect.cycle.x;
+    let rot0 = vec2<f32>(1.0, 0.0);
+    let rot1 = vec2<f32>(0.8572, 0.5150);
+    let rot2 = vec2<f32>(0.4540, 0.8910);
+    let rot3 = vec2<f32>(-0.2924, 0.9563);
+    let rot4 = vec2<f32>(-0.8572, 0.5150);
+    let f0 = 1.0 / (12.0 * 9.2);
+    let f1 = 1.0 / (12.0 * 3.4);
+    let f2 = 1.0 / 12.0;
+    let f3 = 1.0 / (12.0 * 0.30);
+    let f4 = 1.0 / (12.0 * 0.12);
+    let d0 = pv_drift(0);
+    let d1 = pv_drift(1);
+    let d2 = pv_drift(2);
+    let d3 = pv_drift(3);
+    let d4 = pv_drift(4);
+    let fp0 = octave_footprint(px, f0);
+    let fp1 = octave_footprint(px, f1);
+    let fp2 = octave_footprint(px, f2);
+    let fp3 = octave_footprint(px, f3);
+    let fp4 = octave_footprint(px, f4);
+    let wind = wg_wind();
+    let g = wg_gains(wk, wg_gust(xz, px), wind);
+    // The two longest octaves are still; the three shorter ones ride the current.
+    let o0 = ripple_octave(octave_uv(xz, rot0, f0, d0), fp0, 0.85 * g.long_oct, rot0);
+    let o1 = ripple_octave(octave_uv(xz, rot1, f1, d1), fp1, 1.00 * g.long_oct, rot1);
+    let o2 = ripple_octave_flowing(xz, rot2, f2, d2, 1.00 * g.short_oct, flow, ph0, fp2);
+    let o3 = ripple_octave_flowing(xz, rot3, f3, d3, 0.70 * g.short_oct, flow, ph0, fp3);
+    let o4 = ripple_octave_flowing(xz, rot4, f4, d4, 0.20 * g.short_oct, flow, ph0, fp4);
+    let cap = wg_capillary(xz, px, o2.slope, g.cap);
+    let m = wg_wind_frame(wind.xy, g.aniso);
+    let slope = wg_sym_mul(m, o0.slope + o1.slope + o2.slope + o3.slope + o4.slope + cap.slope);
+    let slope_lo = wg_sym_mul(
+        m,
+        octave_low(o0) + octave_low(o1) + octave_low(o2) + octave_low(o3) + octave_low(o4),
+    );
+    let sw = wg_swell(xz, px, g.swell);
+    // `probe_box_min.w` scales the whole surface: 1, 0 for a dead-flat one.
+    let scale = water_reflect.probe_box_min.w;
+    var s: WaterSurface;
+    s.k = NORMAL_STRENGTH * scale;
+    s.n = normalize(vec3<f32>(
+        slope.x * s.k + (sw.slope.x + wake_slope.x) * scale,
+        1.0,
+        slope.y * s.k + (sw.slope.y + wake_slope.y) * scale,
+    ));
+    s.n_lo = normalize(vec3<f32>(
+        slope_lo.x * s.k + (sw.slope_lo.x + wake_slope.x) * scale,
+        1.0,
+        slope_lo.y * s.k + (sw.slope_lo.y + wake_slope.y) * scale,
+    ));
+    // The roughness tensor: the loss table's view-aligned loss at the gains, the capillary
+    // octave's faded share and the wind's sub-pixel share, all shaped along the wind; the swell's
+    // faded share along each train; the calm surface's α0.
+    let a0 = water_reflect.look.surf.x;
+    let k2 = 2.0 * s.k * s.k;
+    let maj = ripple_loss_at(px.log_maj + view.mip_bias);
+    var mips_min = maj.y;
+#ifndef WATER_TIER_LOW
+    let n_af = water_reflect.look.surf.y;
+    if (n_af > 1.0) {
+        mips_min = ripple_loss_at(log2(max(px.minor, px.major / n_af)) + view.mip_bias).y;
+    }
+#endif
+    let lg = wg_loss_gain(vec4<f32>(fp0.keep, fp1.keep, fp2.keep, fp3.keep), fp4.keep, g);
+    let micro = k2 * cap.lost + g.rough2 * scale * scale;
+    let l_maj = k2 * lg * maj.x + micro;
+    let l_min = l_maj - k2 * lg * (maj.y - mips_min);
+    let dd = l_maj - l_min;
+    let lost_view = vec3<f32>(
+        l_min + dd * px.e.x * px.e.x,
+        l_min + dd * px.e.y * px.e.y,
+        dd * px.e.x * px.e.y,
+    );
+    s.a2 = wg_sym_sandwich(m, lost_view) + sw.lost * (scale * scale)
+        + vec3<f32>(a0 * a0, a0 * a0, 0.0);
+    s.alpha = sqrt(sqrt(max(s.a2.x * s.a2.y - s.a2.z * s.a2.z, 1e-12)));
+    let cw = WG_CAP_WEIGHT * g.cap;
+    let full = a0 * a0
+        + k2 * water_reflect.look.ripple_mean.z * (WG_W2_LONG * g.long_oct * g.long_oct
+            + WG_W2_SHORT * g.short_oct * g.short_oct + cw * cw)
+        + (g.rough2 + WG_SWELL_FULL2 * g.swell * g.swell) * scale * scale;
+    s.rho_a = smoothstep(a0, max(sqrt(full), a0 + 1e-4), s.alpha);
+    return s;
+}
+
+// ---- the sun and the moon on the water (SPEC-1, SPEC-2, SPEC-3, SPEC-4) ----------------------
+//
+// One normalised GGX lobe per body on the surface's roughness tensor, which already holds every
+// slope the pixel does not resolve, so the path is a crisp glitter near the eye and widens into a
+// sheen with distance, gusts and the wind. The bodies are the visible ones (`water_reflect.sun`,
+// `.moon`); their light is the celestial tint (`wow_light.light_spec`, IntBand row 9, which tints
+// both discs) times a radiance over the display's white and the disc's solid angle; each is
+// reached as its lane's `w` says and seen through the pixel's open reflected sky.
+
+/// The sun's and the moon's disc radius as the water reflects them, radians, overhead; toward the
+/// horizon the sun's doubles and the moon's grows by half (`WowLighting::sun_disc_scale`,
+/// `moon_disc_scale`). The disc widens the lobe by half its radius in slope.
+const WG_SUN_RADIUS: f32 = 0.03;
+const WG_MOON_RADIUS: f32 = 0.03;
+/// Each body's radiance over the display's white, linear: a reflected disc and a calm path bloom,
+/// a rough far path stays a sheen.
+const WG_SUN_HDR: f32 = 24.0;
+const WG_MOON_HDR: f32 = 10.0;
+/// The moon's cast over the celestial tint's hue: night vision reads moonlight cooler.
+const WG_MOON_COOL: vec3<f32> = vec3<f32>(0.80, 0.90, 1.0);
+/// The highlight's knee, linear: the brightest channel approaches it and the hue holds.
+const WG_SPEC_KNEE: f32 = 1.4;
+/// The comic plateau on resolved glints: where the shaped peak crosses the band, a flat lift of
+/// `WG_CRISP` on the share of the surface the pixel resolves, so near glints read as painted
+/// shapes with an edge.
+const WG_CRISP_BAND: vec2<f32> = vec2<f32>(0.55, 0.85);
+const WG_CRISP: f32 = 0.35;
+/// SPEC-4's art 'glint sun': the sine of the highest elevation the glint is drawn at, on the true
+/// azimuth; 0 is off, the physical default. On, it is a documented deviation, and the reflected
+/// disc and the glint's visibility move with it.
+const WG_GLINT_ELEV_MAX: f32 = 0.0;
+/// The default linear glint weight (`benilla_water::look`'s `GLINT_WEIGHT_LIN`). `look.composite.y`
+/// over it scales both bodies' light, so `$WOW_WATER_GLINT` tunes the glint.
+const WG_GLINT_WEIGHT_REF: f32 = 0.03575443;
+
+/// `ω_xzᵀ·A·ω_xz` for the roughness tensor `a` (xx, zz, xz): `α_ω²·tan²θ·ω.y²` along `ω`.
+fn wg_proj(a: vec3<f32>, o: vec3<f32>) -> f32 {
+    return a.x * o.x * o.x + 2.0 * a.z * o.x * o.z + a.y * o.z * o.z;
+}
+
+/// The light from `l` the surface sends toward `v` per unit of the light's irradiance, both unit
+/// and above the plane: GGX in slope space about world up, centred on the resolved normal `n` and
+/// spread by the roughness tensor `a2` (GGX α², world XZ: xx, zz, xz) and the light's own disc
+/// `disc2`; Smith's G on the tensor's α along each direction; Schlick's F on the half vector.
+/// `D·G·F / (4·v.y)`.
+fn wg_ggx(n: vec3<f32>, v: vec3<f32>, l: vec3<f32>, a2: vec3<f32>, disc2: f32) -> f32 {
+    if (l.y <= 0.0 || v.y <= 0.0) {
+        return 0.0;
+    }
+    let h = normalize(v + l);
+    if (h.y <= 1e-3) {
+        return 0.0;
+    }
+    let a = a2 + vec3<f32>(disc2, disc2, 0.0);
+    let det = max(a.x * a.y - a.z * a.z, 1e-12);
+    // The half vector's slope against the resolved normal's.
+    let d = n.xz / max(n.y, 1e-3) - h.xz / h.y;
+    let q = (a.y * d.x * d.x - 2.0 * a.z * d.x * d.y + a.x * d.y * d.y) / det;
+    let c2 = h.y * h.y;
+    let dist = 1.0 / (3.14159265 * sqrt(det) * c2 * c2 * (1.0 + q) * (1.0 + q));
+    let lam_v = 0.5 * (sqrt(1.0 + wg_proj(a, v) / (v.y * v.y)) - 1.0);
+    let lam_l = 0.5 * (sqrt(1.0 + wg_proj(a, l) / (l.y * l.y)) - 1.0);
+    let g = 1.0 / (1.0 + lam_v + lam_l);
+    let f = F0_WATER + (1.0 - F0_WATER) * pow(1.0 - saturate(dot(v, h)), 5.0);
+    return dist * g * f / (4.0 * v.y);
+}
+
+/// A body's disc radius `r` (overhead) toward elevation sine `y`, `grow` times it at the horizon.
+fn wg_disc(r: f32, grow: f32, y: f32) -> f32 {
+    return r * mix(grow, 1.0, smoothstep(0.0, 0.3, y));
+}
+
+/// The direction the glint is drawn toward for the body at `l`: `l` itself, or with the art
+/// clamp on ([`WG_GLINT_ELEV_MAX`]) the same azimuth at that elevation when the body stands higher.
+fn wg_glint_dir(l: vec3<f32>) -> vec3<f32> {
+    if (WG_GLINT_ELEV_MAX <= 0.0 || l.y <= WG_GLINT_ELEV_MAX) {
+        return l;
+    }
+    let flat_xz = normalize(l.xz + vec2<f32>(1e-6, 0.0));
+    let c = sqrt(1.0 - WG_GLINT_ELEV_MAX * WG_GLINT_ELEV_MAX);
+    return vec3<f32>(flat_xz.x * c, WG_GLINT_ELEV_MAX, flat_xz.y * c);
+}
+
+/// How much of a body the surface point sees along its reflected ray: the floor's open sky there
+/// ([`floor_occlusion`]: the compute pass's answer on the mirror planes, the pixel's own march off
+/// them), sharpened so a crown, a deck or a bank in the way takes the glint out; 1 where the floor
+/// was not occluded. A glint lies where the reflected ray meets the body, so what stands on that
+/// ray stands between the point and the body.
+fn wg_glint_open(occ: FloorOcc) -> f32 {
+    return smoothstep(0.08, 0.92, occ.v);
+}
+
+/// Whether the water is under the open sky for its glints: the eye above it, and not a WMO
+/// interior pool or a room under its fog gate, whose sky is a ceiling. A function of its own
+/// because `stylised_water` shadows `w` with its probe weights.
+fn wg_lit_sky(eye_above: bool, room_fog: u32) -> bool {
+    return eye_above && w.path.x < 1.5 && !(w.kind.z > 0.5 && room_fog != 0u);
+}
+
+/// The highlight `c` (linear) shaped for the gamma target: the brightest channel follows a soft
+/// knee toward [`WG_SPEC_KNEE`] and the others keep their ratio to it, so the hue holds; on the
+/// `resolved` share of the surface a flat lift where the peak crosses [`WG_CRISP_BAND`].
+fn wg_spec_shape(c: vec3<f32>, resolved: f32) -> vec3<f32> {
+    let m = max(c.r, max(c.g, c.b));
+    if (m <= 1e-6) {
+        return vec3<f32>(0.0);
+    }
+    let soft = WG_SPEC_KNEE * (1.0 - exp(-m / WG_SPEC_KNEE));
+    let crisp = smoothstep(WG_CRISP_BAND.x, WG_CRISP_BAND.y, soft) * resolved * WG_CRISP;
+    return c * ((soft + crisp) / m);
+}
+
+/// The glints in linear light, before the fog: the sun's and the moon's lobes ([`wg_ggx`]) on the
+/// normal `n` and the surface's roughness tensor, toward the eye `to_view`. The sun's light is the
+/// celestial tint, the moon's its hue at a fixed brightness cooled by [`WG_MOON_COOL`]; each times
+/// its HDR radiance, its disc's solid angle and the glint weight's share, under its reach
+/// (`sun.w`, `moon.w`) and the pixel's open reflected sky `open` ([`wg_glint_open`]). None where
+/// `lit` is false ([`wg_lit_sky`]).
+fn wg_glints(
+    n: vec3<f32>,
+    to_view: vec3<f32>,
+    to_sun: vec3<f32>,
+    to_moon: vec3<f32>,
+    surf: WaterSurface,
+    open: f32,
+    lit: bool,
+) -> vec3<f32> {
+    if (!lit) {
+        return vec3<f32>(0.0);
+    }
+    let weight = water_reflect.look.composite.y / WG_GLINT_WEIGHT_REF;
+    let tint = water_dec(wow_light.light_spec.rgb);
+    var c = vec3<f32>(0.0);
+    let reach = pv_glint_reach();
+    if (reach > 0.0) {
+        let l = wg_glint_dir(to_sun);
+        let r = wg_disc(WG_SUN_RADIUS, 2.0, l.y);
+        let e = tint * (WG_SUN_HDR * 3.14159265 * r * r * weight * reach);
+        c += e * wg_ggx(n, to_view, l, surf.a2, 0.25 * r * r);
+    }
+    if (water_reflect.moon.w > 0.0) {
+        let r = wg_disc(WG_MOON_RADIUS, 1.5, to_moon.y);
+        // The tint's hue at unit luminance, whatever the night row's brightness; white without one.
+        let lum = luma709(tint);
+        let hue = select(vec3<f32>(1.0), tint / max(lum, 1e-4), lum > 1e-4);
+        let e = hue * WG_MOON_COOL
+            * (WG_MOON_HDR * 3.14159265 * r * r * weight * water_reflect.moon.w);
+        c += e * wg_ggx(n, to_view, to_moon, surf.a2, 0.25 * r * r);
+    }
+    return wg_spec_shape(c * open, 1.0 - surf.rho_a);
+}
+#endif // WATER_PREVIEW
 
 // ---- the sky floor's occlusion (REF-7) ----------------------------------------------------------
 //
@@ -3003,6 +4189,533 @@ fn view_refract_leak(world_pos: vec3<f32>, uv_r: vec2<f32>, accept: f32) -> f32 
 }
 #endif
 
+#ifdef WATER_PREVIEW
+// ── The shore and its contacts (preview: SHORE-1, SHORE-2, SHORE-4; BODY-7's wet faces) ────────
+//
+// Pure functions for `liquid.wgsl`'s stylised region, to sit just before `stylised_water`. They
+// read only what that function already holds, plus two spare lanes of the look block (see
+// `shore-contact.md`):
+//
+//   * **The waterline.** A thin, dim, broken wet line where the water touches the bank, coverage
+//     prefiltered so that at distance it fades instead of becoming a pixel outline; the bed under
+//     the last yard of water darkened as wet ground is. With each breath of the shore swell
+//     (`cycle.y`) the water's edge draws back seaward and runs up again to the traced waterline: a
+//     hand's breadth on still water, yards on a sea beach, where the drained ground keeps a glossy
+//     film that dries, a foam front rides the edge, and bore foam trails each wave that breaks in
+//     water shallower than its height allows.
+//   * **Contacts.** Foam where a steep surface pierces the water (a post, a hull, a rock, a quay
+//     wall, a dam's foot, a swimmer), found from the frame's linear depth, so any geometry on any
+//     map: the pixel's own ray meeting a wall under the surface and, on High, four depth taps
+//     finding a wall standing beside it. Wider on the face a current runs into and trailing
+//     downstream; breathing with the swell at sea; thin and broken on still water. A beach is not
+//     steep and gets none. The wall's face under the first yard of water darkens as wet stone.
+//   * **Whitecaps** on the open sea, on the long octaves' crests where wave groups meet, by the
+//     sea state.
+//
+// Foam is painted: one bubble pattern ([`foam_noise`], non-repeating) cut at the coverage, so a
+// sheet opens into lace and then islands, with a crisp outer edge, a thinner interior, cream where
+// it is thick and a cool lace where it is thin, lit by foam's illuminant (`light.foam`, the
+// terrain light's colour under the body's shadow), so it is warm at dusk and blue under the moon.
+//
+// Uniformity: [`sc_geometry`] takes every derivative this needs and must be called in uniform
+// control flow; the rest takes explicit gradients and `textureLoad`s and may run under any branch.
+
+/// The wet line's width at the water's edge, yards: a hairline of foam where the water touches the
+/// bank.
+const SC_LINE_YD: f32 = 0.07;
+/// How far past the swash's draw-back the waterline terms are evaluated, yards.
+const SC_SHORE_REACH: f32 = 1.0;
+/// The edge's fade over the water's column, yards: the whole water (reflection and glints included)
+/// fades over the first `max(SC_EDGE_YD, 1.5·fwidth(column))` of depth, so the contact is
+/// coverage-correct at any distance.
+const SC_EDGE_YD: f32 = 0.06;
+/// The largest column footprint the fade takes, yards: past it the neighbour is across a silhouette
+/// in the depth, not down a slope.
+const SC_EDGE_FW_MAX: f32 = 0.25;
+/// Contact foam's reach from a steep surface at full energy, yards.
+const SC_CONTACT_YD: f32 = 0.34;
+/// The deepest point on a steep surface the pixel's own ray may meet and still be at a contact,
+/// yards below the surface.
+const SC_CONTACT_DEEP: f32 = 0.6;
+/// Where a surface starts and finishes counting as a wall, in `1 − |n.y|`: about 40° to 57°.
+const SC_STEEP: vec2<f32> = vec2<f32>(0.22, 0.45);
+/// Contact energy on still water: thin, broken foam.
+const SC_STILL_ENERGY: f32 = 0.3;
+/// The meniscus band at a contact, yards, and the share of the reflection it adds.
+const SC_MENISCUS_YD: f32 = 0.05;
+const SC_MENISCUS_F: f32 = 0.3;
+/// The wet bed's darkening where `look.shore.y` is not written.
+const SC_WET_DEFAULT: f32 = 0.61;
+
+/// The ocean's sea state, 0..1, where nothing writes `look.shore_kind.w`.
+const SC_SEA_DEFAULT: f32 = 0.6;
+/// How far the sea's edge draws back between two waves at sea state 1, yards.
+const SC_SWASH_YD: f32 = 2.4;
+/// The deepest column the backwash drains at sea state 1, yards, and on still water.
+const SC_DRAIN_H: f32 = 0.14;
+const SC_LAP_DRAIN_H: f32 = 0.05;
+/// The uprush's share of one breath, and the backwash's ease (its edge is `x^p` of the way out).
+const SC_UPRUSH: f32 = 0.32;
+const SC_BACKWASH_POW: f32 = 1.35;
+/// One breath, seconds: the clock's `SHORE_SWELL_S`, the period `cycle.y` counts.
+const SC_SWELL_S: f32 = 5.5;
+/// How long drained ground stays glossy, seconds (e-folding), and the film's share of the water's
+/// reflection.
+const SC_FILM_S: f32 = 2.8;
+const SC_FILM_GLOSS: f32 = 0.55;
+/// The along-shore spacing of the swash's tongues, yards per tile of the map.
+const SC_CUSP_YD: f32 = 36.0;
+/// The wave height at sea state 1, yards, and the depth-limited breaking index H/h.
+const SC_WAVE_H: f32 = 0.5;
+const SC_BREAK_GAMMA: f32 = 0.78;
+/// The bore's trailing sheet lifetime, seconds (e-folding), and the surf band's outer limit, yards.
+const SC_SHEET_S: f32 = 1.9;
+const SC_SURF_YD: f32 = 14.0;
+/// Gravity, yards a second squared (9.81 m/s²).
+const SC_G_YD: f32 = 10.73;
+/// Whitecaps start and are full this far from the shore, yards (the per-vertex distance, which
+/// stops at 24).
+const SC_CAP_SHORE: vec2<f32> = vec2<f32>(8.0, 20.0);
+
+/// The bubble pattern's scale on the shore and at contacts, and on whitecaps (lookups a yard).
+const SC_FOAM_SCALE: f32 = 0.6;
+const SC_CAP_SCALE: f32 = 0.22;
+/// Foam's albedo, gamma: cream where it is thick, a cool lace where it is thin.
+const SC_FOAM_CREAM: vec3<f32> = vec3<f32>(0.96, 0.92, 0.83);
+const SC_FOAM_LACE: vec3<f32> = vec3<f32>(0.78, 0.79, 0.90);
+
+/// The High tier's search for a wall beside the pixel: the highest a point may stand above the
+/// water and still be the wall's foot, yards, and the least rise per yard of distance that makes it
+/// a wall (a beach climbs well under this).
+const SC_PIERCE_RISE: f32 = 1.2;
+const SC_PIERCE_SLOPE: f32 = 0.8;
+
+/// The opaque surface behind a water pixel, as the shore's terms need it.
+struct ScGeom {
+    // Horizontal yards from the surface point to where its ray meets the opaque surface behind;
+    // −1 where that surface is not known.
+    h_ray: f32,
+    // The water's column over that point, yards; the authored depth where it is not known.
+    col: f32,
+    // How steep that surface is, `1 − |n.y|`: 1 at a wall and across a silhouette in the depth.
+    steep: f32,
+    // The column's screen footprint (`fwidth`), yards, at most [`SC_EDGE_FW_MAX`].
+    fw_col: f32,
+    // The unit horizontal direction from the surface point to that point.
+    to_obs: vec2<f32>,
+};
+
+/// What [`shore_contact`] reads of `stylised_water`.
+struct ScIn {
+    world_pos: vec3<f32>,
+    frag_coord: vec2<f32>,
+    // The waterline's distance, yards: `stylised_water`'s `to_shore` (exact near the line).
+    to_shore: f32,
+    // The interpolated per-vertex distance (`shore`), which stops at 24 yd: the sea's exposure.
+    shore_far: f32,
+    // The offset to the nearest waterline point, world XZ yards.
+    shore_offset: vec2<f32>,
+    // The current, world XZ yards a second.
+    flow: vec2<f32>,
+    // `fwidth(to_shore)` clamped (`stylised_water`'s `aa`), and raw.
+    aa: f32,
+    fw_shore: f32,
+    // World XZ yards per pixel along screen x and y.
+    d_xz_dx: vec2<f32>,
+    d_xz_dy: vec2<f32>,
+};
+
+/// The shore's terms for the composite.
+struct ShoreContact {
+    // The water's coverage at its edge: the column's fade times the swash's draw-back.
+    cover: f32,
+    // Foam's coverage over the surface: the wet line, the swash front, the bore sheet, contact
+    // foam and whitecaps.
+    foam: f32,
+    // Foam's albedo, linear; foam's illuminant multiplies it.
+    foam_albedo: vec3<f32>,
+    // The wet bed's weight: the bed passes `mix(1, look.shore.y, wet)` of itself.
+    wet: f32,
+    // Drained ground's gloss, 0..1.
+    film: f32,
+    // The meniscus' weight at the water's edge and at contacts.
+    meniscus: f32,
+    // Contact foam alone, for the foam view.
+    contact: f32,
+};
+
+/// The contact geometry under a water pixel from what is behind it ([`scene_behind`]):
+/// `fallback_col` is the authored depth the column takes where the bed is not known. Takes
+/// `dpdxFine`, `dpdyFine` and `fwidth`: call it in uniform control flow.
+fn sc_geometry(world_pos: vec3<f32>, sb: SceneBehind, fallback_col: f32) -> ScGeom {
+    let bx = dpdxFine(sb.bed);
+    let by = dpdyFine(sb.bed);
+    let sx = dpdxFine(world_pos);
+    let sy = dpdyFine(world_pos);
+    let col = select(fallback_col, max(sb.vertical, 0.0), sb.known);
+    let fw_col = fwidth(col);
+    var g: ScGeom;
+    g.col = col;
+    g.fw_col = min(fw_col, SC_EDGE_FW_MAX);
+    // The bed's facet from its neighbours. A neighbour's bed far from this one's, against the
+    // surface's own step, is across a silhouette: the surface the ray met ends there, and met just
+    // under the water that is a wall's edge at its waterline (deeper, a stone's on the bed).
+    let nb = cross(bx, by);
+    let ln = length(nb);
+    let step_bed = max(length(bx), length(by));
+    let step_surf = max(max(length(sx), length(sy)), 1e-4);
+    let steep = select(0.0, 1.0 - abs(nb.y) / max(ln, 1e-12), ln > 1e-12);
+    g.steep = select(steep, 1.0, step_bed > 4.0 * step_surf && col < 0.2);
+    let d = sb.bed.xz - world_pos.xz;
+    let h = length(d);
+    g.h_ray = select(-1.0, h, sb.known);
+    g.to_obs = select(vec2<f32>(0.0), d / max(h, 1e-5), h > 1e-5);
+    return g;
+}
+
+/// [`ScGeom`] in half precision, three words: it crosses the reflection tiers to the composite,
+/// where the shader's register peak lies.
+fn sc_geometry_hold(g: ScGeom) -> vec3<u32> {
+    return vec3<u32>(
+        pack2x16float(vec2<f32>(g.h_ray, g.col)),
+        pack2x16float(vec2<f32>(g.steep, g.fw_col)),
+        pack2x16snorm(g.to_obs),
+    );
+}
+
+/// [`sc_geometry_hold`]'s words back.
+fn sc_geometry_release(h: vec3<u32>) -> ScGeom {
+    let a = unpack2x16float(h.x);
+    let b = unpack2x16float(h.y);
+    return ScGeom(a.x, a.y, b.x, b.y, unpack2x16snorm(h.z));
+}
+
+/// The terms where the shore draws nothing: the edge's coverage `cover` and today's foam colour.
+fn sc_neutral(cover: f32) -> ShoreContact {
+    return ShoreContact(cover, 0.0, water_dec(FOAM_COLOR), 0.0, 0.0, 0.0, 0.0);
+}
+
+/// The edge's coverage from the water's column ([`SC_EDGE_YD`]); 1 where the bed is not known.
+fn sc_edge_cover(g: ScGeom) -> f32 {
+    if (g.h_ray < 0.0) {
+        return 1.0;
+    }
+    return saturate(g.col / max(SC_EDGE_YD, 1.5 * g.fw_col));
+}
+
+/// How far a surface `1 − |n.y|` steep counts as a wall.
+fn sc_steep_gate(steep: f32) -> f32 {
+    return smoothstep(SC_STEEP.x, SC_STEEP.y, steep);
+}
+
+/// The share of the drained band the water covers at the breath's phase `a`: 0 drawn back to the
+/// full lap, 1 up to the waterline. The uprush rises fast and eases out; the backwash drains
+/// slowly and speeds up.
+fn sc_swash_fill(a: f32) -> f32 {
+    let up = saturate(a / SC_UPRUSH);
+    let back = saturate((a - SC_UPRUSH) / (1.0 - SC_UPRUSH));
+    return select(1.0 - pow(back, SC_BACKWASH_POW), 1.0 - (1.0 - up) * (1.0 - up), a < SC_UPRUSH);
+}
+
+/// Seconds since the backwash uncovered ground `d` yards from the waterline, at phase `a`, when
+/// it draws back `lap` yards: in the backwash this breath's, in the uprush the last one's.
+fn sc_film_age(d: f32, lap: f32, a: f32) -> f32 {
+    let x = pow(saturate(d / max(lap, 1e-3)), 1.0 / SC_BACKWASH_POW);
+    let a_d = SC_UPRUSH + (1.0 - SC_UPRUSH) * x;
+    let da = select(a - a_d, a + 1.0 - a_d, a < a_d);
+    return max(da, 0.0) * SC_SWELL_S;
+}
+
+/// The bubble pattern at `xz`, `scale` lookups a yard, spread over 0..1, with its screen
+/// footprint: [`foam_noise`], carried along the current by the two-phase flow map where the water
+/// moves, the two phases blended so the pattern's contrast holds.
+fn sc_pattern(xz: vec2<f32>, flow: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, scale: f32) -> FoamNoise {
+    var n: FoamNoise;
+    if (dot(flow, flow) > 0.0225) {
+        let ph0 = water_reflect.cycle.x;
+        let ph1 = fract(ph0 + 0.5);
+        let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+        let a = foam_noise((xz - flow * ph0 * FLOW_PERIOD_S) * scale, dx * scale, dy * scale);
+        let b = foam_noise(
+            (xz - flow * ph1 * FLOW_PERIOD_S) * scale + vec2<f32>(0.37, 0.61),
+            dx * scale,
+            dy * scale,
+        );
+        let norm = inverseSqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
+        n.v = 0.5 + ((a.v - 0.5) * w0 + (b.v - 0.5) * (1.0 - w0)) * norm;
+        n.fw = (a.fw * w0 + b.fw * (1.0 - w0)) * norm;
+    } else {
+        n = foam_noise(xz * scale, dx * scale, dy * scale);
+    }
+    // The map's height crowds about its middle; spread it over the range the cut travels.
+    return FoamNoise(saturate((n.v - 0.5) * 3.5 + 0.5), n.fw * 3.5);
+}
+
+/// Foam of coverage `c` drawn through the bubble pattern `pat` of footprint `fw`: the pattern cut
+/// at `1 − c`, so a sheet opens into lace and then islands as `c` falls, with a crisp outer edge and
+/// a thinner interior. Where the footprint spans the pattern, the cut gives way to the mean.
+fn sc_bubble_mask(c: f32, pat: f32, fw: f32) -> f32 {
+    let th = 1.0 - c;
+    let e = max(1.5 * fw, 0.04);
+    let edge = smoothstep(th - e, th + e, pat);
+    let inner = smoothstep(th, th + 0.35, pat);
+    let far = smoothstep(0.25, 0.6, fw);
+    return mix(edge * (0.62 + 0.38 * inner), c, far) * smoothstep(0.0, 0.04, c);
+}
+
+/// The long octaves' crests at `xz`, 0..1: the 40.8 yd octave's height where the 110.4 yd one's
+/// is high, so caps gather on the groups' crests and come and go as the two drift past each other.
+/// The lattices are `water_surface`'s `o0` and `o1`; two taps.
+fn sc_crest(xz: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> f32 {
+    let rot0 = vec2<f32>(1.0, 0.0);
+    let rot1 = vec2<f32>(0.8572, 0.5150);
+    let f0 = 1.0 / (12.0 * 9.2);
+    let f1 = 1.0 / (12.0 * 3.4);
+    let z = vec2<f32>(0.0);
+    let b0 = textureSampleGrad(
+        ripples,
+        ripples_samp,
+        octave_uv(xz, rot0, f0, pv_octave_drift(0)),
+        octave_uv(dx, rot0, f0, z),
+        octave_uv(dy, rot0, f0, z),
+    ).b;
+    let b1 = textureSampleGrad(
+        ripples,
+        ripples_samp,
+        octave_uv(xz, rot1, f1, pv_octave_drift(1)),
+        octave_uv(dx, rot1, f1, z),
+        octave_uv(dy, rot1, f1, z),
+    ).b;
+    let c0 = saturate((b0 - 0.5) * 3.5 + 0.5);
+    let c1 = saturate((b1 - 0.5) * 3.5 + 0.5);
+    return c1 * smoothstep(0.3, 0.7, c0);
+}
+
+/// One tap of the wall search: the depth `o` pixels off, and whether the point it shows rises
+/// steeply out of the water within `reach` yards of `world_pos`, as (horizontal distance, unit
+/// direction), 1000 for none. A pier leg, a hull or a rock face rises faster than
+/// [`SC_PIERCE_SLOPE`] a yard; a beach climbs far less, and a far bank or a body near the eye is not
+/// near this point at all.
+fn sc_pierce_tap(world_pos: vec3<f32>, frag_coord: vec2<f32>, o: vec2<f32>, reach: f32) -> vec3<f32> {
+    let px = frag_coord + o;
+    let z = scene_view_z(vec2<i32>(floor(px)));
+    let uv = (px - view.viewport.xy) / view.viewport.zw;
+    let s = scene_world_pos(uv, max(z, 1e-3));
+    let rise = s.y - world_pos.y;
+    let d = s.xz - world_pos.xz;
+    let dh = length(d);
+    let ok = z > 0.0 && rise > -0.05 && rise < SC_PIERCE_RISE && dh < reach
+        && rise > SC_PIERCE_SLOPE * dh;
+    return select(vec3<f32>(1000.0, 0.0, 0.0), vec3<f32>(dh, d / max(dh, 1e-5)), ok);
+}
+
+/// The nearest wall standing beside the pixel within `reach` yards, from four depth taps on the
+/// screen axes `reach` away (`yd_px` yards a pixel, held to 1.5-16 px, inside the depth's margin
+/// round the water's rectangle): (distance, unit direction), 1000 for none. Skipped where the depth
+/// pyramid shows nothing nearer than the water in the pixel's neighbourhood, as over open water.
+fn sc_pierce(world_pos: vec3<f32>, frag_coord: vec2<f32>, yd_px: f32, reach: f32) -> vec3<f32> {
+    let r = clamp(reach / max(yd_px, 1e-4), 1.5, 16.0);
+    let top = i32(textureNumLevels(hiz_tex)) - 1;
+    let lvl = clamp(i32(ceil(log2(2.0 * r))) + 1, 0, top);
+    let px = vec2<i32>(frag_coord - view.viewport.xy);
+    let near = textureLoad(hiz_tex, px >> vec2<u32>(u32(lvl)), lvl).r;
+    if (near <= law_world_to_screen(world_pos).z) {
+        return vec3<f32>(1000.0, 0.0, 0.0);
+    }
+    var best = sc_pierce_tap(world_pos, frag_coord, vec2<f32>(r, 0.0), reach);
+    let b = sc_pierce_tap(world_pos, frag_coord, vec2<f32>(-r, 0.0), reach);
+    best = select(best, b, b.x < best.x);
+    let c = sc_pierce_tap(world_pos, frag_coord, vec2<f32>(0.0, r), reach);
+    best = select(best, c, c.x < best.x);
+    let d = sc_pierce_tap(world_pos, frag_coord, vec2<f32>(0.0, -r), reach);
+    best = select(best, d, d.x < best.x);
+    return best;
+}
+
+/// The shore's terms at a water pixel seen from above: `i` what `stylised_water` holds, `g` the
+/// contact geometry ([`sc_geometry_release`]). Gains from the look's shore rows: `look.shore` the
+/// wet line, the wet bed's darkening, contact foam and the meniscus; `look.shore_kind` the wet
+/// line on still water, rapids and the ocean, and in `w` the sea state.
+fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
+    let gains = water_reflect.look.shore;
+    let kinds = water_reflect.look.shore_kind;
+    let ocean = w.kind.y > 0.5;
+    let speed = length(i.flow);
+    let rapids = smoothstep(0.8, 2.2, speed);
+    let sea = select(0.0, pv_sea(), ocean && pv_on(PV_SURF));
+    let aa = i.aa;
+    let xz = i.world_pos.xz;
+    // World yards a pixel spans on the surface.
+    let yd_px = max(sqrt(length(i.d_xz_dx) * length(i.d_xz_dy)), 1e-4);
+
+    var o = sc_neutral(sc_edge_cover(g));
+    o.foam_albedo = water_dec(SC_FOAM_CREAM);
+    // The opaque foam's coverage before the bubble cut, and the wet line's.
+    var foam_c = 0.0;
+    var line = 0.0;
+    // The breath's phase where the waterline sets it; out at sea, a slow plane wave.
+    var a = fract(water_reflect.cycle.y + dot(xz, vec2<f32>(0.013, 0.017)));
+
+    // ---- the waterline -----------------------------------------------------------------------
+    let lap = select(SHORE_RUNUP_YARDS, max(SC_SWASH_YD * sea, SHORE_RUNUP_YARDS), ocean);
+    var surf = ocean && sea > 0.0 && i.to_shore < SC_SURF_YD;
+#ifdef WATER_TIER_LOW
+    surf = false;
+#endif
+    if (i.to_shore < lap + SC_SHORE_REACH || surf) {
+        // The nearest waterline point: a field read there varies along the shore and not across
+        // it, so the whole band breathes as one and the swash's tongues run up the beach.
+        let at = xz + i.shore_offset;
+        let ph = textureSampleGrad(
+            ripples,
+            ripples_samp,
+            at / SHORE_SWELL_SPREAD,
+            i.d_xz_dx / SHORE_SWELL_SPREAD,
+            i.d_xz_dy / SHORE_SWELL_SPREAD,
+        ).b;
+        a = fract(water_reflect.cycle.y + 2.0 * ph);
+        let fill = sc_swash_fill(a);
+        let cusp = textureSampleGrad(
+            ripples,
+            ripples_samp,
+            at / SC_CUSP_YD + vec2<f32>(0.31, 0.77),
+            i.d_xz_dx / SC_CUSP_YD,
+            i.d_xz_dy / SC_CUSP_YD,
+        ).b;
+        let tongue = saturate((cusp - 0.5) * 3.5 + 0.5) - 0.5;
+        // The water's edge this instant, yards seaward of the waterline.
+        let edge = max(lap * (1.0 - fill) * (1.0 + 0.7 * tongue), 0.0);
+        let d_edge = i.to_shore - edge;
+        // A waterline the depth shows standing in deep water is a seam between two batches of the
+        // same water, not a shore: the line, the front and the meniscus stay off it.
+        let real = select(1.0, 1.0 - smoothstep(0.3, 0.7, g.col), g.h_ray >= 0.0);
+
+        // Shoreward of the edge, thin water has drained: the ground shows, wet, and glossy for a
+        // while after the water left it.
+        let h_drain = select(SC_LAP_DRAIN_H, max(SC_DRAIN_H * sea, SC_LAP_DRAIN_H), ocean);
+        let open = 1.0 - smoothstep(edge - aa, edge + aa, i.to_shore);
+        let thin = 1.0 - smoothstep(0.6 * h_drain, h_drain, g.col);
+        let drained = open * thin;
+        o.cover = o.cover * (1.0 - drained);
+        o.film = drained * exp(-sc_film_age(i.to_shore, lap, a) / SC_FILM_S);
+        // The bed under the last of the water, and the drained ground, wet.
+        o.wet = (1.0 - smoothstep(lap + 0.25, lap + 0.75, i.to_shore))
+            * (1.0 - smoothstep(0.22, 0.5, g.col));
+        // The wet line and the meniscus ride the edge: hairlines, and at distance only the share of
+        // the pixel they cover, so neither becomes an outline.
+        let fw = max(i.fw_shore, 1e-4);
+        o.meniscus = (1.0 - smoothstep(0.0, SC_MENISCUS_YD + aa, d_edge)) * smoothstep(-aa, 0.0, d_edge)
+            * saturate(SC_MENISCUS_YD / fw) * real;
+        let hw = max(0.5 * SC_LINE_YD, aa);
+        let shape = 1.0 - smoothstep(0.5 * hw, hw, abs(d_edge - hw));
+        let kind_gain = select(mix(kinds.x, kinds.y, rapids), kinds.z, ocean);
+        line = gains.x * kind_gain * shape * saturate(SC_LINE_YD / fw) * real;
+
+        if (ocean && sea > 0.0) {
+            // The swash front: dense on the uprush, thinning as the backwash drains.
+            let up = a < SC_UPRUSH;
+            let back_s = max(a - SC_UPRUSH, 0.0) * SC_SWELL_S;
+            let strength = select(0.55 * exp(-back_s / 1.8) + 0.15, 0.9, up);
+            let wf = (0.2 + 0.45 * sea) * select(0.6, 1.0, up);
+            let front = (1.0 - smoothstep(0.35 * wf, wf, d_edge)) * smoothstep(-aa, aa, d_edge);
+            foam_c = max(foam_c, front * strength * smoothstep(0.0, 0.3, sea) * real);
+        }
+        if (surf) {
+            // A wave travels in at the shallow-water speed √(g·h) and breaks where the water is
+            // shallower than its height allows (H/h > 0.78); the time to the shore over a sloping
+            // bed is 2d/√(g·h), and the bore reaches the waterline as the uprush begins. Behind each
+            // bore a foam sheet thins with its age.
+            let hb = SC_WAVE_H * sea / SC_BREAK_GAMMA;
+            let c = sqrt(SC_G_YD * max(g.col, 0.06));
+            let tau = min(2.0 * i.to_shore / c, 3.0 * SC_SWELL_S);
+            let fr = fract(a + tau / SC_SWELL_S);
+            let fw_fr = clamp(2.0 * i.fw_shore / (c * SC_SWELL_S), 0.005, 0.25);
+            let sheet = max(exp(-fr * SC_SWELL_S / SC_SHEET_S), smoothstep(1.0 - fw_fr, 1.0, fr));
+            let breaking = (1.0 - smoothstep(0.75 * hb, hb, g.col))
+                * smoothstep(edge, edge + 0.4, i.to_shore)
+                * (1.0 - smoothstep(0.7 * SC_SURF_YD, SC_SURF_YD, i.to_shore));
+            foam_c = max(foam_c, breaking * sheet * (0.35 + 0.5 * sea));
+        }
+    }
+
+    // ---- contacts ----------------------------------------------------------------------------
+    let wall = sc_steep_gate(g.steep) * select(0.0, 1.0, g.h_ray >= 0.0);
+    // A wall's face under the first yard of water, seen through it, wet.
+    o.wet = max(o.wet, wall * (1.0 - smoothstep(0.35, 0.9, g.col)));
+    let energy = select(max(SC_STILL_ENERGY, saturate(speed * 0.5)), 0.55 + 0.45 * sea, ocean);
+    let breath = select(1.0, 1.0 + 0.5 * sea * (0.5 - 0.5 * cos(TAU * a)), ocean);
+    let reach = SC_CONTACT_YD * (0.5 + 0.5 * energy) * breath;
+    var dc = select(1000.0, g.h_ray, wall > 0.0 && g.col < SC_CONTACT_DEEP);
+    var gate = wall * (1.0 - smoothstep(0.6 * SC_CONTACT_DEEP, SC_CONTACT_DEEP, g.col));
+    var dir = g.to_obs;
+#ifdef WATER_TIER_HIGH
+    let p = sc_pierce(i.world_pos, i.frag_coord, yd_px, 2.0 * reach);
+    if (p.x < dc) {
+        dc = p.x;
+        dir = p.yz;
+        gate = 1.0;
+    }
+#endif
+    if (dc < 4.0 * reach) {
+        // The current piles foam on the face it runs into and draws a tail off the far one.
+        let fdir = select(vec2<f32>(0.0), i.flow / max(speed, 1e-4), speed > 1e-3);
+        let along = dot(dir, fdir);
+        let fl = saturate(speed / 1.5);
+        let tail = fl * max(-along, 0.0);
+        let r = reach * (1.0 + 0.8 * fl * max(along, 0.0)) * (1.0 + 2.2 * tail);
+        let band = 1.0 - smoothstep(0.45 * r, r, dc);
+        o.contact = gate * band * (1.0 - 0.45 * tail) * gains.z * (0.35 + 0.65 * energy);
+        foam_c = max(foam_c, o.contact);
+        o.meniscus = max(
+            o.meniscus,
+            gate * (1.0 - smoothstep(0.0, SC_MENISCUS_YD + yd_px, dc)) * saturate(SC_MENISCUS_YD / yd_px),
+        );
+    }
+
+    // ---- the foam ------------------------------------------------------------------------------
+    var thick = 0.0;
+    if (foam_c > 0.0 || line > 0.0) {
+        let pat = sc_pattern(xz, i.flow, i.d_xz_dx, i.d_xz_dy, SC_FOAM_SCALE);
+        let m = sc_bubble_mask(foam_c, pat.v, pat.fw);
+        // The line breaks into beads and dashes along the shore.
+        let beads = line * (0.35 + 0.65 * smoothstep(0.3, 0.7, pat.v));
+        o.foam = max(m, beads);
+        thick = saturate((pat.v - (1.0 - foam_c)) / 0.35) * step(beads, m);
+    }
+#ifndef WATER_TIER_LOW
+    if (ocean && sea > 0.05 && i.shore_far > SC_CAP_SHORE.x) {
+        let crest = sc_crest(xz, i.d_xz_dx, i.d_xz_dy);
+        let thr = mix(0.93, 0.72, sea);
+        let cap = smoothstep(thr, thr + 0.1, crest)
+            * smoothstep(SC_CAP_SHORE.x, SC_CAP_SHORE.y, i.shore_far)
+            * (0.6 + 0.4 * sea);
+        if (cap > 0.0) {
+            let lace = sc_pattern(xz, vec2<f32>(0.0), i.d_xz_dx, i.d_xz_dy, SC_CAP_SCALE);
+            let mc = sc_bubble_mask(cap, lace.v, lace.fw);
+            thick = select(thick, saturate((lace.v - (1.0 - cap)) / 0.35), mc > o.foam);
+            o.foam = max(o.foam, mc);
+        }
+    }
+#endif
+    // Cream where no shore foam lies, so river and wake foam are not lace.
+    o.foam_albedo = water_dec(select(SC_FOAM_CREAM, mix(SC_FOAM_LACE, SC_FOAM_CREAM, thick), o.foam > 0.0));
+    return o;
+}
+
+/// The shore's terms on the surface's layer, after its edge coverage: the bed under the wet band
+/// passes `look.shore.y` of itself; drained ground keeps a film's share of the reflection `refl`
+/// and the glints `spec`, at the surface's reflectance `f_surf`; the meniscus adds a share of the
+/// reflection. Linear light; identity on [`sc_neutral`]'s terms.
+fn sc_layer(a: WaterLayer, sc: ShoreContact, f_surf: f32, refl: vec3<f32>, spec: vec3<f32>) -> WaterLayer {
+    let gains = water_reflect.look.shore;
+    let f_wet = select(SC_WET_DEFAULT, gains.y, gains.y > 0.0);
+    let t = a.t * mix(1.0, f_wet, sc.wet);
+    let film = (1.0 - sc.cover) * sc.film * SC_FILM_GLOSS * (f_surf * refl + spec);
+    let rim = sc.meniscus * gains.w * SC_MENISCUS_F * refl;
+    return WaterLayer(a.l + film + rim, t);
+}
+#endif // WATER_PREVIEW
+
 fn stylised_water(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
@@ -3076,7 +4789,18 @@ fn stylised_water(
 
     // The surface: the ripple octaves through their mips, the wake, and the roughness the mips
     // removed ([`water_surface`]).
+#ifdef WATER_PREVIEW
+    // `waves`: the wind's field around the same octaves ([`water_surface_wg`]); a uniform branch,
+    // so both arms' implicit-LOD taps stay legal.
+    var surf: WaterSurface;
+    if (pv_on(PV_WAVES)) {
+        surf = water_surface_wg(xz, flow, wake_slope, wg_wave_kind(flow, shore, sb, tilt));
+    } else {
+        surf = water_surface(xz, flow, wake_slope);
+    }
+#else
     let surf = water_surface(xz, flow, wake_slope);
+#endif
     // The reflections' lookup point slides by the resolved low band only: the octaves finer than
     // ~8 px of footprint would make a reflected trunk wander sideways row to row.
 #ifdef WATER_VIEW
@@ -3089,6 +4813,11 @@ fn stylised_water(
     let n_slide = surf.n_lo;
 #endif
     let to_view = normalize(view.world_position.xyz - world_pos);
+#ifdef WATER_PREVIEW
+    // `rough`: the reflections' lobe, the surface's unresolved roughness; none from below.
+    let rr_gain = select(0.0, pv_rough_gain(), view.world_position.y > world_pos.y);
+    let lobe = rough_lobe(surf.a2, to_view, flat_n, rr_gain);
+#endif
 
     // The wake rides the body's column with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
     let wake_push = wake_height * WAKE_BODY_DEPTH;
@@ -3099,6 +4828,10 @@ fn stylised_water(
     // The body as transport: the column behind the pixel, its transmittance and its albedo, in
     // uniform control flow for the bands' `fwidth`; then its light.
     let optics = water_body_optics(world_pos, frag_coord, sb, n_slide, flat_n, to_view, bi, wake_push);
+#ifdef WATER_PREVIEW
+    // `shore`: the contact geometry while derivatives are defined, held across the tiers.
+    let sc_held = sc_geometry_hold(sc_geometry(world_pos, sb, bi.fallback_z));
+#endif
 #ifdef WATER_REFRACT
     // The refracted bed, read here where its lookup is made, held with the bed's transmittance
     // ([`body_hold`]) across the tiers to the composite.
@@ -3122,7 +4855,18 @@ fn stylised_water(
     // resolves, so a mirror and the floor show one sky and the ripple shows through the Fresnel
     // and the body as on mirror water.
     let r_rip = reflect(-to_view, n);
+#ifdef WATER_PREVIEW
+    // `rough_sky`: the floor on the mirrors' lobe, lifted and blurred alike, where their chain runs.
+    var sky_dir = reflect(-to_view, flat_n);
+    var sky_alpha = sqrt(surface_lost2(surf));
+    if (rr_gain > 0.0 && pv_on(PV_ROUGH_SKY) && rough_chain_ready(false)) {
+        sky_dir = rough_lift_dir(sky_dir, lobe.lift);
+        sky_alpha = rough_floor_alpha(lobe, sky_alpha);
+    }
+    let sky = sky_floor(sky_dir, sky_alpha);
+#else
     let sky = sky_floor(reflect(-to_view, flat_n), sqrt(surface_lost2(surf)));
+#endif
     // Seen from below, the surface reflects the dome's two stops along the rippled ray under the
     // open illuminant ([`underside_sky`], [`open_illuminant_g`]), in gamma; a WMO interior pool's
     // under 1, as it is drawn unlit.
@@ -3233,9 +4977,15 @@ fn stylised_water(
                 continue;
             }
             let sl = water_reflect.probes[idx[k]];
+#ifdef WATER_PREVIEW
+            probe_rgb = probe_rgb
+                + sample_probe_rough(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w), lobe)
+                    * (w[k] / wsum);
+#else
             probe_rgb = probe_rgb
                 + sample_probe(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w))
                     * (w[k] / wsum);
+#endif
         }
         probe_w = water_reflect.probe_cfg.x * min(cover, 1.0);
     }
@@ -3338,8 +5088,17 @@ fn stylised_water(
     // times coverage times trust. Where both reach a fragment they blend by weight.
     // Off probe water the mirrors stand down, so the probe beneath them shows through.
     let serve = vec4<f32>(1.0, 1.0, 1.0, smoothstep(0.0, 1.0, planar.x));
+#ifdef WATER_PREVIEW
+    // `rough`: each mirror read on its chain over the lobe its hit distance lets the screen show.
+    let rr_hit = rough_mirror_hit(frag_coord);
+    let m1 = planar_read_rough(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt, lobe, rr_hit)
+        * serve;
+    let m2 = planar_read_rough(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt, lobe, rr_hit)
+        * serve;
+#else
     let m1 = planar_read(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt) * serve;
     let m2 = planar_read(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt) * serve;
+#endif
     // The colour favours the mirror whose plane is nearer this water — both are trusted across
     // their whole tolerance, so without this a body between the two planes took an even mix of a
     // right image and a wrong one. The overall weight below is untouched.
@@ -3380,6 +5139,10 @@ fn stylised_water(
         occ = floor_refog(occ, world_pos, to_view, flat_n);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
+#ifdef WATER_PREVIEW
+    // `glint`: the open reflected sky the glints are seen through.
+    let wg_open = wg_glint_open(occ);
+#endif
     // The reflected sky's light crosses the fog between the surface and the eye, which the dome as
     // drawn never took: the open sky the floor reflects and the dome the mirror drew are fogged at
     // the surface ([`water_fog`]), as the in-scatter is. What the tiers drew of the world they
@@ -3489,14 +5252,34 @@ fn stylised_water(
     // Anti-aliasing against how much distance one pixel covers, bounded at both ends: below so a
     // near-view edge stays an edge, above because past a fraction of the band's own width this
     // stops being anti-aliasing and becomes a smear.
-    let aa = clamp(fwidth(to_shore), 0.015, 0.20);
+    let fw_shore = fwidth(to_shore);
+    let aa = clamp(fw_shore, 0.015, 0.20);
     // World yards per pixel, for the taps inside the gate.
     let d_xz_dx = dpdx(xz);
     let d_xz_dy = dpdy(xz);
 
+    // The edge's coverage over the bed (see below, where the composite takes it).
+    var soft = 1.0;
+    if (thickness >= 0.0) {
+        soft = saturate(thickness / SOFT_EDGE_YARDS);
+    }
+#ifdef WATER_PREVIEW
+    // `shore`: the wet line, the swash, contacts and whitecaps ([`shore_contact`]), seen from above.
+    let sc_on = pv_on(PV_SHORE) && eye_above;
+    var sc = sc_neutral(soft);
+    if (sc_on) {
+        sc = shore_contact(
+            ScIn(world_pos, frag_coord, to_shore, shore, shore_offset, flow, aa, fw_shore,
+                d_xz_dx, d_xz_dy),
+            sc_geometry_release(sc_held),
+        );
+    }
+#else
+    let sc_on = false;
+#endif
     var line = 0.0;
     var bubbles = 0.0;
-    if (to_shore < FOAM_REACH) {
+    if (to_shore < FOAM_REACH && !sc_on) {
         // 1. The line. Its outer edge wavers only slightly, so it reads as an even edge rather than
         //    as something ragged; the raggedness belongs to the bubbles. No time in this term —
         //    foam gathers where the shore's shape makes it gather, and an edge that crawls reads as
@@ -3552,10 +5335,17 @@ fn stylised_water(
     // ...and the wake's own aeration alongside them. `max`, not a sum: these are three ways for the
     // same surface to be white, and adding them blows out where a swimmer crosses a waterline —
     // which is precisely where a player spends their time in the water.
+#ifdef WATER_PREVIEW
+    let foam = max(
+        max(max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL), sc.foam),
+        wake_foam * WAKE_FOAM_LEVEL,
+    );
+#else
     let foam = max(
         max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL),
         wake_foam * WAKE_FOAM_LEVEL,
     );
+#endif
 
     // The BODY thins to nothing where something passes through the surface: a sheet of water
     // meeting a rock along a hard line is the giveaway that it is a sheet, while real water fades
@@ -3565,10 +5355,6 @@ fn stylised_water(
     // **The foam is taken after the fade, not before it.** Foam sits ON the surface — it is spray,
     // not water column — so softening it against the very intersection it gathers at erases the
     // shoreline exactly where the line belongs, which is what the first attempt did.
-    var soft = 1.0;
-    if (thickness >= 0.0) {
-        soft = saturate(thickness / SOFT_EDGE_YARDS);
-    }
 #ifdef WATER_VIEW
     // The debug views paint one quantity over the water, opaque and unfogged; the composite's own
     // views change its layer below instead.
@@ -3657,6 +5443,21 @@ fn stylised_water(
     // the gamma, so the peak over black is the gamma weight's; the moon's weight is raised likewise.
     // A highlight adds light, so the fog takes its share away rather than mixing toward a colour.
     let gw = water_reflect.look.composite.y;
+#ifdef WATER_PREVIEW
+    // `glint`: the sun's and the moon's GGX lobes on the surface's roughness ([`wg_glints`]).
+    var spec_glint: vec3<f32>;
+    if (pv_on(PV_GLINT)) {
+        spec_glint = wg_glints(n, to_view, to_light, to_moon, surf, wg_open, wg_lit_sky(eye_above, room_fog));
+    } else {
+        spec_glint = water_dec(wow_light.light_spec.rgb)
+            * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
+            * (gw * sun_reach)
+            + water_dec(MOON_SPEC_COLOR)
+                * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
+                * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w);
+    }
+    let spec_l = spec_glint * fog.f;
+#else
     let spec_l = (water_dec(wow_light.light_spec.rgb)
         * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
         * (gw * sun_reach)
@@ -3664,6 +5465,7 @@ fn stylised_water(
             * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
             * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w))
         * fog.f;
+#endif
 #ifdef WATER_VIEW
     // The body's own views, opaque and unfogged: what passes from the bed, what the body scatters,
     // and the albedo the ramp reads at this pixel; then the surface's fog.
@@ -3722,12 +5524,22 @@ fn stylised_water(
         vec3<f32>(body.w_in),
         body.t_bed,
     );
+#ifdef WATER_PREVIEW
+    // `shore`: the edge's coverage with the swash's draw-back, then the wet bed, film and rim.
+    layer = layer_cover(layer, sc.cover);
+    layer = sc_layer(layer, sc, f_surf, refl_out, spec_l);
+#else
     layer = layer_cover(layer, soft);
+#endif
     // Foam is coverage: spray over the surface, hiding what is under it.
     // Lit by the body's light in the terrain light's colour (warm at dusk, blue under the moon),
     // and fogged as a surface is.
     if (foam > 0.0) {
+#ifdef WATER_PREVIEW
+        let foam_l = fog_diffuse(sc.foam_albedo * light.foam, fog.f, fog.g);
+#else
         let foam_l = fog_diffuse(water_dec(FOAM_COLOR) * light.foam, fog.f, fog.g);
+#endif
         layer = layer_over(foam_l, foam, layer);
     }
 #ifdef WATER_REFRACT

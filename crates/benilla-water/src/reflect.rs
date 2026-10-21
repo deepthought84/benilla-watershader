@@ -55,7 +55,7 @@ use crate::view::WorldCamera;
 use benilla_assets::coords::{bevy_to_wow, wow_to_bevy};
 use benilla_world::liquid::{
     mirror_view_shape, ReflectionCamera, CLOCK_LANES, DOME_LANES, LOOK_LANES, LOOK_QUALITY,
-    LOOK_WATER_RECT, MARCH_LANES, MIRROR2_LANES, PROBE_LANES, REFLECT_FLOATS,
+    LOOK_WATER_RECT, MARCH_LANES, MIRROR2_LANES, PREVIEW_LANES, PROBE_LANES, REFLECT_FLOATS,
 };
 
 /// How far from the eye a water surface may be and still be the **fallback** plane — the "water
@@ -201,6 +201,10 @@ pub(crate) struct WaterReflect {
     pub(crate) image: Handle<Image>,
     /// The second mirror's target — see [`SECOND_SHARE_MIN`]. Same size as `image`.
     pub(crate) image2: Handle<Image>,
+    /// The two captures' roughness chains for the preview's rough reflections
+    /// (`super::mirror_chain`), rebuilt with them.
+    pub(crate) chain: Handle<Image>,
+    pub(crate) chain2: Handle<Image>,
     /// The image's current size in physical pixels.
     size: UVec2,
 }
@@ -435,6 +439,8 @@ fn setup_reflection(
     commands.insert_resource(WaterReflect {
         image,
         image2,
+        chain: images.add(super::mirror_chain::chain_image(size)),
+        chain2: images.add(super::mirror_chain::chain_image(size)),
         size,
     });
     commands.insert_resource(WaterReflectBuffer(device.create_buffer(
@@ -1182,10 +1188,11 @@ pub(super) fn drive_reflection(
     mut held_plane: Local<Option<f32>>,
     mut held_second: Local<Option<f32>>,
     mut second_idle: Local<f32>,
-    (time, clock, mut look): (
+    (time, clock, mut look, preview): (
         Res<Time>,
         Res<super::clock::WaterClock>,
         super::look::LookSources,
+        Res<super::preview::PreviewLanes>,
     ),
     world_cam: Query<(&GlobalTransform, &Camera, &Projection), With<WorldCamera>>,
     mut mirror: MirrorCamera,
@@ -1195,6 +1202,8 @@ pub(super) fn drive_reflection(
     // every path out of this system below is a frame on which the water still has to draw.
     let mut dome = crate::sky::dome_uniforms(&light);
     data.0[LOOK_LANES].copy_from_slice(&look.lanes(&light, &dome));
+    // The preview's rows, zero where it is off (`super::preview`).
+    data.0[PREVIEW_LANES].copy_from_slice(&preview.0);
     let to_sun = light.celestial_dir.normalize_or_zero();
     data.0[4..8].copy_from_slice(&[to_sun.x, to_sun.y, to_sun.z, sun_visible.0]);
     let to_moon = light.moon_dir_white.normalize_or_zero();
@@ -1329,6 +1338,8 @@ pub(super) fn drive_reflection(
     if want != reflect.size {
         reflect.image = images.add(reflection_image(want));
         reflect.image2 = images.add(reflection_image(want));
+        reflect.chain = images.add(super::mirror_chain::chain_image(want));
+        reflect.chain2 = images.add(super::mirror_chain::chain_image(want));
         reflect.size = want;
         if let Some((_, _, _, target2)) = second_cam.as_mut() {
             **target2 = RenderTarget::Image(reflect.image2.clone().into());
@@ -1419,6 +1430,8 @@ fn restamp_reflection_target(
     for (_, material) in materials.iter_mut() {
         material.extension.reflection = reflect.image.clone();
         material.extension.reflection2 = reflect.image2.clone();
+        material.extension.reflection_chain = reflect.chain.clone();
+        material.extension.reflection_chain2 = reflect.chain2.clone();
     }
 }
 
@@ -1511,7 +1524,8 @@ mod tests {
         assert_eq!(LOOK_LANES.start, CLOCK_LANES.end);
         assert_eq!(LOOK_LANES.len(), 556);
         assert_eq!(LOOK_LANES.start % 4, 0, "a vec4 row starts on 16 bytes");
-        assert_eq!(REFLECT_FLOATS, LOOK_LANES.end);
+        assert_eq!(PREVIEW_LANES.start, LOOK_LANES.end);
+        assert_eq!(REFLECT_FLOATS, PREVIEW_LANES.end);
         let look = body.find("look: WaterLook").unwrap();
         assert!(cycle < look, "the look rows come after the clock");
         let tail: Vec<&str> = body[look..]

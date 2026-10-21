@@ -692,6 +692,14 @@ pub struct LiquidExt {
     /// [`Self::ripples`]' repeating sampler.
     #[texture(122, visibility(fragment))]
     pub shadow: Handle<Image>,
+    /// The first planar mirror's roughness chain (`benilla_water`'s mirror chain): the capture at
+    /// half its size through five levels, premultiplied by coverage, for the preview's rough
+    /// reflections. Read through [`Self::reflection`]'s sampler; a 1x1 placeholder reads as none.
+    #[texture(123, visibility(fragment))]
+    pub reflection_chain: Handle<Image>,
+    /// The second planar mirror's chain, as [`Self::reflection_chain`].
+    #[texture(124, visibility(fragment))]
+    pub reflection_chain2: Handle<Image>,
     /// The reflection's per-frame parameters (`benilla_world::liquid::reflect`), a buffer so the
     /// per-frame write does not rebuild every liquid material's bind group.
     #[storage(107, read_only, buffer, visibility(fragment))]

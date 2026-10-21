@@ -208,8 +208,40 @@ pub const LOOK_BODY: usize = LOOK_RIPPLE_MEAN + 4;
 pub const LOOK_SHORE: usize = LOOK_BODY + 40;
 /// `shore_kind`: the wet line per kind of water, and the shore lap's phase.
 pub const LOOK_SHORE_KIND: usize = LOOK_SHORE + 4;
+/// The Improved Water preview's rows, the shader's `WaterReflect::preview` (a `WaterPreview`):
+/// [`PREVIEW_ROWS`] `vec4`s, zero where the preview or a feature of it is off.
+pub const PREVIEW_LANES: std::ops::Range<usize> = LOOK_LANES.end..LOOK_LANES.end + 4 * PREVIEW_ROWS;
+/// The preview block's rows.
+pub const PREVIEW_ROWS: usize = 77;
+/// `mask`: x the feature bits (`benilla_assets::preview`), y the rough reflection's cone share,
+/// z the sea state's override (0 derives it), w spare.
+pub const PV_MASK: usize = PREVIEW_LANES.start;
+/// `gains`: x caustics, y lights, z sparkles, w river foam.
+pub const PV_GAINS: usize = PV_MASK + 4;
+/// `clocks`: phases in [0, 1): x river, y weather, z wake; w spare.
+pub const PV_CLOCKS: usize = PV_MASK + 8;
+/// `wind`: xy the to-direction (unit), z the speed in yd/s with the storm in it, w the storm.
+pub const PV_WIND: usize = PV_MASK + 12;
+/// `weather`: x rain, y snow, z the sea state 0..1, w the river mist's gain.
+pub const PV_WEATHER: usize = PV_MASK + 16;
+/// `swell`: xyz the three swell trains' phases, w the glint's own sun reach (0: `sun.w`).
+pub const PV_SWELL: usize = PV_MASK + 20;
+/// `gust`: xy the gust field's offset, zw the slick field's, in their tiles.
+pub const PV_GUST: usize = PV_MASK + 24;
+/// `cap`: xy the capillary octave's drift in its tiles, zw spare.
+pub const PV_CAP: usize = PV_MASK + 28;
+/// `drift`: the five ripple octaves' downwind drifts under `waves`, (d0, d1), (d2, d3), (d4, –).
+pub const PV_DRIFT: usize = PV_MASK + 32;
+/// `falls`: eight fall lines, two rows each.
+pub const PV_FALLS: usize = PV_MASK + 44;
+/// `wake`: the swimmers' and rings' rows.
+pub const PV_WAKE: usize = PV_MASK + 108;
+/// `under`: the view from below the surface.
+pub const PV_UNDER: usize = PV_MASK + 212;
+/// `spare`: room for shader-only iteration.
+pub const PV_SPARE: usize = PV_MASK + 276;
 /// The reflection block's length in floats — `liquid.wgsl`'s `WaterReflect`.
-pub const REFLECT_FLOATS: usize = LOOK_LANES.end;
+pub const REFLECT_FLOATS: usize = PREVIEW_LANES.end;
 
 /// The pass targets and the reflection block every liquid material binds. The reference water
 /// never samples them; the Improved Water plugin publishes its own in [`WaterPassSet`], and
@@ -220,6 +252,10 @@ pub struct WaterPassImages {
     pub reflection: Handle<Image>,
     /// The second planar mirror's capture.
     pub reflection2: Handle<Image>,
+    /// The two mirrors' roughness chains (the preview's rough reflections); the placeholder is one
+    /// texel, which the shader reads as no chain.
+    pub reflection_chain: Handle<Image>,
+    pub reflection_chain2: Handle<Image>,
     /// The scene colour snapshot the march reads.
     pub scene_color: Handle<Image>,
     /// The probe cube array.
@@ -378,6 +414,8 @@ pub(super) fn placeholder_pass_images(
     commands.insert_resource(WaterPassImages {
         reflection: flat.clone(),
         reflection2: flat.clone(),
+        reflection_chain: flat.clone(),
+        reflection_chain2: flat.clone(),
         scene_color: flat.clone(),
         probe: cube,
         hiz: depth.clone(),
