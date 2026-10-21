@@ -2054,6 +2054,31 @@ mod tests {
         );
     }
 
+    /// A capture starts in the world, whose first `OnEnter(InWorld)` runs ahead of `Startup` and
+    /// parks nothing, and builds no player UI; the entry still takes the startup's glue VM out of
+    /// the world, so its login screen never paints over the shot.
+    #[test]
+    fn a_capture_world_entry_retires_the_glue_vm() {
+        use crate::client_state::ClientState;
+        use benilla_ui::script::VmKind;
+        let mut world = World::new();
+        world.insert_resource(State::new(ClientState::InWorld));
+        world.insert_resource(crate::run_mode::CaptureMode);
+        arm_entry_ui_load(&mut world);
+        setup_script(&mut world);
+        assert_eq!(
+            world.non_send_resource::<UiScript>().vm_kind(),
+            VmKind::Glue
+        );
+        run_pending_entry_load(&mut world);
+        assert_eq!(
+            world.non_send_resource::<UiScript>().vm_kind(),
+            VmKind::InGame,
+            "a boot VM, never the glue's"
+        );
+        assert!(world.get_non_send_resource::<ParkedGlueVm>().is_none());
+    }
+
     /// Only the in-game state registers the macro verbs (`RegisterMacroFunctions` `0x4f1b90`, from
     /// `0x490297`), so the world-entry VM gets the icon chooser's source and the glue VM and a
     /// reload's boot VM get none.
