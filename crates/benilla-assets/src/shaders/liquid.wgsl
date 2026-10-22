@@ -6503,6 +6503,27 @@ struct RfRaft {
     band: f32,
 };
 
+/// [`foam_noise`] without its drifts: the rafts' lace rides the raft, so a raft's edge (the
+/// lace's cut) holds its shape while it is carried instead of boiling as the shore's pattern
+/// drifts under it.
+fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
+    let rot = vec2<f32>(0.8305, 0.5570);
+    let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
+    let warp = textureSampleGrad(ripples, ripples_samp, p * 0.031, ddx * 0.031, ddy * 0.031).rg * 2.0 - 1.0;
+    let a_dx = ddx * 0.83;
+    let a_dy = ddy * 0.83;
+    let a = textureSampleGrad(ripples, ripples_samp, p * 0.83 + warp * 0.35, a_dx, a_dy);
+    let b_dx = (r * ddx) * 1.97;
+    let b_dy = (r * ddy) * 1.97;
+    let b = textureSampleGrad(ripples, ripples_samp, (r * p) * 1.97 + warp * 0.20, b_dx, b_dy);
+    let ga = (a.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
+    let gb = (b.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
+    var out: FoamNoise;
+    out.v = a.b * 0.55 + b.b * 0.45;
+    out.fw = (abs(dot(ga, a_dx)) + abs(dot(ga, a_dy))) * 0.55 + (abs(dot(gb, b_dx)) + abs(dot(gb, b_dy))) * 0.45;
+    return out;
+}
+
 /// One set of whitewater rafts at `xz` (round 2), on the rafts' clock offset by `off` turns: the
 /// raft field carried by the current about the set's mid-life (so the shear has least to stretch
 /// where the rafts are fullest), a fresh offset each life, its cut falling as the set is born and
@@ -6529,7 +6550,7 @@ fn rf_raft(
     let c = cov * life * 0.75;
     let lev = rf_level(max(c, 0.002));
     let body = smoothstep(lev - 0.3, lev + 1.0, n.n) * smoothstep(0.0, 0.02, c);
-    let pat = foam_noise((q + h * 37.0) * RF_LACE_SCALE, ddx * RF_LACE_SCALE, ddy * RF_LACE_SCALE);
+    let pat = rf_lace_noise((q + h * 37.0) * RF_LACE_SCALE, ddx * RF_LACE_SCALE, ddy * RF_LACE_SCALE);
     let pv = saturate((pat.v - 0.5) * 3.5 + 0.5);
     var foam = sc_bubble_mask(min(body * 1.1, 0.84), pv, pat.fw * 3.5);
     // Unresolved, lace is mostly water: its mean, not a veil over the mirror.
@@ -6570,22 +6591,27 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     // apart, each born, carried and dissolved into lace without morphing, drawn through the
     // bubble lace so they hold holes and ragged edges instead of a paper rim. Coverage grows with
     // the drive's square and stays under 45%, so the mirror survives between them.
-    let cov = min(0.45 * turb * turb, 0.32);
+    // Behind what breaks the surface the rafts' cover rises into a tail down the current, on the
+    // same slow sets (the fast field's tail morphed within a fifth of a second).
+    // So does the water over a rock a hand under the surface (it used the fast field too and
+    // flashed on and off).
+    var tail = 0.0;
+    var contact = 0.0;
+#ifndef WATER_TIER_LOW
+    let off_bank = smoothstep(1.0, 2.0, i.to_shore);
+    tail = rf_obstacle(i.world_pos, s.e1) * smoothstep(0.9, 1.8, s.speed) * off_bank;
+    contact = (1.0 - smoothstep(0.03, 0.14, i.depth)) * i.bed_known * off_bank
+        * smoothstep(1.0, 2.5, s.speed);
+#endif
+    let cov = max(min(0.45 * turb * turb, 0.32), max(0.5 * tail, 0.55 * contact));
     let r0 = rf_raft(xz, i.flow, 0.0 + 0.12 * lump.n, cov, o, ddx, ddy, px);
     let r1 = rf_raft(xz, i.flow, 0.5 + 0.12 * lump.n, cov, o, ddx, ddy, px);
     var white = max(r0.foam, r1.foam) * RF_WHITE_LEVEL * smoothstep(0.0, 0.05, cov);
     let r_g = select(r1.g, r0.g, r0.foam >= r1.foam);
     let r_band = max(r0.band, r1.band);
-    let e = max(1.5 * length(raft.g) * px, 0.08);
 
     var streak = 0.0;
 #ifndef WATER_TIER_LOW
-    // Rocks, piles and their waterlines in running water, away from the terrain's: a bank is
-    // shallow too, and its foam is the shear streaks'.
-    let off_bank = smoothstep(1.0, 2.0, i.to_shore);
-    let tail = rf_obstacle(i.world_pos, s.e1) * smoothstep(0.9, 1.8, s.speed) * off_bank;
-    let contact = (1.0 - smoothstep(0.03, 0.14, i.depth)) * i.bed_known * off_bank
-        * smoothstep(1.0, 2.5, s.speed);
     let sl = rf_streak_field(q0, q1, s.e1, o, ddx, ddy, ph.w0);
     let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
     // Foam is carried on running water, not on a lake's slow drift.
@@ -6608,11 +6634,6 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     streak = mix(line_v * bead, carried * 0.2, smoothstep(0.6 * wl, 2.0 * wl, px))
         * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * (1.0 - saturate(turb * 1.3))
         * smoothstep(0.2, 0.55, carried);
-    // Behind what breaks the surface a tail of rafts runs down the current; round it, a ring.
-    let tail_c = smoothstep(rf_level(0.7 * tail), rf_level(0.7 * tail) + e, raft.n)
-        * smoothstep(0.0, 0.1, tail);
-    let ring = contact * smoothstep(-1.2, -0.6, raft.n);
-    white = max(white, max(tail_c * 0.8, ring * 0.85));
 #endif
 
     let env = smoothstep(0.8, 1.4, s.froude) * smoothstep(1.2, 3.5, s.speed)
