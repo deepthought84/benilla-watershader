@@ -51,11 +51,29 @@ fn fs_downsample_water(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
     return vec4<f32>(rgb.rgb, e);
 }
 
+// Round 2: the excess spread wider than FFXGlow's own kernel, so it reads as a halo round the
+// glints rather than a fill between them: the blurred quarter texel at `uv` and a ring of eight at
+// three quarter texels, its alpha a 30/70 blend of the two; the colour stays the centre's.
+fn water_glow_wide(uv: vec2<f32>) -> vec4<f32> {
+    let c = textureSample(blur_tex, in_samp, uv);
+    let t = 3.0 / vec2<f32>(textureDimensions(blur_tex));
+    var ring = 0.0;
+    for (var k = 0; k < 8; k = k + 1) {
+        let a = f32(k) * 0.7853982 + 0.3927;
+        ring = ring + textureSample(blur_tex, in_samp, uv + vec2<f32>(cos(a), sin(a)) * t).a;
+    }
+    return vec4<f32>(c.rgb, 0.3 * c.a + 0.7 * ring / 8.0);
+}
+
+// The weight's trim (round 2): weight 6 fused a sunset's glitter into one white column; this
+// takes the default to an effective 2.
+const WATER_GLOW_TRIM: f32 = 0.34;
+
 // The blurred excess `b.a` over the combine's gamma output `outg`, as light: weight `wave.z`, capped
 // at `wave.w`, in the hue of the blurred neighbourhood, added under a square-law decode so a dark
 // night bay blooms more than a bright noon one.
 fn water_glow_over(outg: vec3<f32>, b: vec4<f32>) -> vec3<f32> {
-    let e = min(max(b.a, 0.0), ffx.wave.w) * ffx.wave.z;
+    let e = min(max(b.a, 0.0), ffx.wave.w) * ffx.wave.z * WATER_GLOW_TRIM;
     let m = max(b.r, max(b.g, b.b));
     let hue = select(vec3<f32>(1.0), b.rgb / m, m > 1e-3);
     return min(sqrt(outg * outg + e * hue), vec3<f32>(1.0));
@@ -133,7 +151,7 @@ fn combine_body(uv: vec2<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
     // Clamped like the downsample taps: the screen term must saturate before the glow add.
     let sg = clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0));
 #ifdef WATER_GLOW
-    let blur4 = textureSample(blur_tex, in_samp, uv);
+    let blur4 = water_glow_wide(uv);
     let bg = max(blur4.rgb, vec3<f32>(0.0));
 #else
     let bg = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
@@ -263,7 +281,7 @@ const WU_G: f32 = 10.7283;
 /// Fresh water's index, and per channel at about 650, 550 and 450 nm (blue a little high, so the
 /// window's rim shows its fringe).
 const WU_ETA: f32 = 1.333;
-const WU_ETA_RGB: vec3<f32> = vec3<f32>(1.329, 1.333, 1.341);
+const WU_ETA_RGB: vec3<f32> = vec3<f32>(1.3315, 1.333, 1.3355);
 /// Water's reflectance head-on.
 const WU_F0: f32 = 0.02;
 const WU_LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -319,14 +337,14 @@ const WU_RING_SLOPE: f32 = 1.0;
 
 /// Snell's window: its gain over the n² radiance the air's light gains entering the water, the
 /// land haze's share at its rim, the sun's halo and disc, and the transmitted glint's weight.
-const WU_WINDOW_GAIN: f32 = 0.75;
-const WU_RIM_LAND: f32 = 0.65;
+const WU_WINDOW_GAIN: f32 = 1.25;
+const WU_RIM_LAND: f32 = 0.3;
 const WU_SUN_HALO: f32 = 0.6;
 const WU_SUN_DISC: f32 = 6.0;
 const WU_WINDOW_GLINT: f32 = 2.0;
 const WU_GLINT_ALPHA_MIN: f32 = 0.06;
 /// The internal mirror: the mirrored bed's share over the in-scatter, and its blur in pixels.
-const WU_TIR_BED: f32 = 0.45;
+const WU_TIR_BED: f32 = 0.38;
 const WU_TIR_BLUR_PX: f32 = 3.0;
 /// Foam seen from below: the light it passes, against its lit top.
 const WU_FOAM_UNDER: f32 = 0.45;
@@ -344,9 +362,9 @@ const WU_SHALLOW_LIFT: f32 = 0.01;
 const WU_DEPTH_DIM: f32 = 0.02;
 /// The shafts' and the caustics' strength, the caustics' fade depth (yards) and their cell rates
 /// (cells a yard: 56 and 80 to the 64-yard tile).
-const WU_SHAFT_GAIN: f32 = 0.9;
-const WU_CAUSTIC_GAIN: f32 = 0.55;
-const WU_CAUSTIC_DEPTH: f32 = 9.0;
+const WU_SHAFT_GAIN: f32 = 2.2;
+const WU_CAUSTIC_GAIN: f32 = 1.5;
+const WU_CAUSTIC_DEPTH: f32 = 14.0;
 const WU_CAUSTIC_F1: f32 = 0.875;
 const WU_CAUSTIC_F2: f32 = 1.25;
 const WU_CAUSTIC_MEAN: f32 = 0.22;
@@ -362,7 +380,7 @@ const WU_SHAFT_M2: f32 = 29.0;
 const WU_SHAFT_A: f32 = 0.24;
 const WU_SHAFT_H: f32 = 0.12;
 /// The waterline's band at the near plane, pixels.
-const WU_MENISCUS_PX: f32 = 5.0;
+const WU_MENISCUS_PX: f32 = 9.0;
 /// The combine's output range under water, gamma: no channel reaches 0 or 1.
 const WU_OUT_FLOOR: f32 = 0.016;
 const WU_OUT_TOP: f32 = 0.965;
@@ -842,7 +860,7 @@ fn wu_window_sky(
     let e = max(a.y, 1e-6);
     let sky = mix(horizon_g, zenith_g, sqrt(e));
     let rim = 1.0 - smoothstep(0.03, 0.16, e);
-    let land = land_g * 0.55 + horizon_g * 0.2;
+    let land = mix(horizon_g, land_g, 0.5);
     return wu_dec(mix(sky, land, rim * WU_RIM_LAND));
 }
 
@@ -898,7 +916,13 @@ fn wu_underside(
     tir_bed_w: f32,
 ) -> WuUnderside {
     let rd = -to_view;
-    let sn = wu_snell(rd, n, 0.015 + 2.0 * alpha * alpha);
+    // Round 2: the window reads the ripple's tilt held to 0.12, so steep facets far outside the
+    // critical cone do not throw detached blobs of sky, and a softer edge than a hard cut.
+    let tilt = vec2<f32>(n.x, n.z) / max(n.y, 0.2);
+    let tl = length(tilt);
+    let t_k = select(1.0, 0.07 / tl, tl > 0.07);
+    let n_w = normalize(vec3<f32>(tilt.x * t_k, 1.0, tilt.y * t_k));
+    let sn = wu_snell(rd, n_w, 0.08 + 2.0 * alpha * alpha);
     let sun_l = wu_dec(sun_g) * sun_reach;
     var win = wu_window_sky(sn.a, zenith_g, horizon_g, land_g);
     let sd = max(dot(sn.a, to_sun), 0.0);
@@ -1033,6 +1057,82 @@ fn wu_shafts(
     return acc / max(mean, 1e-5);
 }
 
+/// One light column of the cell `cell` in sun space (round 2, the underwater sketch's): its
+/// centre swaying in the cell, its radius, and its strength (0 for a cell without one, flickering
+/// otherwise), from the clock `t` in seconds.
+fn wu_col(cell: vec2<f32>, t: f32, seed: f32, prob: f32, r0: f32, r1: f32) -> vec4<f32> {
+    let h = wu_hash22(cell + vec2<f32>(seed));
+    let c = cell + vec2<f32>(0.5) + 0.36 * sin(t * vec2<f32>(0.31, 0.27) * (vec2<f32>(0.6) + h) + WU_TAU * h);
+    let w = wu_hash21(cell + vec2<f32>(seed + 13.7));
+    let st = step(1.0 - prob, w) * (0.6 + 0.4 * sin(t * (1.3 + w) + w * 20.0));
+    return vec4<f32>(c, r0 + r1 * w, st);
+}
+
+fn wu_erf(x: f32) -> f32 {
+    return tanh(clamp(1.2025 * x, -6.0, 6.0));
+}
+
+/// The light columns' in-scatter along the first `l` yards of the ray from `eye` along `rd`
+/// (round 2): sparse thin columns parallel to the refracted sun `s` (up), each a point of sun
+/// space (where its light entered the surface at `surf_y`, times `sc` cells a yard) with a
+/// Gaussian cross-section; the walk takes the ray's projection one cell at a time, gives each
+/// column to one step, and integrates its Gaussian along the ray in closed form, so nothing
+/// averages out and nothing is marched. Weighted by the extinction `beta` and the depth.
+fn wu_shaft_columns(
+    eye: vec3<f32>,
+    rd: vec3<f32>,
+    l: f32,
+    t: f32,
+    surf_y: f32,
+    s: vec3<f32>,
+    beta: f32,
+) -> f32 {
+    let sc = 0.75;
+    let sy = max(s.y, 0.2);
+    let q0 = (eye.xz + s.xz * ((surf_y - eye.y) / sy)) * sc;
+    let qd = (rd.xz - s.xz * (rd.y / sy)) * sc;
+    let qn = max(length(qd), 1e-4);
+    let dn = qd / qn;
+    let pn = vec2<f32>(-dn.y, dn.x);
+    let ls = l * qn;
+    let kk = min(ceil(ls), 10.0);
+    var acc = 0.0;
+    for (var k = 0; k < 10; k = k + 1) {
+        let fk = f32(k);
+        if (fk >= kk) {
+            break;
+        }
+        let base = floor(q0 + dn * (fk + 0.5));
+        for (var y = -1; y <= 1; y = y + 1) {
+            for (var x = -1; x <= 1; x = x + 1) {
+                let col = wu_col(base + vec2<f32>(f32(x), f32(y)), t, 0.0, 0.5, 0.05, 0.08);
+                if (col.w <= 0.0) {
+                    continue;
+                }
+                let al = dot(col.xy - q0, dn);
+                if (clamp(floor(al), 0.0, kk - 1.0) != fk) {
+                    continue;
+                }
+                let r = col.z;
+                let pe = dot(col.xy - q0, pn);
+                if (abs(pe) > 3.5 * r) {
+                    continue;
+                }
+                let uc = clamp(al / qn, 0.0, l);
+                let ii = exp(-pe * pe / (r * r)) * (r / qn) * 0.8862
+                    * (wu_erf((ls - al) / r) - wu_erf(-al / r));
+                let depth = max(surf_y - (eye.y + rd.y * uc), 0.0);
+                // Past the walk's ten cells the columns fade out instead of stopping on a line.
+                let tail = select(1.0, 1.0 - smoothstep(6.0, 10.0, al), ls > 10.0);
+                let w = exp(-0.09 * depth / sy - max(beta, 0.02) * uc - 0.12 * depth)
+                    * smoothstep(0.8, 3.5, uc) * (1.0 - smoothstep(12.0, 24.0, uc)) * tail;
+                acc = acc + col.w * ii * w;
+            }
+        }
+    }
+    return acc;
+}
+
 /// The caustic web on a surface under `depth` yards of water whose sunlight entered at `q` (world
 /// XZ): two layers of cell borders whose points circle at whole turns of the clock, sharpest in the
 /// first yards, blue focusing a little deeper; over its mean, so 1 is plain light. Faded to 1 where
@@ -1054,6 +1154,22 @@ fn wu_caustic(q: vec2<f32>, depth: f32, fp: f32, phase: f32) -> vec3<f32> {
 fn wu_waterline(p: vec2<f32>, phase: f32) -> f32 {
     return 0.035 * sin(p.x * 2.1 + phase * 61.0) + 0.025 * sin(p.y * 3.3 - phase * 87.0)
         + 0.015 * sin(dot(p, vec2<f32>(1.7, -2.3)) + phase * 143.0);
+}
+
+/// The dry sky along `rd` for the waterline's dry half, gamma (round 2): the frame holds only the
+/// swapped fog there. The dry fog's colour at the horizon rising to the dome's zenith stop, the
+/// dry sun's glow round the sun (unrefracted from the lanes), and the zone glow's square-law lift
+/// the dry frame's sky gets, so the sky does not drop to a flat grey-blue between two frames.
+fn wu_dry_sky(rd: vec3<f32>, u: UnderLanes) -> vec3<f32> {
+    let sxz = u.sun_refr.xz * WU_ETA;
+    let sun = normalize(vec3<f32>(sxz.x, sqrt(max(1.0 - dot(sxz, sxz), 1e-6)), sxz.y));
+    let up = max(rd.y, 0.0);
+    var c = mix(u.fog_dry.rgb, u.sky_zenith.rgb, smoothstep(0.03, 0.75, sqrt(up)));
+    c = mix(c, u.sky_horizon.rgb, 0.25 * (1.0 - smoothstep(0.0, 0.3, up)));
+    let mu = max(dot(rd, sun), 0.0);
+    let day = smoothstep(0.0, 0.1, u.sun_e.w);
+    c = c + u.sun_dry.rgb * ((0.5 * pow(mu, 32.0) + 0.22 * pow(mu, 4.0)) * day);
+    return min(c + 0.6 * c * c, vec3<f32>(1.0));
 }
 
 /// The frame under water, per pixel, gamma in and out: `sg` the scene as drawn (the world fogged by
@@ -1096,10 +1212,16 @@ fn wu_post(
     var c_g = sg;
     if (starts_dry) {
         if (t_vis >= WU_FAR && rd.y > 0.0) {
-            c_g = mix(u.sky_horizon.rgb, u.sky_zenith.rgb, sqrt(max(rd.y, 1e-6)));
+            c_g = wu_dry_sky(rd, u);
         } else {
+            // Round 2: where the swapped fog took an object's colour the un-fog cannot bring it
+            // back, so it keeps its shading in the dry fog's hue instead of staying cyan.
             let clear = wu_unfog(sg, f_wet, u.fog_wet.rgb);
-            c_g = mix(u.fog_dry.rgb, clear, wu_fog_share(ez, u.fog_span.z, u.fog_span.w));
+            let lost = 1.0 - smoothstep(0.2, 0.6, f_wet);
+            let y = dot(clear, WU_LUMA);
+            let hue = u.fog_dry.rgb / max(dot(u.fog_dry.rgb, WU_LUMA), 1e-3);
+            let est = mix(clear, min(y * hue, vec3<f32>(1.0)), lost);
+            c_g = mix(u.fog_dry.rgb, est, wu_fog_share(ez, u.fog_span.z, u.fog_span.w));
         }
     } else {
         // The water segment: from the eye to what the pixel shows, or to the surface's underside on
@@ -1135,14 +1257,18 @@ fn wu_post(
         let t_mid = 0.5 * (t0 + min(t1, 60.0));
         let depth_mid = h - (eye.y + rd.y * t_mid);
         let mid = wu_palette(u.fog_wet.rgb);
-        var ins = wu_inscatter(rd, mid, u.sun_refr.xyz, u.sun_e.rgb, depth_mid);
-        if (wu_has(bits, WU_SHAFTS) && u.sun_e.w > 0.01) {
-            let t_a = max(t0, 1.0);
-            let t_b = min(t1, 60.0);
-            let sh = wu_shafts(eye, rd, t_a, t_b, u.sigma.w, h, u.sun_refr.xyz, phase);
-            ins = ins * max(1.0 + WU_SHAFT_GAIN * u.sun_e.w * sh, 0.0);
-        }
+        let ins = wu_inscatter(rd, mid, u.sun_refr.xyz, u.sun_e.rgb, depth_mid);
         lin = lin * tr + ins * w_in;
+        if (wu_has(bits, WU_SHAFTS) && u.sun_e.w > 0.01) {
+            // Round 2: the light columns, added as the sun's light they scatter, strongest
+            // looking up the sun.
+            let l_seg = min(max(t1 - t0, 0.0), 24.0);
+            let acc = wu_shaft_columns(eye + rd * t0, rd, l_seg, u.clock.x, h, u.sun_refr.xyz, u.sigma.w);
+            let ph = 0.3 + 0.7 * pow(saturate(dot(rd, u.sun_refr.xyz) * 0.5 + 0.5), 3.0);
+            let tint = mix(vec3<f32>(0.6, 0.95, 1.0), vec3<f32>(1.0), 0.4);
+            lin = lin + u.sun_e.rgb * tint
+                * ((1.0 - exp(-1.3 * acc)) * ph * WU_SHAFT_GAIN * smoothstep(0.02, 0.2, u.sun_e.w));
+        }
         c_g = wu_enc(wu_ceiling(lin, 0.55, 0.85, 0.04));
     }
     if (wl) {
@@ -1152,7 +1278,7 @@ fn wu_post(
         let m = 1.0 - smoothstep(0.0, w, abs(off));
         let lip = 1.0 - smoothstep(0.0, 0.35 * w, abs(off - 0.6 * w));
         c_g = mix(c_g, c_g * 0.55 + wu_enc(wu_palette(u.fog_wet.rgb)) * 0.2, m * 0.8)
-            + vec3<f32>(lip * 0.12);
+            + vec3<f32>(lip * 0.22);
     }
     return mix(vec3<f32>(WU_OUT_FLOOR), vec3<f32>(WU_OUT_TOP), saturate(c_g));
 }
