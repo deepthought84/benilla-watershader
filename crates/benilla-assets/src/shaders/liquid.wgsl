@@ -6559,9 +6559,9 @@ fn rf_obstacle(p: vec3<f32>, e1: vec2<f32>) -> f32 {
     return hit;
 }
 
-/// The rafts' own clock: half the river clock, so a set of rafts lives 8 s (round 3; round 2's 4 s
-/// sets dissolved by their cut and visibly re-formed).
-const RF_RAFT_TURNS: f32 = 2.0;
+/// The rafts' own clock: a quarter of the river clock, so a set of rafts lives 4 s (round 3 tried 8 s:
+/// in a fast rapid the linear advection sheared a set out of shape within a second).
+const RF_RAFT_TURNS: f32 = 4.0;
 /// The bubble lace a raft is drawn through, lookups a yard: finer than the shore's.
 const RF_LACE_SCALE: f32 = 1.5;
 
@@ -6613,7 +6613,10 @@ fn rf_raft(
     let p = fract(t);
     let cyc = floor(t) - RF_RAFT_TURNS * floor(floor(t) / RF_RAFT_TURNS);
     let h = fract(vec2<f32>(0.618034, 0.754877) * (cyc + 1.0) + vec2<f32>(0.13, 0.41) * floor(off + 0.25));
-    let q = xz - flow * ((p - 0.5) * (RF_PERIOD_S / RF_RAFT_TURNS));
+    // Round 3: carried at most 10 yd over a life, so a rapid's shear cannot churn a raft's outline.
+    let life_s = RF_PERIOD_S / RF_RAFT_TURNS;
+    let carry = flow * min(1.0, 10.0 / max(length(flow) * life_s, 1e-3));
+    let q = xz - carry * ((p - 0.5) * life_s);
     let j = rf_scale(1.0 / (4.0 * RF_RAFT_YD));
     let n = rf_noise(rf_uv(q, j, o) + h, j, ddx, ddy);
     // Round 3: the cut holds for the whole life, so a raft keeps its outline while it drifts; the
@@ -6707,9 +6710,11 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     let bead_p = sc_pattern(xz, i.flow, ddx, ddy, 2.6);
     let bead = sc_bubble_mask(0.55 + 0.3 * carried, bead_p.v, bead_p.fw);
     // Round 3: lines only where the load is real, so the reach is not netted with loops.
+    // ...and in patches along the reach (the lumps' high third), so the zero lines read as a few
+    // streaks along the current and not as a net of loops over all of it.
     streak = mix(line_v * bead, carried * 0.12, smoothstep(0.6 * wl, 2.0 * wl, px))
         * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * (1.0 - saturate(turb * 1.3))
-        * smoothstep(0.38, 0.75, carried);
+        * smoothstep(0.38, 0.75, carried) * smoothstep(0.1, 0.8, lump.n + 0.6 * tail);
 #endif
 
     let env = smoothstep(0.8, 1.4, s.froude) * smoothstep(1.2, 3.5, s.speed)

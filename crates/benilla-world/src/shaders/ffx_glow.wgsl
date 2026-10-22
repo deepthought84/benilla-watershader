@@ -1434,8 +1434,8 @@ fn veil_apply(sg: vec3<f32>, rd: vec3<f32>, t_d: f32) -> vec3<f32> {
                 continue;
             }
             let size = clamp(sqrt(at.y / 6.0), 0.6, 1.6);
-            let reach = 1.0 + 0.05 * min(at.y, 40.0);
-            let rise = 0.8 + 0.14 * min(at.y, 40.0);
+            let reach = 1.0 + 0.05 * min(at.y, 100.0);
+            let rise = 0.8 + 0.14 * min(at.y, 100.0);
             // The plume's box, and the ray's span through it; the density is windowed to nothing
             // well inside it, so no box edge shows.
             let lo = vec3<f32>(min(foot.x, foot.z) - 4.0 * reach, at.x - 0.3, min(foot.y, foot.w) - 4.0 * reach);
