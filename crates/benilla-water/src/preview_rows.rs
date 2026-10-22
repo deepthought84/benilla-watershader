@@ -15,6 +15,7 @@ use benilla_assets::preview as lever;
 use benilla_world::ffx_glow::FfxUnderwater;
 use benilla_world::liquid::{
     EyeLiquid, LiquidClaim, WaterPassImages, LOOK_BODY, PREVIEW_LANES, PV_FALLS, PV_UNDER, PV_WAKE,
+    PV_WEATHER, PV_WIND,
 };
 use benilla_world::water_fx::params::wave_push;
 
@@ -444,12 +445,63 @@ fn drive_under_lanes(
         WaterQuality::Medium => 1.0,
         WaterQuality::High => 2.0,
     };
-    row(14, [cycle(clock.secs() / 256.0) * 256.0, tier, 0.0, 0.0]);
+    // Round 3, the veil (`ffx_glow.wgsl`'s `fs_combine_veil`): above the water, with `mist` or
+    // `falls`, the combine lays the mist over everything the frame shows near the mirror plane and
+    // the falls' spray over their feet, from the depth. `z` and `w` tell the water its own mist and
+    // its pools' spray stand down while the veil draws them.
+    let reflect = |i: usize| data.as_ref().map_or(0.0, |d| d.0[i]);
+    let veil_on = style.is_stylised()
+        && !in_water
+        && (lever::on(lever::MIST) || lever::on(lever::FALLS))
+        && reflect(1) > 0.0;
+    row(
+        14,
+        [
+            cycle(clock.secs() / 256.0) * 256.0,
+            tier,
+            if veil_on && lever::on(lever::MIST) {
+                1.0
+            } else {
+                0.0
+            },
+            if veil_on && lever::on(lever::FALLS) {
+                1.0
+            } else {
+                0.0
+            },
+        ],
+    );
     let base = at(PV_UNDER);
     lanes.0[base..base + 64].copy_from_slice(&u);
+    let mut v = [0.0f32; 64];
+    if veil_on {
+        let pv = |i: usize| lanes.0[at(i)];
+        let mut vrow = |r: usize, x: [f32; 4]| v[4 * r..4 * r + 4].copy_from_slice(&x);
+        // The mirror plane's Y, the rain and the storm; the fog's end, the mist and the falls on;
+        // the visible sun; the foam light, sky then sun.
+        vrow(0, [1.0, reflect(0), pv(PV_WEATHER), pv(PV_WIND + 3)]);
+        vrow(
+            1,
+            [
+                dry.fog_end,
+                if lever::on(lever::MIST) { 1.0 } else { 0.0 },
+                if lever::on(lever::FALLS) { 1.0 } else { 0.0 },
+                0.0,
+            ],
+        );
+        vrow(2, [reflect(4), reflect(5), reflect(6), reflect(7)]);
+        let (e_sky_foam, e_sun_foam) = (body(8), body(9));
+        vrow(3, [e_sky_foam[0], e_sky_foam[1], e_sky_foam[2], 0.0]);
+        vrow(4, [e_sun_foam[0], e_sun_foam[1], e_sun_foam[2], 0.0]);
+        // The four nearest falls' rows as `preview.falls` holds them: the foot line's ends (XZ),
+        // then the pool's surface, the drop and the strength.
+        let falls = at(PV_FALLS);
+        v[32..64].copy_from_slice(&lanes.0[falls..falls + 32]);
+    }
     if let Some(mut ffx) = ffx {
-        ffx.lanes = u;
-        ffx.depth = if u[18] > 0.5 {
+        ffx.lanes[..64].copy_from_slice(&u);
+        ffx.lanes[64..].copy_from_slice(&v);
+        ffx.depth = if u[18] > 0.5 || veil_on {
             pass.map(|p| p.scene_depth.clone())
         } else {
             None
@@ -511,6 +563,132 @@ fn join_fall(found: &mut Vec<Fall>, fall: Fall) {
     }
 }
 
+/// A thick fall part's foot (round 3): its box `lo`-`hi` (Bevy) sampled on an 8×8 grid at the pool,
+/// a cell wet where `surface_y` finds the pool there and the ground (`ground_y`) lies under it; the
+/// line through the wet cells that have a dry neighbour, along their spread (at most
+/// [`FALL_LINE_MAX`]), at their mean surface. `None` with no such cells (no rock under the part, or
+/// no pool), so the caller keeps its own rule.
+fn thick_foot(
+    lo: Vec3,
+    hi: Vec3,
+    surface_y: &impl Fn(f32, f32) -> Option<f32>,
+    ground_y: &impl Fn(f32, f32) -> Option<f32>,
+) -> Option<(Vec2, Vec2, f32)> {
+    const N: usize = 8;
+    let cell = |i: usize, j: usize| {
+        Vec2::new(
+            lo.x + (hi.x - lo.x) * (i as f32 + 0.5) / N as f32,
+            lo.z + (hi.z - lo.z) * (j as f32 + 0.5) / N as f32,
+        )
+    };
+    let mut wet = [[None::<f32>; N]; N];
+    for (i, col) in wet.iter_mut().enumerate() {
+        for (j, w) in col.iter_mut().enumerate() {
+            let p = cell(i, j);
+            *w = surface_y(p.x, p.y).filter(|&y| ground_y(p.x, p.y).is_none_or(|g| g < y - 0.25));
+        }
+    }
+    // The pool is the lowest water under the part; a reservoir above it (a dam's top) is not.
+    let low = wet
+        .iter()
+        .flatten()
+        .flatten()
+        .fold(f32::INFINITY, |a, &y| a.min(y));
+    for w in wet.iter_mut().flatten() {
+        if w.is_some_and(|y| y > low + 1.5) {
+            *w = None;
+        }
+    }
+    let mut pts: Vec<(Vec2, f32)> = Vec::new();
+    for i in 0..N {
+        for j in 0..N {
+            let Some(y) = wet[i][j] else {
+                continue;
+            };
+            let dry = |di: i32, dj: i32| {
+                let (a, b) = (i as i32 + di, j as i32 + dj);
+                (0..N as i32).contains(&a)
+                    && (0..N as i32).contains(&b)
+                    && wet[a as usize][b as usize].is_none()
+            };
+            if dry(1, 0) || dry(-1, 0) || dry(0, 1) || dry(0, -1) {
+                pts.push((cell(i, j), y));
+            }
+        }
+    }
+    if pts.len() < 2 {
+        return None;
+    }
+    let n = pts.len() as f32;
+    let m = pts.iter().fold(Vec2::ZERO, |acc, (p, _)| acc + *p) / n;
+    let foot_y = pts.iter().map(|(_, y)| *y).sum::<f32>() / n;
+    let (mut sxx, mut sxz, mut szz) = (0.0f32, 0.0f32, 0.0f32);
+    for (p, _) in &pts {
+        let d = *p - m;
+        sxx += d.x * d.x;
+        sxz += d.x * d.y;
+        szz += d.y * d.y;
+    }
+    // The principal axis of the boundary cells.
+    let ang = 0.5 * (2.0 * sxz).atan2(sxx - szz);
+    let u = Vec2::new(ang.cos(), ang.sin());
+    let (mut t0, mut t1) = (f32::INFINITY, f32::NEG_INFINITY);
+    for (p, _) in &pts {
+        let t = (*p - m).dot(u);
+        t0 = t0.min(t);
+        t1 = t1.max(t);
+    }
+    let pad = 0.5 * ((hi.x - lo.x).max(hi.z - lo.z) / N as f32);
+    let (t0, t1) = (t0 - pad, t1 + pad);
+    let (t0, t1) = if t1 - t0 > FALL_LINE_MAX {
+        let c = 0.5 * (t0 + t1);
+        (c - 0.5 * FALL_LINE_MAX, c + 0.5 * FALL_LINE_MAX)
+    } else {
+        (t0, t1)
+    };
+    Some((m + u * t0, m + u * t1, foot_y))
+}
+
+/// The longest run of `f`'s foot line, sampled every yard, where the ground (`ground_y`, Bevy Y; no
+/// answer counts as water) lies at least a quarter yard under the pool's surface, padded half a
+/// yard; `None` under 1.5 yd.
+fn trim_fall(f: &Fall, ground_y: &impl Fn(f32, f32) -> Option<f32>) -> Option<Fall> {
+    let len = f.a.distance(f.b);
+    let n = (len.ceil() as usize).clamp(1, 120);
+    let wet = |i: usize| {
+        let p = f.a.lerp(f.b, i as f32 / n as f32);
+        ground_y(p.x, p.y).is_none_or(|g| g < f.foot_y - 0.25)
+    };
+    let (mut best, mut run_start) = (None::<(usize, usize)>, None::<usize>);
+    for i in 0..=n + 1 {
+        let w = i <= n && wet(i);
+        match (w, run_start) {
+            (true, None) => run_start = Some(i),
+            (false, Some(s0)) => {
+                let e = i - 1;
+                if best.is_none_or(|(b0, b1)| e - s0 > b1 - b0) {
+                    best = Some((s0, e));
+                }
+                run_start = None;
+            }
+            _ => {}
+        }
+    }
+    let (s0, e) = best?;
+    let step = len / n as f32;
+    if (e - s0) as f32 * step < 1.5 && len >= 1.5 {
+        return None;
+    }
+    let u = (f.b - f.a) / len.max(1e-4);
+    let t0 = (s0 as f32 * step - 0.5).max(0.0);
+    let t1 = (e as f32 * step + 0.5).min(len);
+    Some(Fall {
+        a: f.a + u * t0,
+        b: f.a + u * t1,
+        ..*f
+    })
+}
+
 /// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop.
 #[derive(Clone, Copy)]
 struct Fall {
@@ -538,6 +716,10 @@ fn drive_fall_lanes(
     uv: Option<Res<benilla_world::doodad_anim::UvAnimMaterials>>,
     water: Query<&WaterChunkInfo>,
     index: Res<WaterIndex>,
+    ground: (
+        Option<Res<benilla_world::terrain_stream::TerrainStreamer>>,
+        Option<Res<Assets<benilla_assets::AdtTile>>>,
+    ),
     mut last: Local<f32>,
     mut found: Local<Vec<Fall>>,
     mut gaps: Local<(Vec3, f32, Vec<Fall>)>,
@@ -552,9 +734,21 @@ fn drive_fall_lanes(
         return;
     };
     let now = time.elapsed_secs();
+    // The terrain's height (Bevy Y) under a Bevy XZ point, `None` off the streamed set.
+    let ground_y = |x: f32, z: f32| -> Option<f32> {
+        let (Some(st), Some(adt)) = (ground.0.as_deref(), ground.1.as_deref()) else {
+            return None;
+        };
+        benilla_world::terrain_stream::terrain_height_under(st, adt, Vec3::new(x, 0.0, z))
+    };
     if (now - *last).abs() >= 0.5 {
         *last = now;
         found.clear();
+        // `$WOW_PREVIEW_FALLS_LOG=1` (round 3): every scrolling part near the eye, its box and its
+        // scroll, logged whenever their number changes, to see why a visible fall finds no line.
+        static FALLS_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let log_parts = *FALLS_LOG.get_or_init(|| lever::number("FALLS_LOG", 0.0, 0.0, 1.0) > 0.5);
+        let mut logged: Vec<String> = Vec::new();
         if let Some(uv) = uv {
             for (t, aabb, mat, _seen) in &parts {
                 let Some(entry) = uv.0.get(&mat.0.id()) else {
@@ -563,6 +757,17 @@ fn drive_fall_lanes(
                 let Some([du, dv]) = entry.scroll() else {
                     continue;
                 };
+                if log_parts {
+                    let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+                    let p = t.transform_point(c);
+                    let ext = (t.affine().matrix3.abs() * h) * 2.0;
+                    if Vec2::new(p.x - eye.x, p.z - eye.z).length() < 150.0 {
+                        logged.push(format!(
+                            "({:.1},{:.1},{:.1}) size {:.1}x{:.1}x{:.1} scroll {du:.3},{dv:.3}",
+                            p.x, p.y, p.z, ext.x, ext.y, ext.z
+                        ));
+                    }
+                }
                 if dv.abs() < 1e-3 || dv.abs() < 1.5 * du.abs() {
                     continue;
                 }
@@ -588,9 +793,13 @@ fn drive_fall_lanes(
                     (hi.x - lo.x).max(hi.z - lo.z),
                     (hi.x - lo.x).min(hi.z - lo.z),
                 );
+                // Round 3: a very tall curtain (a dam's spillway, half again as tall as it is long)
+                // may be longer than a fall line; its line is cut to one about its middle below,
+                // and trimmed to the pool with every other.
+                let towering = hi.y - lo.y >= 1.5 * long && long <= 2.5 * FALL_LINE_MAX;
                 if hi.y - lo.y < FALL_MIN_HEIGHT
                     || short > (0.5 * (hi.y - lo.y)).max(4.0)
-                    || long > FALL_LINE_MAX
+                    || (long > FALL_LINE_MAX && !towering)
                 {
                     continue;
                 }
@@ -606,27 +815,49 @@ fn drive_fall_lanes(
                     .map(|s| wow_to_bevy([w[0], w[1], s]).y)
                     .filter(|&y| lo.y <= y + FALL_FOOT_SLACK && hi.y >= y + FALL_MIN_HEIGHT)
                 };
-                // The foot: the water under the part's middle at its bottom. (Round 2 tried the
-                // wet side of a thick part's short axis; at Elwynn that put a line along a
-                // cascade's flow, through the pool to the camera.)
-                let along_x = hi.x - lo.x >= hi.z - lo.z;
-                let side = if along_x { mid.z } else { mid.x };
-                let Some(foot_y) = surface_y(mid.x, mid.z) else {
-                    continue;
+                // Round 3, a thick part (a cascade or a spillway, a box deep both ways, which is
+                // every fall model at Elwynn and the Stonewrought Dam): its foot is where the pool
+                // meets the rock under it. Its footprint, sampled on a grid at the pool, wet where
+                // the pool lies over its bed; the line fitted to the wet cells beside dry ones,
+                // along their spread. A thin curtain, or a part standing wholly in water, keeps
+                // the line along its longer side at its middle. (Round 2's "longer side" put a
+                // spillway's line along its flow, out in the pool.)
+                let thick = short > (0.15 * (hi.y - lo.y)).max(6.0);
+                let grid = if thick {
+                    thick_foot(lo, hi, &surface_y, &ground_y)
+                } else {
+                    None
                 };
-                // The line along the part's longer side at its foot.
-                let (l0, l1) = if along_x { (lo.x, hi.x) } else { (lo.z, hi.z) };
-                let pt = |t: f32| {
-                    if along_x {
-                        Vec2::new(t, side)
-                    } else {
-                        Vec2::new(side, t)
+                let (a, b, foot_y) = match grid {
+                    Some(g) => g,
+                    None => {
+                        let along_x = hi.x - lo.x >= hi.z - lo.z;
+                        let side = if along_x { mid.z } else { mid.x };
+                        let Some(foot_y) = surface_y(mid.x, mid.z) else {
+                            continue;
+                        };
+                        // The line along the part's longer side at its foot.
+                        let (l0, l1) = if along_x { (lo.x, hi.x) } else { (lo.z, hi.z) };
+                        let (l0, l1) = if l1 - l0 > FALL_LINE_MAX {
+                            let m = 0.5 * (l0 + l1);
+                            (m - 0.5 * FALL_LINE_MAX, m + 0.5 * FALL_LINE_MAX)
+                        } else {
+                            (l0, l1)
+                        };
+                        let pt = |t: f32| {
+                            if along_x {
+                                Vec2::new(t, side)
+                            } else {
+                                Vec2::new(side, t)
+                            }
+                        };
+                        (pt(l0), pt(l1), foot_y)
                     }
                 };
                 {
                     let fall = Fall {
-                        a: pt(l0),
-                        b: pt(l1),
+                        a,
+                        b,
                         foot_y,
                         drop: hi.y - foot_y,
                     };
@@ -667,6 +898,17 @@ fn drive_fall_lanes(
                 }
             }
         }
+        if log_parts {
+            static LOGGED: std::sync::atomic::AtomicUsize =
+                std::sync::atomic::AtomicUsize::new(usize::MAX);
+            if LOGGED.swap(logged.len(), std::sync::atomic::Ordering::Relaxed) != logged.len() {
+                info!(
+                    "preview falls: {} scrolling parts near the eye: {}",
+                    logged.len(),
+                    logged.join("; ")
+                );
+            }
+        }
         // The classification's gap rule (RIV-4): where a water surface ends and another lies at
         // least `FALL_MIN_HEIGHT` below a few yards further out, water falls over that edge; its
         // foot line runs along the edge on the lower surface. Rescanned every few seconds or
@@ -704,6 +946,18 @@ fn drive_fall_lanes(
                         if surface(p1.x, p1.y, top - 0.5).is_some_and(|z| z <= top + 0.5) {
                             continue;
                         }
+                        // Round 3, the lip: water pours over an edge only where its bed lies under
+                        // the surface at the edge and no ground rises just past it. An upper pool
+                        // that ends against its bank (a whole cliff top at Elwynn) is not a fall.
+                        let bed = |q: Vec2| {
+                            let b = wow_to_bevy([q.x, q.y, 0.0]);
+                            ground_y(b.x, b.z)
+                        };
+                        if bed(m - d * 0.6).is_some_and(|z| z > top - 0.25)
+                            || bed(m + d).is_some_and(|z| z > top - 0.1)
+                        {
+                            continue;
+                        }
                         for out in FALL_GAP_OUT {
                             let p = m + d * out;
                             let Some(low) = surface(p.x, p.y, top - 300.0) else {
@@ -733,6 +987,13 @@ fn drive_fall_lanes(
         for f in gaps.2.iter().copied() {
             join_fall(&mut found, f);
         }
+        // Round 3: each line keeps its longest run where the pool has water over its bed; a line
+        // crossing ground that stands above the pool (a bank, a cliff's foot) loses that span.
+        let trimmed: Vec<Fall> = found
+            .iter()
+            .filter_map(|f| trim_fall(f, &ground_y))
+            .collect();
+        *found = trimmed;
         let e2 = Vec2::new(eye.x, eye.z);
         found.sort_by(|p, q| {
             let d = |f: &Fall| (f.a + f.b).distance(e2 * 2.0);
@@ -746,8 +1007,8 @@ fn drive_fall_lanes(
             info!(
                 "preview falls: {} foot lines{}",
                 found.len(),
-                found.first().map_or(String::new(), |f| format!(
-                    ", nearest {:.1},{:.1} to {:.1},{:.1} at y {:.1}, drop {:.1}",
+                found.iter().fold(String::new(), |acc, f| format!(
+                    "{acc}; {:.1},{:.1} to {:.1},{:.1} at y {:.1}, drop {:.1}",
                     f.a.x, f.a.y, f.b.x, f.b.y, f.foot_y, f.drop
                 ))
             );

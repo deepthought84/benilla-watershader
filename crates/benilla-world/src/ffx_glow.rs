@@ -290,20 +290,22 @@ fn sync_wave(
     }
 }
 
-/// The Improved Water preview's underwater combine (`fs_combine_wave_improved`): the eye-below
-/// lanes (`liquid.wgsl`'s `UnderLanes`, 16 rows) and the opaque world's linear depth, written by
-/// the water plugin. While `lanes[18]` (`surface.z`, the eye in water with the preview's `tint`)
-/// is 0 or the depth is missing, the reference warp runs.
+/// The Improved Water preview's combine lanes: the eye-below rows (`liquid.wgsl`'s `UnderLanes`,
+/// 16 rows, `fs_combine_wave_improved`), then the veil's 16 (round 3, `fs_combine_veil`: the mist
+/// over the water and the falls' spray over everything in the frame), and the opaque world's
+/// linear depth, written by the water plugin. While `lanes[18]` (`surface.z`, the eye in water with
+/// the preview's `tint`) is 0 or the depth is missing, the reference warp runs; while `lanes[64]`
+/// (the veil's armed flag) is 0 or the depth is missing, the dry frame takes the plain combine.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct FfxUnderwater {
-    pub lanes: [f32; 64],
+    pub lanes: [f32; 128],
     pub depth: Option<Handle<Image>>,
 }
 
 impl Default for FfxUnderwater {
     fn default() -> Self {
         Self {
-            lanes: [0.0; 64],
+            lanes: [0.0; 128],
             depth: None,
         }
     }
@@ -313,6 +315,11 @@ impl FfxUnderwater {
     /// Whether the improved combine replaces the warp this frame.
     fn armed(&self) -> bool {
         self.lanes[18] > 0.5 && self.depth.is_some()
+    }
+
+    /// Whether the veil's combine replaces the dry one this frame.
+    fn veil_armed(&self) -> bool {
+        self.lanes[64] > 0.5 && self.depth.is_some()
     }
 }
 
@@ -439,6 +446,7 @@ impl SpecializedRenderPipeline for FfxCombinePipeline {
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
         let (label, entry) = match (key.wave, key.improved) {
             (true, true) => ("ffx_glow_combine_wave_improved", "fs_combine_wave_improved"),
+            (false, true) => ("ffx_glow_combine_veil", "fs_combine_veil"),
             (true, false) => ("ffx_glow_combine_wave", "fs_combine_wave"),
             _ => ("ffx_glow_combine", "fs_combine"),
         };
@@ -535,7 +543,7 @@ fn init_pipelines(
                 uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
                 texture_2d(TextureSampleType::Float { filterable: true }),
                 sampler(SamplerBindingType::Filtering),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(256).unwrap())),
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(512).unwrap())),
                 texture_2d(TextureSampleType::Float { filterable: false }),
             ),
         ),
@@ -670,7 +678,7 @@ struct FfxGlowTextures {
     /// This view's combine pair, keyed on its camera's output (`FinalPassTarget::format`), or
     /// `None` while an [`FfxBackdrop`] claims the view.
     combine: Option<FfxCombinePair>,
-    /// The improved underwater combine's 256-byte uniform, [`FfxUnderwater::lanes`].
+    /// The improved combines' 512-byte uniform, [`FfxUnderwater::lanes`].
     uw_buf: Buffer,
 }
 
@@ -685,6 +693,10 @@ struct FfxCombinePair {
     /// `glow` is off.
     dry_water: CachedRenderPipelineId,
     wave_water: CachedRenderPipelineId,
+    /// The veil's dry entry, without and with the water glow; `dry` and `dry_water` while the
+    /// preview's `mist` and `falls` are off.
+    dry_veil: CachedRenderPipelineId,
+    dry_veil_water: CachedRenderPipelineId,
     format: TextureFormat,
     /// 1 for the combine's own pass, the view's count for a backdrop draw inside a 2D main pass.
     samples: u32,
@@ -698,8 +710,10 @@ impl FfxCombinePair {
             (true, true, _) => self.wave_uw,
             (true, false, false) => self.wave,
             (true, false, true) => self.wave_water,
-            (false, _, false) => self.dry,
-            (false, _, true) => self.dry_water,
+            (false, true, false) => self.dry_veil,
+            (false, true, true) => self.dry_veil_water,
+            (false, false, false) => self.dry,
+            (false, false, true) => self.dry_water,
         }
     }
 }
@@ -746,12 +760,16 @@ impl CombineSpecializer<'_> {
         // The preview's entries, only while its `tint` and `glow` run.
         let improved = benilla_assets::preview::on(benilla_assets::preview::TINT);
         let water = benilla_assets::preview::on(benilla_assets::preview::GLOW);
+        let veil = benilla_assets::preview::on(benilla_assets::preview::MIST)
+            || benilla_assets::preview::on(benilla_assets::preview::FALLS);
         FfxCombinePair {
             dry: key(false, false, false),
             wave: key(true, false, false),
             wave_uw: key(true, improved, false),
             dry_water: key(false, false, water),
             wave_water: key(true, false, water),
+            dry_veil: key(false, veil, false),
+            dry_veil_water: key(false, veil, water),
             format,
             samples: inside_2d.unwrap_or(1),
         }
@@ -835,7 +853,7 @@ fn prepare_textures(
         });
         let uw_buf = render_device.create_buffer(&BufferDescriptor {
             label: Some("ffx_glow_underwater"),
-            size: 256,
+            size: 512,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1156,7 +1174,7 @@ fn preview_combine<'w>(
     let player = glow.state == FfxState::Player;
     let uw = world
         .get_resource::<FfxUnderwater>()
-        .filter(|u| player && wave && u.armed());
+        .filter(|u| player && ((wave && u.armed()) || (!wave && u.veil_armed())));
     let uw_depth = uw
         .and_then(|u| u.depth.as_ref())
         .and_then(|h| world.resource::<RenderAssets<GpuImage>>().get(h))

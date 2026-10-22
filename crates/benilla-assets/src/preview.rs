@@ -13,7 +13,7 @@
 //! With no feature on, no stylised pipeline compiles the preview and the frame is today's.
 
 /// The features, by bit: each name is its lever's (`WOW_PREVIEW_<NAME>`, upper case).
-pub const NAMES: [&str; 23] = [
+pub const NAMES: [&str; 24] = [
     "waves",
     "glint",
     "rough",
@@ -37,6 +37,7 @@ pub const NAMES: [&str; 23] = [
     "crest",
     "mist",
     "glow",
+    "grade",
 ];
 
 /// WAV-1/3/4/5: the wind's wave field, swell, gusts and slicks, capillaries.
@@ -85,6 +86,9 @@ pub const CREST: u32 = 1 << 20;
 pub const MIST: u32 = 1 << 21;
 /// FND-3: the highlights' excess into the glow, added by the Improved FFXGlow combine (Medium up).
 pub const GLOW: u32 = 1 << 22;
+/// Round 3: the base material leans physical: calm water reflects its far shore at the grazing
+/// Fresnel, gusts and slicks show through it, and the veils take the horizon's colour.
+pub const GRADE: u32 = 1 << 23;
 
 /// Every feature bit.
 pub const ALL: u32 = (1 << NAMES.len()) - 1;
