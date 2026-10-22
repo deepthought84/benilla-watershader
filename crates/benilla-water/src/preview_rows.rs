@@ -466,8 +466,10 @@ const FALLS_REACH: f32 = 400.0;
 /// at least this far above its bottom (or its bottom within the second of the surface).
 const FALL_MIN_HEIGHT: f32 = 2.5;
 const FALL_FOOT_SLACK: f32 = 2.0;
-/// Parts nearer than this, yards, are one fall.
+/// Parts nearer than this, yards, are one fall, while the joined line stays under
+/// `FALL_LINE_MAX`, which no single part may exceed either.
 const FALL_JOIN: f32 = 3.0;
+const FALL_LINE_MAX: f32 = 30.0;
 
 /// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop.
 #[derive(Clone, Copy)]
@@ -540,7 +542,15 @@ fn drive_fall_lanes(
                 if Vec2::new(mid.x - eye.x, mid.z - eye.z).length() > FALLS_REACH {
                     continue;
                 }
-                if hi.y - lo.y < FALL_MIN_HEIGHT {
+                // A curtain: tall, thin across, and no wider than a fall is.
+                let (long, short) = (
+                    (hi.x - lo.x).max(hi.z - lo.z),
+                    (hi.x - lo.x).min(hi.z - lo.z),
+                );
+                if hi.y - lo.y < FALL_MIN_HEIGHT
+                    || short > (0.5 * (hi.y - lo.y)).max(4.0)
+                    || long > FALL_LINE_MAX
+                {
                     continue;
                 }
                 // The water under the part's middle: the lowest surface there, at its bottom.
@@ -577,13 +587,19 @@ fn drive_fall_lanes(
                     };
                     seg(fall.a).min(seg(fall.b)) < FALL_JOIN && (f.foot_y - fall.foot_y).abs() < 1.0
                 };
-                if let Some(f) = found.iter_mut().find(|f| near(f)) {
-                    let pts = [f.a, f.b, fall.a, fall.b];
-                    let (pl, ph) = pts
+                let joined = |f: &Fall| {
+                    [f.a, f.b, fall.a, fall.b]
                         .iter()
                         .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
                             (l.min(*p), h.max(*p))
-                        });
+                        })
+                };
+                let fits = |f: &Fall| {
+                    let (pl, ph) = joined(f);
+                    (ph - pl).max_element() <= FALL_LINE_MAX
+                };
+                if let Some(f) = found.iter_mut().find(|f| near(f) && fits(f)) {
+                    let (pl, ph) = joined(f);
                     let mz = (pl + ph) * 0.5;
                     (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
                         (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))

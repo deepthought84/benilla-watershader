@@ -5953,13 +5953,13 @@ const RF_CHURN_YD: f32 = 1.6;
 /// How white each foam gets at most: foam is never the brightest continuous line in the frame.
 const RF_WHITE_LEVEL: f32 = 0.8;
 const RF_STREAK_LEVEL: f32 = 0.40;
-const RF_POOL_LEVEL: f32 = 0.90;
+const RF_POOL_LEVEL: f32 = 0.75;
 const RF_SHEET_LEVEL: f32 = 0.92;
 const RF_MIST_LEVEL: f32 = 0.30;
 /// Foam's light on its shaded underside and its lit top, relative to the foam illuminant: violet
 /// blue in shade, cream in sun.
 const RF_FOAM_SHADE: vec3<f32> = vec3<f32>(0.70, 0.78, 0.98);
-const RF_FOAM_LIT: vec3<f32> = vec3<f32>(1.06, 1.02, 0.94);
+const RF_FOAM_LIT: vec3<f32> = vec3<f32>(0.96, 0.93, 0.86);
 /// The held tint's range ([`rf_hold`]).
 const RF_TINT_MAX: f32 = 1.25;
 /// A sheet's thickness for its glassy tongue's transmittance, yards.
@@ -6438,7 +6438,7 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     let ddx = i.dp_dx.xz;
     let ddy = i.dp_dy.xz;
     let size = clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.6, 1.6);
-    let e = f.pool * clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.35, 1.5);
+    let e = f.pool * clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.35, 1.0);
     let r = f.r / size;
     let agit = e * exp(-r / 4.2);
     // A parcel leaves the foot line and slows as it spreads, v = 1.25·size / (1 + 0.13 r): its age
@@ -6862,9 +6862,11 @@ const NWG_MIST: u32 = PV_MIST;
 
 /// What each tier draws: the lights a pixel considers, the first of the rain's two drop sizes it
 /// draws (0 the small drops and snow's dimples, 1 the large drops alone), and the sparkles. Low has
-/// no caustics (it does not refract the bed), no lights and no sparkles.
+/// no caustics (it does not refract the bed), no lights and no sparkles. The lights are the
+/// camera-nearest of the packed table, many of them behind the eye or below the water, so a pixel
+/// walks a good share of it; each light costs a cheap corridor test first.
 #ifdef WATER_TIER_HIGH
-const NWG_LIGHTS_MAX: u32 = 8u;
+const NWG_LIGHTS_MAX: u32 = 32u;
 const NWG_RAIN_FIRST: i32 = 0;
 const NWG_SPARKLES_TIER: bool = true;
 #else
@@ -6873,7 +6875,7 @@ const NWG_LIGHTS_MAX: u32 = 0u;
 const NWG_RAIN_FIRST: i32 = 1;
 const NWG_SPARKLES_TIER: bool = false;
 #else
-const NWG_LIGHTS_MAX: u32 = 4u;
+const NWG_LIGHTS_MAX: u32 = 16u;
 const NWG_RAIN_FIRST: i32 = 1;
 const NWG_SPARKLES_TIER: bool = false;
 #endif
@@ -6946,11 +6948,12 @@ const NWG_CAUSTIC_FOCUS_YD: f32 = 0.72;
 /// The intensity's regularisation, 1/sqrt(det² + ε²): the brightest line is 1/ε over the mean.
 const NWG_CAUSTIC_EPS: f32 = 0.15;
 /// The path over which the net's contrast fades out, yards.
-const NWG_CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(2.5, 6.0);
-/// The surface footprint over which the net resolves to its mean, yards.
-const NWG_CAUSTIC_FP_YD: vec2<f32> = vec2<f32>(0.03, 0.12);
+const NWG_CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(4.0, 10.0);
+/// The surface footprint (the geometric mean of its axes, so a grazing view keeps the net) over
+/// which the net resolves to its mean, yards.
+const NWG_CAUSTIC_FP_YD: vec2<f32> = vec2<f32>(0.05, 0.22);
 /// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
-const NWG_CAUSTIC_TURB: f32 = 1.5;
+const NWG_CAUSTIC_TURB: f32 = 0.6;
 
 /// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus: `kd` its lattice in
 /// cycles a yard, `m` its cycles in the clock's period, `p0` its phase, `w` its curvature times
@@ -7030,7 +7033,7 @@ fn nwg_caustic_gain(
     let path = max(z, 0.0) / max(-t.y, 0.2);
     let k = (1.0 - smoothstep(NWG_CAUSTIC_FADE_YD.x, NWG_CAUSTIC_FADE_YD.y, path))
         * exp(-sig_turb * path * NWG_CAUSTIC_TURB)
-        * (1.0 - smoothstep(NWG_CAUSTIC_FP_YD.x, NWG_CAUSTIC_FP_YD.y, fr.major));
+        * (1.0 - smoothstep(NWG_CAUSTIC_FP_YD.x, NWG_CAUSTIC_FP_YD.y, sqrt(fr.major * fr.minor)));
     let lit = select(1.0, lighting_sun_mcsh(sb.bed, 0.0), bi.adt) * vis.b;
     let amp = k * nwg_sun_share(lit, vis) * water_reflect.preview.gains.x;
     if (amp < 1.0 / 256.0) {
@@ -7420,7 +7423,7 @@ fn nwg_sparkles(xz: vec2<f32>, fr: NwgFrame, glint: vec3<f32>, unresolved: f32) 
 
 /// The crest glow's peak over the celestial tint, linear, and how steeply a face must turn to the
 /// eye to carry it.
-const NWG_SSS_GAIN: f32 = 0.35;
+const NWG_SSS_GAIN: f32 = 0.2;
 const NWG_SSS_SLOPE: f32 = 7.0;
 
 /// The low celestial sun seen through wave faces turned toward the eye, linear, before the fog and
