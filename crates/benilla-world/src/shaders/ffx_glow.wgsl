@@ -287,7 +287,7 @@ const WU_PATCH_SIGMA: f32 = 2.0;
 /// The Kelvin field's steepest crest at `WU_KELVIN_REF_YD` (above the ambient ripple's tilt there,
 /// or the arms vanish into it), its decay length behind the bow and its reach (inside the wave
 /// field's 24-yard half window, faded over its last 30%), yards.
-const WU_KELVIN_SLOPE: f32 = 0.30;
+const WU_KELVIN_SLOPE: f32 = 0.45;
 const WU_KELVIN_REF_YD: f32 = 3.0;
 const WU_KELVIN_DECAY: f32 = 14.0;
 const WU_KELVIN_REACH: f32 = 22.0;

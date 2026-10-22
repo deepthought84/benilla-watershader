@@ -469,7 +469,7 @@ const FALL_FOOT_SLACK: f32 = 2.0;
 /// Parts nearer than this, yards, are one fall, while the joined line stays under
 /// `FALL_LINE_MAX`, which no single part may exceed either.
 const FALL_JOIN: f32 = 3.0;
-const FALL_LINE_MAX: f32 = 30.0;
+const FALL_LINE_MAX: f32 = 60.0;
 
 /// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop.
 #[derive(Clone, Copy)]
