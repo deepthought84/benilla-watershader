@@ -47,7 +47,7 @@ fn setup_glow_acc(mut commands: Commands, device: Res<RenderDevice>) {
 }
 
 /// Arm the glow while its pipeline variant is asked for on Improved Water, and hand FFXGlow the
-/// accumulator with `$WOW_PREVIEW_GLOW_WEIGHT` (6) and `$WOW_PREVIEW_GLOW_CAP` (4.0).
+/// accumulator with `$WOW_PREVIEW_GLOW_WEIGHT` (2) and `$WOW_PREVIEW_GLOW_CAP` (4.0).
 fn arm_glow(
     caps: Res<WaterPipelineCaps>,
     style: Res<WaterStyle>,
@@ -64,7 +64,7 @@ fn arm_glow(
     static GAINS: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
     let (weight, cap) = *GAINS.get_or_init(|| {
         (
-            lever::number("GLOW_WEIGHT", 6.0, 0.0, 32.0),
+            lever::number("GLOW_WEIGHT", 2.0, 0.0, 32.0),
             lever::number("GLOW_CAP", 4.0, 0.0, 16.0),
         )
     });

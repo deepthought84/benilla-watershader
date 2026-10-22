@@ -1178,13 +1178,13 @@ const WU_PATCH_SIGMA: f32 = 2.0;
 /// The Kelvin field's steepest crest at `WU_KELVIN_REF_YD` (above the ambient ripple's tilt there,
 /// or the arms vanish into it), its decay length behind the bow and its reach (inside the wave
 /// field's 24-yard half window, faded over its last 30%), yards.
-const WU_KELVIN_SLOPE: f32 = 0.45;
+const WU_KELVIN_SLOPE: f32 = 0.8;
 const WU_KELVIN_REF_YD: f32 = 3.0;
 const WU_KELVIN_DECAY: f32 = 14.0;
 const WU_KELVIN_REACH: f32 = 22.0;
 /// The transverse system's gain over the divergent one's (1 physical): at swim speed the patch
 /// spectrum leaves them faint, and a little more lets the wedge's inside read.
-const WU_KELVIN_TRANSVERSE: f32 = 1.6;
+const WU_KELVIN_TRANSVERSE: f32 = 2.4;
 /// tan and cos of the Kelvin cusp's polar angle, 19.47° (tan = 1/(2√2)).
 const WU_CUSP_TAN: f32 = 0.35355339;
 const WU_CUSP_COS: f32 = 0.94280904;
@@ -1206,7 +1206,7 @@ const WU_SURFACE_MATCH: f32 = 1.0;
 const WU_COLLAR_REST: f32 = 0.35;
 /// A ring's slope at its packet, per unit of strength (about 0.14 half a yard out from a hand at
 /// strength 0.8, against an ambient ripple tilt of 0.3 to 0.7 near the eye).
-const WU_RING_SLOPE: f32 = 1.0;
+const WU_RING_SLOPE: f32 = 2.2;
 
 /// Snell's window: its gain over the n² radiance the air's light gains entering the water, the
 /// land haze's share at its rim, the sun's halo and disc, and the transmitted glint's weight.
@@ -1214,7 +1214,7 @@ const WU_WINDOW_GAIN: f32 = 1.25;
 const WU_RIM_LAND: f32 = 0.3;
 const WU_SUN_HALO: f32 = 0.6;
 const WU_SUN_DISC: f32 = 6.0;
-const WU_WINDOW_GLINT: f32 = 2.0;
+const WU_WINDOW_GLINT: f32 = 4.0;
 const WU_GLINT_ALPHA_MIN: f32 = 0.06;
 /// The internal mirror: the mirrored bed's share over the in-scatter, and its blur in pixels.
 const WU_TIR_BED: f32 = 0.38;
@@ -1480,9 +1480,11 @@ fn wu_body_dist(q: vec2<f32>, hw: f32) -> f32 {
 fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
     // The sketch's widths are metres on a 0.356 m shoulder; here they scale with the body.
     let bs = hw / 0.356;
-    let cw = (0.030 + 0.045 * front + 0.03 * wob) * bs;
+    // Round 2: a crescent piled at the head that fades along the flanks, and filled inward over
+    // a body's width instead of an outline (a body covers the inside; with none, no lasso).
+    let cw = (0.04 + 0.10 * front + 0.03 * wob) * bs;
     let band = 1.0 - smoothstep(cw - aa - 0.01, cw, dc);
-    return band * mix(0.45, 1.0, brk) * smoothstep(-0.02, 0.0, dc);
+    return band * mix(0.45, 1.0, brk) * smoothstep(-0.8 * hw, 0.0, dc) * smoothstep(0.15, 0.7, front);
 }
 
 /// The kicked trail's coverage behind a swimmer, the sketch's law in its metres: `lat` across and
@@ -1490,13 +1492,15 @@ fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
 /// noises in world space. The churn just behind the feet, then a trail that widens with √age and
 /// thins over 0.8 s and 3 s.
 fn wu_trail_cover(lat: f32, b: f32, age: f32, n1: f32, n2: f32) -> f32 {
-    let churn = smoothstep(0.8, 1.4, b) * (1.0 - smoothstep(1.9, 3.0, b))
+    let churn = smoothstep(0.6, 1.0, b) * (1.0 - smoothstep(1.2, 2.0, b))
         * (1.0 - smoothstep(0.18, 0.45, lat));
-    let latn = lat / (0.20 + 0.15 * sqrt(age));
-    var cov = (0.30 * exp(-age / 0.8) + 0.15 * exp(-age / 3.0))
+    // Round 2: the trail spreads into the wedge as it ages (about five times over its life),
+    // and the churn behind the feet is short, so the band does not keep the body's width.
+    let latn = lat / (0.12 + 0.55 * sqrt(age));
+    var cov = (0.24 * exp(-age / 1.1) + 0.16 * exp(-age / 4.0))
         * (1.0 - smoothstep(0.35, 1.1, latn + 0.45 * (n1 - 0.5)));
     cov = max(cov, churn * 0.42) * smoothstep(0.05, 0.45, b) * (0.55 + 0.9 * n2);
-    return cov;
+    return cov * (1.0 - smoothstep(3.0, 4.5, age));
 }
 
 /// Foam as a web: the borders of warped bubble cells at two sizes. Coverage `c` widens the threads
@@ -1508,12 +1512,13 @@ fn wu_foam_lace(p: vec2<f32>, c: f32, aa: f32) -> f32 {
     let w1 = wu_worley(q * 0.85, 0.0);
     let w2 = wu_worley(q * 2.2 + vec2<f32>(7.0), 0.0);
     let e = min(w1.y - w1.x, (w2.y - w2.x) * 0.8 + 0.10 * (1.0 - c));
-    let wid = mix(0.02, 0.36, c * c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
-    var a = 1.0 - smoothstep(wid - aa * 0.5, wid + aa, e);
+    // Round 2: wider, softer threads, a bubbly web rather than cracked glass.
+    let wid = mix(0.05, 0.42, c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
+    var a = 1.0 - smoothstep(wid - aa * 0.5 - 0.06, wid + aa + 0.04, e);
     a = a * mix(0.72, 1.0, smoothstep(0.0, wid * 0.8 + 1e-3, wid - e));
     // Older foam: whole patches of the web gone.
     a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * c);
-    return a * mix(0.70, 0.97, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
+    return a * mix(0.45, 0.75, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
         * smoothstep(0.04, 0.22, c);
 }
 
@@ -1588,7 +1593,7 @@ fn wu_swimmer(
     if (wu_has(bits, WU_COLLAR)) {
         let dc = wu_body_dist(q, hw);
         if (dc < 0.6 * hw + 0.1) {
-            let front = smoothstep(-2.5 * hw, 0.0, q.y);
+            let front = smoothstep(-1.6 * hw, 0.4 * hw, q.y);
             let ang = atan2(q.x, q.y + 0.9 * hw);
             // Whole turns of the angle, so the wobble meets itself behind the head.
             let wob = 0.35 * sin(ang * 5.0 + ph * 19.0) + 0.15 * sin(ang * 11.0 - ph * 31.0);
@@ -1658,10 +1663,11 @@ fn wu_ring(dq: vec2<f32>, age: f32, a: f32, decay: f32, fp: f32) -> vec3<f32> {
 fn wu_ring_foam(r: f32, age: f32, a: f32, brk: f32, core_n: f32) -> f32 {
     // The sketch's hand is 0.07 yd; larger sources spread wider foam.
     let s = sqrt(max(a, 0.01) / 0.07);
-    let rad = (0.07 + 0.30 * sqrt(age)) * s;
-    let life = 1.0 - smoothstep(0.2, 0.9, age);
-    let ring = (1.0 - smoothstep(0.010 * s, 0.035 * s, abs(r - rad))) * life
-        * smoothstep(0.4, 0.65, brk);
+    // Round 2: a ring that spreads to over a yard and lasts two seconds, wide enough to read.
+    let rad = (0.10 + 0.60 * sqrt(age)) * s;
+    let life = 1.0 - smoothstep(0.5, 2.2, age);
+    let ring = (1.0 - smoothstep(0.02 * s, 0.07 * s, abs(r - rad))) * life
+        * smoothstep(0.35, 0.6, brk) * 0.8;
     let core = (1.0 - smoothstep(rad * 0.2, rad * 0.8, r)) * (1.0 - smoothstep(0.05, 0.35, age))
         * smoothstep(0.3, 0.5, core_n);
     return max(ring, core * 0.9);
@@ -3494,8 +3500,11 @@ fn planar_read_rough(
         return vec4<f32>(0.0);
     }
     // `planar_read`'s lookup: the rippled point lifted by twice its plane error, as the main
-    // camera projects it, read at `1 − u`.
-    let mirror_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
+    // camera projects it, read at `1 − u`. Round 2: the ripple's slide shrinks toward a contact,
+    // as a reflection's displacement does with the reflected thing's distance, so a shore's
+    // base stays crisp in its reflection while what stands further off wavers.
+    let slide = water_reflect.march.y * mix(0.3, 1.0, rough_contact(d_hit, distance(eye, world_pos)));
+    let mirror_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * slide;
     let p = mirror_pos + vec3<f32>(0.0, 2.0 * (params.x - mirror_pos.y), 0.0);
     let lifted = position_world_to_ndc(p);
     let usable = lifted.z > 0.0 && all(abs(lifted.xy) < vec2<f32>(1.5));
@@ -5776,6 +5785,22 @@ fn sc_pierce_tap(world_pos: vec3<f32>, frag_coord: vec2<f32>, o: vec2<f32>, reac
     return select(vec3<f32>(1000.0, 0.0, 0.0), vec3<f32>(dh, d / max(dh, 1e-5)), ok);
 }
 
+/// Round 2: 1 where the opaque surface `p` behind the pixel at `frag` is wide, 0 where it is a stem
+/// or stalk: two depth taps a quarter yard either side along the screen's x (vertical stalks are
+/// thin across it) must both still show a surface within half a yard of `p`.
+fn sc_wide(frag: vec2<f32>, p: vec3<f32>, yd_px: f32) -> f32 {
+    let off = clamp(0.25 / max(yd_px, 1e-4), 2.0, 24.0);
+    var n = 0.0;
+    for (var k = 0; k < 2; k = k + 1) {
+        let px = frag + vec2<f32>(select(-off, off, k == 0), 0.0);
+        let z = scene_view_z(vec2<i32>(floor(px)));
+        let uv = (px - view.viewport.xy) / view.viewport.zw;
+        let q = scene_world_pos(uv, max(z, 1e-3));
+        n = n + select(0.0, 1.0, z > 0.0 && distance(q, p) < 0.5);
+    }
+    return smoothstep(0.5, 1.5, n);
+}
+
 /// The nearest wall standing beside the pixel within `reach` yards, from four depth taps on the
 /// screen axes `reach` away (`yd_px` yards a pixel, held to 1.5-16 px, inside the depth's margin
 /// round the water's rectangle): (distance, unit direction), 1000 for none. Skipped where the depth
@@ -5906,6 +5931,10 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
     }
 
     // ---- contacts ----------------------------------------------------------------------------
+    // Round 2: the contact is drawn as its own hairline below, not through the bubble cut.
+    var contact_k = 0.0;
+    var contact_dc = 1000.0;
+    var contact_r = 1.0;
     let wall = sc_steep_gate(g.steep) * select(0.0, 1.0, g.h_ray >= 0.0);
     // A wall's face under the first yard of water, seen through it, wet.
     o.wet = max(o.wet, wall * (1.0 - smoothstep(0.35, 0.9, g.col)));
@@ -5914,6 +5943,15 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
     let reach = SC_CONTACT_YD * (0.5 + 0.5 * energy) * breath;
     var dc = select(1000.0, g.h_ray, wall > 0.0 && g.col < SC_CONTACT_DEEP);
     var gate = wall * (1.0 - smoothstep(0.6 * SC_CONTACT_DEEP, SC_CONTACT_DEEP, g.col));
+    // Round 2: a reed's stem or a thin stalk behind the water is not a wall to pile foam on.
+    if (gate > 0.0 && dc < 1000.0) {
+        let bed = vec3<f32>(
+            i.world_pos.x + g.to_obs.x * g.h_ray,
+            i.world_pos.y - g.col,
+            i.world_pos.z + g.to_obs.y * g.h_ray,
+        );
+        gate = gate * sc_wide(i.frag_coord, bed, yd_px);
+    }
     var dir = g.to_obs;
 #ifdef WATER_TIER_HIGH
     let p = sc_pierce(i.world_pos, i.frag_coord, yd_px, 2.0 * reach);
@@ -5931,8 +5969,10 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
         let tail = fl * max(-along, 0.0);
         let r = reach * (1.0 + 0.8 * fl * max(along, 0.0)) * (1.0 + 2.2 * tail);
         let band = 1.0 - smoothstep(0.45 * r, r, dc);
-        o.contact = gate * band * (1.0 - 0.45 * tail) * gains.z * (0.35 + 0.65 * energy);
-        foam_c = max(foam_c, o.contact);
+        contact_k = gate * (1.0 - 0.45 * tail) * gains.z * (0.35 + 0.65 * energy);
+        contact_dc = dc;
+        contact_r = r;
+        o.contact = contact_k * band;
         o.meniscus = max(
             o.meniscus,
             gate * (1.0 - smoothstep(0.0, SC_MENISCUS_YD + yd_px, dc)) * saturate(SC_MENISCUS_YD / yd_px),
@@ -5941,13 +5981,19 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
 
     // ---- the foam ------------------------------------------------------------------------------
     var thick = 0.0;
-    if (foam_c > 0.0 || line > 0.0) {
+    if (foam_c > 0.0 || line > 0.0 || contact_k > 0.0) {
         let pat = sc_pattern(xz, i.flow, i.d_xz_dx, i.d_xz_dy, SC_FOAM_SCALE);
         let m = sc_bubble_mask(foam_c, pat.v, pat.fw);
         // The line breaks into beads and dashes along the shore.
         let beads = line * (0.35 + 0.65 * smoothstep(0.3, 0.7, pat.v));
         o.foam = max(m, beads);
         thick = saturate((pat.v - (1.0 - foam_c)) / 0.35) * step(beads, m);
+        // A continuous, dim hairline hugging the contact, its width wandering with the pattern
+        // (round 2: the bubble cut drew it as evenly spaced dashes).
+        let wr = contact_r * (0.35 + 0.75 * pat.v);
+        let aa_c = max(yd_px, 0.01);
+        let hair = contact_k * (1.0 - smoothstep(0.3 * wr, wr + aa_c, contact_dc)) * (0.55 + 0.25 * pat.v);
+        o.foam = max(o.foam, hair);
     }
 #ifndef WATER_TIER_LOW
     if (ocean && sea > 0.05 && i.shore_far > SC_CAP_SHORE.x) {
@@ -5955,9 +6001,10 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
         // Sparse below a fresh breeze, a few per cent of the sea at a full one.
         let caps_sea = smoothstep(0.2, 0.8, sea);
         let thr = mix(0.9, 0.35, caps_sea);
+        // Round 2: no lone caps on a calm, sheltered sea.
         let cap = smoothstep(thr, 1.0, crest)
             * smoothstep(SC_CAP_SHORE.x, SC_CAP_SHORE.y, i.shore_far)
-            * (0.3 + 0.4 * caps_sea);
+            * (0.3 + 0.4 * caps_sea) * smoothstep(0.25, 0.45, sea);
         if (cap > 0.0) {
             let lace = sc_pattern(xz, vec2<f32>(0.0), i.d_xz_dx, i.d_xz_dy, SC_CAP_SCALE);
             let mc = sc_bubble_mask(cap, lace.v, lace.fw);
@@ -6070,9 +6117,9 @@ const RF_CHURN_YD: f32 = 1.6;
 /// How white each foam gets at most: foam is never the brightest continuous line in the frame.
 const RF_WHITE_LEVEL: f32 = 0.8;
 const RF_STREAK_LEVEL: f32 = 0.34;
-const RF_POOL_LEVEL: f32 = 0.75;
+const RF_POOL_LEVEL: f32 = 0.92;
 const RF_SHEET_LEVEL: f32 = 0.92;
-const RF_MIST_LEVEL: f32 = 0.30;
+const RF_MIST_LEVEL: f32 = 0.45;
 /// Foam's light on its shaded underside and its lit top, relative to the foam illuminant: violet
 /// blue in shade, cream in sun.
 const RF_FOAM_SHADE: vec3<f32> = vec3<f32>(0.66, 0.75, 0.94);
@@ -6663,8 +6710,9 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     let fp_ring = px * dage * 0.5;
     let ring_b = smoothstep(0.0, 0.04 + 2.0 * fp_ring, ring_ph) * smoothstep(0.46, 0.10, ring_ph);
     let ring_k = ring_b * 1.15 * exp(-age / 8.0) * smoothstep(1.2, 2.4, r);
-    let patch_k = 0.80 * exp(-age / 4.2);
-    let dense = smoothstep(5.6, 2.6, r + 0.4 * raft.n);
+    // Round 2: the boil reaches out past the rocks a fall comes down behind, and the rafts last.
+    let patch_k = 0.9 * exp(-age / 8.0);
+    let dense = smoothstep(14.0, 4.5, r + 0.8 * raft.n);
     let cov = saturate(max(max(dense, ring_k * 0.95), patch_k) * min(e * 1.2, 1.0));
     let lev = rf_level(cov);
     var pf = raft.n;
@@ -6700,7 +6748,7 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     part.cover = saturate(foam) * RF_POOL_LEVEL;
     part.shade = rf_foam_shade(raft.g, blob * (1.0 - heart), i.to_view, sun);
     part.aer = smoothstep(7.5, 1.0, r) * e;
-    part.mist = e * exp(-r / 1.8) * RF_MIST_LEVEL * (0.75 + 0.25 * smoothstep(-1.0, 1.0, raft.n));
+    part.mist = e * exp(-r / 6.5) * RF_MIST_LEVEL * (0.7 + 0.3 * smoothstep(-1.0, 1.0, raft.n));
     return part;
 }
 
@@ -7011,7 +7059,7 @@ const RF_FOAM_WHITE: vec3<f32> = vec3<f32>(0.93, 0.95, 0.97);
 /// taken to grey, so a low sun warms foam without turning it cream or tan; foam scatters the sky's
 /// light as much as the sun's.
 fn pv_foam_tone(e: vec3<f32>) -> vec3<f32> {
-    return mix(vec3<f32>(dot(e, LUMA_709)), e, 0.6);
+    return mix(vec3<f32>(dot(e, LUMA_709)), e, 0.45) * vec3<f32>(0.97, 0.99, 1.03);
 }
 
 /// The lip band's light, linear, added with the glints (and fogged as they are).
@@ -7129,10 +7177,10 @@ const NWG_CAUSTIC_FOCUS_YD: f32 = 0.72;
 /// The intensity's regularisation, 1/sqrt(det² + ε²): the brightest line is 1/ε over the mean.
 const NWG_CAUSTIC_EPS: f32 = 0.15;
 /// The path over which the net's contrast fades out, yards.
-const NWG_CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(4.0, 10.0);
+const NWG_CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(5.0, 14.0);
 /// The surface footprint (the geometric mean of its axes, so a grazing view keeps the net) over
 /// which the net resolves to its mean, yards.
-const NWG_CAUSTIC_FP_YD: vec2<f32> = vec2<f32>(0.05, 0.22);
+const NWG_CAUSTIC_FP_YD: vec2<f32> = vec2<f32>(0.08, 0.35);
 /// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
 const NWG_CAUSTIC_TURB: f32 = 0.6;
 
@@ -7336,8 +7384,10 @@ fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSur
         let keep = smoothstep(2.0, 4.0, lam / fr.major);
         unresolved = max(unresolved, 1.0 - keep);
         // Snow lands as dimples: the small drops at a quarter of the slope, none of the large.
-        let chance = select(rain, rain + 0.5 * snow, i == 0);
-        let amp = select(1.0, 1.0 - 0.75 * snow / max(rain + snow, 1e-4), i == 0);
+        // Round 2: a zone's moderate rain lands more drops than its share, and the rings are
+        // steeper, so they read on the grey water of real weather and not only when forced.
+        let chance = select(sqrt(rain), sqrt(rain) + 0.5 * snow, i == 0);
+        let amp = 1.6 * select(1.0, 1.0 - 0.75 * snow / max(rain + snow, 1e-4), i == 0);
         if (keep > 0.0 && chance > 0.0) {
             let ring = nwg_rings(xz, d, chance, amp * keep, 40u + u32(i) * 8u);
             full += ring;
@@ -7537,7 +7587,7 @@ const NWG_SPARK_CELL_MIN_YD: f32 = 0.04;
 /// A sparkle's radius, in cells; with the jitter it stays inside its cell.
 const NWG_SPARK_RADIUS: f32 = 0.25;
 /// The share of the lobe's unresolved light the sparkles carry.
-const NWG_SPARK_SHARE: f32 = 0.35;
+const NWG_SPARK_SHARE: f32 = 0.55;
 /// A sparkle's luminance over display white.
 const NWG_SPARK_RADIANCE: f32 = 6.0;
 /// The time slots per clock period, the lowest and the highest a cell takes.
@@ -7654,7 +7704,7 @@ fn nwg_crest_glow(
 /// The mist layer's depth over the water, yards; its extinction per yard at full density; the most
 /// of the surface it hides.
 const NWG_MIST_LAYER_YD: f32 = 2.5;
-const NWG_MIST_SIGMA: f32 = 0.0045;
+const NWG_MIST_SIGMA: f32 = 0.011;
 const NWG_MIST_MAX: f32 = 0.75;
 /// The scene fog's end, yards, over which the fog counts from thick (the near end) to none.
 const NWG_MIST_FOG_YD: vec2<f32> = vec2<f32>(80.0, 250.0);
@@ -7684,8 +7734,13 @@ fn nwg_mist(world_pos: vec3<f32>, to_view: vec3<f32>, to_shore: f32) -> vec4<f32
     let path = distance(eye, world_pos) * min(1.0, NWG_MIST_LAYER_YD / dy);
     let cover = (1.0 - exp(-NWG_MIST_SIGMA * m * path)) * NWG_MIST_MAX
         * smoothstep(0.0, 6.0, to_shore);
-    let forward = pow(saturate(dot(-to_view, sun_l)), 8.0) * low * sun.w;
-    let colour = water_dec(fog.rgb) + water_dec(wow_light.light_spec.rgb) * (0.3 * forward);
+    // Round 2: a veil lit by the scene's light, whiter than the fog behind it, and glowing toward
+    // a low sun (the fog's own colour alone gave it no contrast against the fogged far water).
+    let forward = pow(saturate(dot(-to_view, sun_l)), 6.0) * low * sun.w;
+    let b = water_reflect.look.body;
+    let lit = b.e_sky_foam.rgb + b.e_sun_foam.rgb;
+    let colour = water_dec(fog.rgb) * 0.55 + vec3<f32>(dot(lit, LUMA_709)) * 0.35
+        + water_dec(wow_light.light_spec.rgb) * (0.9 * forward);
     return vec4<f32>(colour, cover);
 }
 

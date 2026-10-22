@@ -65,15 +65,11 @@ fn water_glow_wide(uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(c.rgb, 0.3 * c.a + 0.7 * ring / 8.0);
 }
 
-// The weight's trim (round 2): weight 6 fused a sunset's glitter into one white column; this
-// takes the default to an effective 2.
-const WATER_GLOW_TRIM: f32 = 0.34;
-
 // The blurred excess `b.a` over the combine's gamma output `outg`, as light: weight `wave.z`, capped
 // at `wave.w`, in the hue of the blurred neighbourhood, added under a square-law decode so a dark
 // night bay blooms more than a bright noon one.
 fn water_glow_over(outg: vec3<f32>, b: vec4<f32>) -> vec3<f32> {
-    let e = min(max(b.a, 0.0), ffx.wave.w) * ffx.wave.z * WATER_GLOW_TRIM;
+    let e = min(max(b.a, 0.0), ffx.wave.w) * ffx.wave.z;
     let m = max(b.r, max(b.g, b.b));
     let hue = select(vec3<f32>(1.0), b.rgb / m, m > 1e-3);
     return min(sqrt(outg * outg + e * hue), vec3<f32>(1.0));
@@ -305,13 +301,13 @@ const WU_PATCH_SIGMA: f32 = 2.0;
 /// The Kelvin field's steepest crest at `WU_KELVIN_REF_YD` (above the ambient ripple's tilt there,
 /// or the arms vanish into it), its decay length behind the bow and its reach (inside the wave
 /// field's 24-yard half window, faded over its last 30%), yards.
-const WU_KELVIN_SLOPE: f32 = 0.45;
+const WU_KELVIN_SLOPE: f32 = 0.8;
 const WU_KELVIN_REF_YD: f32 = 3.0;
 const WU_KELVIN_DECAY: f32 = 14.0;
 const WU_KELVIN_REACH: f32 = 22.0;
 /// The transverse system's gain over the divergent one's (1 physical): at swim speed the patch
 /// spectrum leaves them faint, and a little more lets the wedge's inside read.
-const WU_KELVIN_TRANSVERSE: f32 = 1.6;
+const WU_KELVIN_TRANSVERSE: f32 = 2.4;
 /// tan and cos of the Kelvin cusp's polar angle, 19.47° (tan = 1/(2√2)).
 const WU_CUSP_TAN: f32 = 0.35355339;
 const WU_CUSP_COS: f32 = 0.94280904;
@@ -333,7 +329,7 @@ const WU_SURFACE_MATCH: f32 = 1.0;
 const WU_COLLAR_REST: f32 = 0.35;
 /// A ring's slope at its packet, per unit of strength (about 0.14 half a yard out from a hand at
 /// strength 0.8, against an ambient ripple tilt of 0.3 to 0.7 near the eye).
-const WU_RING_SLOPE: f32 = 1.0;
+const WU_RING_SLOPE: f32 = 2.2;
 
 /// Snell's window: its gain over the n² radiance the air's light gains entering the water, the
 /// land haze's share at its rim, the sun's halo and disc, and the transmitted glint's weight.
@@ -341,7 +337,7 @@ const WU_WINDOW_GAIN: f32 = 1.25;
 const WU_RIM_LAND: f32 = 0.3;
 const WU_SUN_HALO: f32 = 0.6;
 const WU_SUN_DISC: f32 = 6.0;
-const WU_WINDOW_GLINT: f32 = 2.0;
+const WU_WINDOW_GLINT: f32 = 4.0;
 const WU_GLINT_ALPHA_MIN: f32 = 0.06;
 /// The internal mirror: the mirrored bed's share over the in-scatter, and its blur in pixels.
 const WU_TIR_BED: f32 = 0.38;
@@ -607,9 +603,11 @@ fn wu_body_dist(q: vec2<f32>, hw: f32) -> f32 {
 fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
     // The sketch's widths are metres on a 0.356 m shoulder; here they scale with the body.
     let bs = hw / 0.356;
-    let cw = (0.030 + 0.045 * front + 0.03 * wob) * bs;
+    // Round 2: a crescent piled at the head that fades along the flanks, and filled inward over
+    // a body's width instead of an outline (a body covers the inside; with none, no lasso).
+    let cw = (0.04 + 0.10 * front + 0.03 * wob) * bs;
     let band = 1.0 - smoothstep(cw - aa - 0.01, cw, dc);
-    return band * mix(0.45, 1.0, brk) * smoothstep(-0.02, 0.0, dc);
+    return band * mix(0.45, 1.0, brk) * smoothstep(-0.8 * hw, 0.0, dc) * smoothstep(0.15, 0.7, front);
 }
 
 /// The kicked trail's coverage behind a swimmer, the sketch's law in its metres: `lat` across and
@@ -617,13 +615,15 @@ fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
 /// noises in world space. The churn just behind the feet, then a trail that widens with √age and
 /// thins over 0.8 s and 3 s.
 fn wu_trail_cover(lat: f32, b: f32, age: f32, n1: f32, n2: f32) -> f32 {
-    let churn = smoothstep(0.8, 1.4, b) * (1.0 - smoothstep(1.9, 3.0, b))
+    let churn = smoothstep(0.6, 1.0, b) * (1.0 - smoothstep(1.2, 2.0, b))
         * (1.0 - smoothstep(0.18, 0.45, lat));
-    let latn = lat / (0.20 + 0.15 * sqrt(age));
-    var cov = (0.30 * exp(-age / 0.8) + 0.15 * exp(-age / 3.0))
+    // Round 2: the trail spreads into the wedge as it ages (about five times over its life),
+    // and the churn behind the feet is short, so the band does not keep the body's width.
+    let latn = lat / (0.12 + 0.55 * sqrt(age));
+    var cov = (0.24 * exp(-age / 1.1) + 0.16 * exp(-age / 4.0))
         * (1.0 - smoothstep(0.35, 1.1, latn + 0.45 * (n1 - 0.5)));
     cov = max(cov, churn * 0.42) * smoothstep(0.05, 0.45, b) * (0.55 + 0.9 * n2);
-    return cov;
+    return cov * (1.0 - smoothstep(3.0, 4.5, age));
 }
 
 /// Foam as a web: the borders of warped bubble cells at two sizes. Coverage `c` widens the threads
@@ -635,12 +635,13 @@ fn wu_foam_lace(p: vec2<f32>, c: f32, aa: f32) -> f32 {
     let w1 = wu_worley(q * 0.85, 0.0);
     let w2 = wu_worley(q * 2.2 + vec2<f32>(7.0), 0.0);
     let e = min(w1.y - w1.x, (w2.y - w2.x) * 0.8 + 0.10 * (1.0 - c));
-    let wid = mix(0.02, 0.36, c * c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
-    var a = 1.0 - smoothstep(wid - aa * 0.5, wid + aa, e);
+    // Round 2: wider, softer threads, a bubbly web rather than cracked glass.
+    let wid = mix(0.05, 0.42, c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
+    var a = 1.0 - smoothstep(wid - aa * 0.5 - 0.06, wid + aa + 0.04, e);
     a = a * mix(0.72, 1.0, smoothstep(0.0, wid * 0.8 + 1e-3, wid - e));
     // Older foam: whole patches of the web gone.
     a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * c);
-    return a * mix(0.70, 0.97, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
+    return a * mix(0.45, 0.75, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
         * smoothstep(0.04, 0.22, c);
 }
 
@@ -715,7 +716,7 @@ fn wu_swimmer(
     if (wu_has(bits, WU_COLLAR)) {
         let dc = wu_body_dist(q, hw);
         if (dc < 0.6 * hw + 0.1) {
-            let front = smoothstep(-2.5 * hw, 0.0, q.y);
+            let front = smoothstep(-1.6 * hw, 0.4 * hw, q.y);
             let ang = atan2(q.x, q.y + 0.9 * hw);
             // Whole turns of the angle, so the wobble meets itself behind the head.
             let wob = 0.35 * sin(ang * 5.0 + ph * 19.0) + 0.15 * sin(ang * 11.0 - ph * 31.0);
@@ -785,10 +786,11 @@ fn wu_ring(dq: vec2<f32>, age: f32, a: f32, decay: f32, fp: f32) -> vec3<f32> {
 fn wu_ring_foam(r: f32, age: f32, a: f32, brk: f32, core_n: f32) -> f32 {
     // The sketch's hand is 0.07 yd; larger sources spread wider foam.
     let s = sqrt(max(a, 0.01) / 0.07);
-    let rad = (0.07 + 0.30 * sqrt(age)) * s;
-    let life = 1.0 - smoothstep(0.2, 0.9, age);
-    let ring = (1.0 - smoothstep(0.010 * s, 0.035 * s, abs(r - rad))) * life
-        * smoothstep(0.4, 0.65, brk);
+    // Round 2: a ring that spreads to over a yard and lasts two seconds, wide enough to read.
+    let rad = (0.10 + 0.60 * sqrt(age)) * s;
+    let life = 1.0 - smoothstep(0.5, 2.2, age);
+    let ring = (1.0 - smoothstep(0.02 * s, 0.07 * s, abs(r - rad))) * life
+        * smoothstep(0.35, 0.6, brk) * 0.8;
     let core = (1.0 - smoothstep(rad * 0.2, rad * 0.8, r)) * (1.0 - smoothstep(0.05, 0.35, age))
         * smoothstep(0.3, 0.5, core_n);
     return max(ring, core * 0.9);
