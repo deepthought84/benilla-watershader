@@ -553,62 +553,94 @@ fn drive_fall_lanes(
                 {
                     continue;
                 }
-                // The water under the part's middle: the lowest surface there, at its bottom.
-                let w = bevy_to_wow(Vec3::new(mid.x, lo.y, mid.z));
-                let over = index.over(w[0], w[1]);
-                let Some(surface) = benilla_world::liquid::water_surface_at(
-                    over.iter().filter_map(|&e| water.get(e).ok()),
-                    [w[0], w[1], w[2] + FALL_FOOT_SLACK],
-                    LiquidClaim::Unknown,
-                ) else {
-                    continue;
+                // The water at the part's bottom at (x, z): the lowest surface there, Bevy Y.
+                let surface_y = |x: f32, z: f32| {
+                    let w = bevy_to_wow(Vec3::new(x, lo.y, z));
+                    let over = index.over(w[0], w[1]);
+                    benilla_world::liquid::water_surface_at(
+                        over.iter().filter_map(|&e| water.get(e).ok()),
+                        [w[0], w[1], w[2] + FALL_FOOT_SLACK],
+                        LiquidClaim::Unknown,
+                    )
+                    .map(|s| wow_to_bevy([w[0], w[1], s]).y)
+                    .filter(|&y| lo.y <= y + FALL_FOOT_SLACK && hi.y >= y + FALL_MIN_HEIGHT)
                 };
-                let foot_y = wow_to_bevy([w[0], w[1], surface]).y;
-                if lo.y > foot_y + FALL_FOOT_SLACK || hi.y < foot_y + FALL_MIN_HEIGHT {
-                    continue;
-                }
-                let (a, b) = if hi.x - lo.x >= hi.z - lo.z {
-                    (Vec2::new(lo.x, mid.z), Vec2::new(hi.x, mid.z))
+                // The foot: where the sheet meets the water. A thick part (a dam's spillway) has
+                // its foot on the side of its short axis that stands in water at its bottom, not
+                // through its middle; the middle when both sides or neither do.
+                let along_x = hi.x - lo.x >= hi.z - lo.z;
+                let inset = (0.25 * short).min(1.5);
+                let (s_lo, s_hi) = if along_x {
+                    (lo.z + inset, hi.z - inset)
                 } else {
-                    (Vec2::new(mid.x, lo.z), Vec2::new(mid.x, hi.z))
+                    (lo.x + inset, hi.x - inset)
                 };
-                let fall = Fall {
-                    a,
-                    b,
-                    foot_y,
-                    drop: hi.y - foot_y,
-                };
-                // Join a part to a fall it overlaps or nearly does.
-                let near = |f: &Fall| {
-                    let seg = |p: Vec2| {
-                        let ab = f.b - f.a;
-                        let t = ((p - f.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-                        (f.a + ab * t).distance(p)
-                    };
-                    seg(fall.a).min(seg(fall.b)) < FALL_JOIN && (f.foot_y - fall.foot_y).abs() < 1.0
-                };
-                let joined = |f: &Fall| {
-                    [f.a, f.b, fall.a, fall.b]
-                        .iter()
-                        .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
-                            (l.min(*p), h.max(*p))
-                        })
-                };
-                let fits = |f: &Fall| {
-                    let (pl, ph) = joined(f);
-                    (ph - pl).max_element() <= FALL_LINE_MAX
-                };
-                if let Some(f) = found.iter_mut().find(|f| near(f) && fits(f)) {
-                    let (pl, ph) = joined(f);
-                    let mz = (pl + ph) * 0.5;
-                    (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
-                        (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))
+                let probe = |s: f32| {
+                    if along_x {
+                        surface_y(mid.x, s)
                     } else {
-                        (Vec2::new(mz.x, pl.y), Vec2::new(mz.x, ph.y))
+                        surface_y(s, mid.z)
+                    }
+                };
+                let at_mid = if along_x { mid.z } else { mid.x };
+                let (side, foot_y) = match (short > 2.0, probe(s_lo), probe(s_hi)) {
+                    (true, Some(y), None) => (s_lo, y),
+                    (true, None, Some(y)) => (s_hi, y),
+                    _ => match probe(at_mid) {
+                        Some(y) => (at_mid, y),
+                        None => continue,
+                    },
+                };
+                // The line along the part's longer side at its foot.
+                let (l0, l1) = if along_x { (lo.x, hi.x) } else { (lo.z, hi.z) };
+                let pt = |t: f32| {
+                    if along_x {
+                        Vec2::new(t, side)
+                    } else {
+                        Vec2::new(side, t)
+                    }
+                };
+                {
+                    let fall = Fall {
+                        a: pt(l0),
+                        b: pt(l1),
+                        foot_y,
+                        drop: hi.y - foot_y,
                     };
-                    f.drop = f.drop.max(fall.drop);
-                } else {
-                    found.push(fall);
+                    // Join a part to a fall it overlaps or nearly does.
+                    let near = |f: &Fall| {
+                        let seg = |p: Vec2| {
+                            let ab = f.b - f.a;
+                            let t =
+                                ((p - f.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+                            (f.a + ab * t).distance(p)
+                        };
+                        seg(fall.a).min(seg(fall.b)) < FALL_JOIN
+                            && (f.foot_y - fall.foot_y).abs() < 1.0
+                    };
+                    let joined = |f: &Fall| {
+                        [f.a, f.b, fall.a, fall.b]
+                            .iter()
+                            .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
+                                (l.min(*p), h.max(*p))
+                            })
+                    };
+                    let fits = |f: &Fall| {
+                        let (pl, ph) = joined(f);
+                        (ph - pl).max_element() <= FALL_LINE_MAX
+                    };
+                    if let Some(f) = found.iter_mut().find(|f| near(f) && fits(f)) {
+                        let (pl, ph) = joined(f);
+                        let mz = (pl + ph) * 0.5;
+                        (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
+                            (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))
+                        } else {
+                            (Vec2::new(mz.x, pl.y), Vec2::new(mz.x, ph.y))
+                        };
+                        f.drop = f.drop.max(fall.drop);
+                    } else {
+                        found.push(fall);
+                    }
                 }
             }
         }
