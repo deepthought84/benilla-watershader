@@ -19,8 +19,9 @@ pub use prop_probes::{PropProbeSlot, PropProbes, MAX_PROP_PROBES};
 // The std430 layout stays in the crate: off-world producers state values through `LightBlob`,
 // never a row index.
 pub(crate) use prop_probes::prop_probe_region_offset;
+pub use resolve::DrySky;
 pub use resolve::WmoCrossfade;
-use resolve::{apply_sky_backdrop, setup_lighting, update_time_lighting};
+use resolve::{apply_sky_backdrop, setup_lighting, update_dry_sky, update_time_lighting};
 pub(crate) use sh::prop_probe_coeffs;
 
 /// Scene lighting sampled from `Light.dbc` for the time of day. Colours are sRGB 0..1; `sun_dir` is
@@ -220,6 +221,7 @@ impl Plugin for LightingPlugin {
         // Readers of the resolve run after it.
         configure_lighting_sets(app);
         app.init_resource::<WowLighting>()
+            .init_resource::<DrySky>()
             .init_resource::<PropProbes>()
             .init_resource::<GameClock>()
             .init_resource::<WorldTime>()
@@ -228,7 +230,7 @@ impl Plugin for LightingPlugin {
             .add_systems(Startup, setup_lighting.after(AssetSet::Open))
             .add_systems(
                 Update,
-                (update_time_lighting, apply_sky_backdrop)
+                (update_time_lighting, apply_sky_backdrop, update_dry_sky)
                     .chain()
                     .in_set(LightingResolveSet)
                     // The storm blend reads this frame's weather densities.

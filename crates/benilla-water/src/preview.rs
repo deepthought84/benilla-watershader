@@ -85,9 +85,25 @@ fn drive_preview(
             lever::number("SEA", -1.0, 0.0, 1.0),
         )
     });
+    // The gains (caustics, lights, sparkles, river foam), the river mist's, and a forced rain and
+    // snow (-1: the zone weather's).
+    static GAINS: std::sync::OnceLock<([f32; 4], f32, f32, f32)> = std::sync::OnceLock::new();
+    let (gains, mist_gain, rain_forced, snow_forced) = *GAINS.get_or_init(|| {
+        (
+            [
+                lever::number("CAUSTICS_GAIN", 1.0, 0.0, 4.0),
+                lever::number("LIGHTS_GAIN", 1.0, 0.0, 4.0),
+                lever::number("SPARKLES_GAIN", 1.0, 0.0, 4.0),
+                lever::number("RIVER_FOAM_GAIN", 1.0, 0.0, 4.0),
+            ],
+            lever::number("RIVER_MIST_GAIN", 1.0, 0.0, 4.0),
+            lever::number("FORCE_RAIN", -1.0, 0.0, 1.0),
+            lever::number("FORCE_SNOW", -1.0, 0.0, 1.0),
+        )
+    });
     let cone = if lever::on(lever::ROUGH) { cone } else { 0.0 };
     row(PV_MASK, [mask as f32, cone, 0.0, 0.0]);
-    row(PV_GAINS, [1.0; 4]);
+    row(PV_GAINS, gains);
     row(
         PV_CLOCKS,
         [
@@ -103,12 +119,16 @@ fn drive_preview(
     let storm = storm_blend(sky);
     let (dir, speed) = wind_at(secs, storm);
     row(PV_WIND, [dir.x, dir.y, speed, storm]);
-    let rain = if kind == WeatherKind::Rain {
+    let rain = if rain_forced >= 0.0 {
+        rain_forced
+    } else if kind == WeatherKind::Rain {
         density
     } else {
         0.0
     };
-    let snow = if kind == WeatherKind::Snow {
+    let snow = if snow_forced >= 0.0 {
+        snow_forced
+    } else if kind == WeatherKind::Snow {
         density
     } else {
         0.0
@@ -118,7 +138,7 @@ fn drive_preview(
     } else {
         (speed / SEA_FULL_WIND).max(storm).clamp(0.0, 1.0)
     };
-    row(PV_WEATHER, [rain, snow, sea, 1.0]);
+    row(PV_WEATHER, [rain, snow, sea, mist_gain]);
     row(
         PV_SWELL,
         [
@@ -163,6 +183,7 @@ pub(super) fn register(app: &mut App) {
         PostUpdate,
         drive_preview.before(super::reflect::drive_reflection),
     );
+    super::preview_rows::register(app);
 }
 
 #[cfg(test)]

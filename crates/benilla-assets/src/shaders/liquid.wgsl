@@ -225,6 +225,62 @@ struct WaterBody {
     e_sun_foam: vec4<f32>,
 };
 
+/// The wake's rows, written beside the wave field's window by `benilla_water`'s `ripple_sim`; the
+/// preview block's `wake` (`benilla_water`'s `preview`).
+struct WakeLanes {
+    // x the feature bits (`WU_*`), y the wake clock in seconds reduced by `WU_CLOCK_PERIOD`, z the
+    // live wave field's share kept inside a swimmer's wedge, w the share of the field's height the
+    // body's depth ramp keeps.
+    cfg: vec4<f32>,
+    // The circle every live wake and ring lies in: xy its centre (world XZ), z its radius squared,
+    // w 1 when anything is live.
+    bound: vec4<f32>,
+    // Two rows per swimmer (`WU_SWIMMERS`): xyz the bow point, its y the water surface under it,
+    // w the strength (0 an empty slot); then xy the unit heading in world XZ, z the speed in yd/s,
+    // w the body's half width at the waterline in yards.
+    swimmer: array<vec4<f32>, 8>,
+    // Two rows per ring (`WU_RINGS_MAX`): xy the centre (world XZ), z the age in seconds, w the
+    // strength (0 an empty slot); then x the source's radius in yards, y the decay time in
+    // seconds, z the splash foam it leaves (0-1), w spare.
+    ring: array<vec4<f32>, 16>,
+};
+
+/// The eye-below rows, written by `benilla_water`'s `under` lanes every frame: the member `under`
+/// in the preview block, and the improved underwater combine's uniform (`ffx_glow.wgsl`).
+struct UnderLanes {
+    // xyz the eye, w the near plane's distance.
+    cam_pos: vec4<f32>,
+    // xyz the view's forward axis, w the angle one output pixel subtends (radians).
+    cam_fwd: vec4<f32>,
+    // xyz the right axis times tan(half the horizontal field); then the up axis times tan(half the
+    // vertical field); w spare on both.
+    cam_right: vec4<f32>,
+    cam_up: vec4<f32>,
+    // x the water surface's world Y over the eye, y the eye's depth under it, z 1 while the eye is
+    // in a water kind (0 dry, magma or slime), w the feature bits.
+    surface: vec4<f32>,
+    // rgb the absorption per yard, w the in-scatter's extinction per yard.
+    sigma: vec4<f32>,
+    // rgb the swapped (underwater) fog colour, then the dry fog colour, gamma; w spare.
+    fog_wet: vec4<f32>,
+    fog_dry: vec4<f32>,
+    // x/y the swapped fog's start and end, z/w the dry fog's, yards.
+    fog_span: vec4<f32>,
+    // rgb the dry dome's zenith and horizon stops, gamma; w spare.
+    sky_zenith: vec4<f32>,
+    sky_horizon: vec4<f32>,
+    // rgb the dry sun's colour (Light.dbc row 9), gamma; w spare.
+    sun_dry: vec4<f32>,
+    // xyz the lighting sun refracted into the water, unit, pointing up toward it; w spare.
+    sun_refr: vec4<f32>,
+    // rgb the lighting sun's irradiance, linear; w its share of the light under the surface (0 at
+    // night or under cloud).
+    sun_e: vec4<f32>,
+    // x the underwater clock in seconds reduced by `UW_CLOCK_PERIOD`, y the quality tier; zw spare.
+    clock: vec4<f32>,
+    spare: vec4<f32>,
+};
+
 // The Improved Water preview's rows (`benilla_water`'s `preview`), the last member of
 // `WaterReflect`: zero where the preview, or the feature a row feeds, is off. Declared for every
 // liquid pipeline, since the buffer has this shape for all of them; read under `WATER_PREVIEW`.
@@ -253,9 +309,9 @@ struct WaterPreview {
     // Eight fall lines, two rows each.
     falls: array<vec4<f32>, 16>,
     // The swimmers' and rings' rows.
-    wake: array<vec4<f32>, 26>,
+    wake: WakeLanes,
     // The view from below the surface.
-    under: array<vec4<f32>, 16>,
+    under: UnderLanes,
     // Room for shader-only iteration.
     spare: array<vec4<f32>, 8>,
 };
@@ -397,9 +453,13 @@ struct WowLight {
     _sh_c16: vec4<f32>,            // 12
     water_river: array<vec4<f32>, 2>, // 13-14 river/lake shallow, deep (IntBand 16/17); w = alpha
     water_ocean: array<vec4<f32>, 2>, // 15-16 ocean shallow, deep (IntBand 14/15); w = alpha
-    _grade: vec4<f32>,             // 17
+    grade: vec4<f32>,              // 17 x = the SIDN night fraction (1 overnight, 0 by day)
     wmo_fog_color: vec4<f32>,      // 18 rgb = interior fog (block 2); w = enable
     wmo_fog_params: vec4<f32>,     // 19 x = start yd; y = end yd
+    // 20 x = the point table's live entries; then two rows per light, `[pos.xyz, range]` and
+    // `[rgb, 0]`, the lights within 300 yd of the camera, nearest first.
+    point_count: vec4<f32>,
+    points: array<vec4<f32>, 512>,
 };
 @group(#{MATERIAL_BIND_GROUP}) @binding(90) var<storage, read> wow_light: WowLight;
 
@@ -980,6 +1040,23 @@ const PV_ROUGH: u32 = 4u;
 const PV_ROUGH_SKY: u32 = 8u;
 const PV_SHORE: u32 = 16u;
 const PV_SURF: u32 = 32u;
+const PV_RIVERS: u32 = 64u;
+const PV_FALLS: u32 = 128u;
+const PV_WAKE: u32 = 256u;
+const PV_WAKE_FOAM: u32 = 512u;
+const PV_RINGS: u32 = 1024u;
+const PV_WINDOW: u32 = 2048u;
+const PV_TINT: u32 = 4096u;
+const PV_SHAFTS: u32 = 8192u;
+const PV_UW_CAUSTICS: u32 = 16384u;
+const PV_WATERLINE: u32 = 32768u;
+const PV_CAUSTICS: u32 = 65536u;
+const PV_RAIN: u32 = 131072u;
+const PV_LIGHTS: u32 = 262144u;
+const PV_SPARKLES: u32 = 524288u;
+const PV_CREST: u32 = 1048576u;
+const PV_MIST: u32 = 2097152u;
+const PV_GLOW: u32 = 4194304u;
 
 /// The preview's feature bits this run.
 fn pv_bits() -> u32 {
@@ -1018,6 +1095,959 @@ fn pv_glint_reach() -> f32 {
 fn pv_rough_gain() -> f32 {
     return select(0.0, max(water_reflect.preview.mask.y, 0.0), pv_on(PV_ROUGH));
 }
+
+/// `s` with the isotropic GGX α² `add2` the surface cannot resolve added to its tensor: α again,
+/// the unresolved surface's α² grown by the same, and α's place between the two. Unchanged for 0.
+fn surface_roughen(s: WaterSurface, add2: f32) -> WaterSurface {
+    if (add2 <= 0.0) {
+        return s;
+    }
+    var o = s;
+    o.a2 = vec3<f32>(s.a2.x + add2, s.a2.y + add2, s.a2.z);
+    o.alpha = sqrt(sqrt(max(o.a2.x * o.a2.y - o.a2.z * o.a2.z, 1e-12)));
+    o.full2 = s.full2 + add2;
+    let a0 = water_reflect.look.surf.x;
+    o.rho_a = smoothstep(a0, max(sqrt(o.full2), a0 + 1e-4), o.alpha);
+    return o;
+}
+
+/// Whether the eye is in a liquid (`preview.under.surface.y`, its depth under the surface): the
+/// view from below draws the window only then, not for a dry eye under a raised surface.
+fn pv_eye_wet() -> bool {
+    return water_reflect.preview.under.surface.y > 0.0;
+}
+
+/// Yards to the waterline as the shore band measures it below, taken early for the river terms.
+fn pv_to_shore(shore: f32, shore_offset: vec2<f32>) -> f32 {
+    let exact = length(shore_offset);
+    return select(shore, exact, shore < SHORE_EXACT_REACH && abs(exact - shore) < SHORE_EXACT_TRUST);
+}
+#endif // WATER_PREVIEW
+#ifdef WATER_PREVIEW
+// ---- wu law: begin ----------------------------------------------------------------------------
+// ---- the switches -------------------------------------------------------------------------------
+
+/// One bit per preview feature, `WOW_PREVIEW_WAKE_UNDERWATER`'s names in order.
+const WU_KELVIN: u32 = 1u;
+const WU_BOW: u32 = 2u;
+const WU_COLLAR: u32 = 4u;
+const WU_TRAIL: u32 = 8u;
+const WU_RINGS: u32 = 16u;
+const WU_WINDOW: u32 = 32u;
+const WU_TINT: u32 = 64u;
+const WU_CAUSTICS: u32 = 128u;
+const WU_SHAFTS: u32 = 256u;
+const WU_WATERLINE: u32 = 512u;
+const WU_CAUSTICS_ABOVE: u32 = 1024u;
+const WU_BODY_CUT: u32 = 2048u;
+
+/// Whether the bits lane `bits` (an integer held in a float) has feature `b`.
+fn wu_has(bits: f32, b: u32) -> bool {
+    return (u32(max(bits, 0.0) + 0.5) & b) != 0u;
+}
+
+// ---- constants ----------------------------------------------------------------------------------
+
+const WU_TAU: f32 = 6.2831853;
+/// Gravity in yards per second squared (9.81 m/s²).
+const WU_G: f32 = 10.7283;
+/// Fresh water's index, and per channel at about 650, 550 and 450 nm (blue a little high, so the
+/// window's rim shows its fringe).
+const WU_ETA: f32 = 1.333;
+const WU_ETA_RGB: vec3<f32> = vec3<f32>(1.329, 1.333, 1.341);
+/// Water's reflectance head-on.
+const WU_F0: f32 = 0.02;
+const WU_LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
+/// Distance standing in for "nothing along the ray", yards.
+const WU_FAR: f32 = 100000.0;
+/// The wake's and the underwater clocks' periods, seconds; every time term turns a whole number
+/// of times in its period, so neither clock's wrap shows.
+const WU_CLOCK_PERIOD: f32 = 64.0;
+const UW_CLOCK_PERIOD: f32 = 256.0;
+
+/// The slots the lanes hold.
+const WU_SWIMMERS: u32 = 4u;
+const WU_RINGS_MAX: u32 = 8u;
+
+/// A swimmer makes waves from this speed and its wake is whole from the second, yd/s.
+const WU_SPEED_MIN: f32 = 0.6;
+const WU_SPEED_FULL: f32 = 3.0;
+/// The body's pressure patch: its σ over the half width at the waterline, about a third of the
+/// body's length, the scale that narrows the wake at swim speed (to about 11° at 4.72 yd/s).
+const WU_PATCH_SIGMA: f32 = 2.0;
+/// The Kelvin field's steepest crest at `WU_KELVIN_REF_YD` (above the ambient ripple's tilt there,
+/// or the arms vanish into it), its decay length behind the bow and its reach (inside the wave
+/// field's 24-yard half window, faded over its last 30%), yards.
+const WU_KELVIN_SLOPE: f32 = 0.30;
+const WU_KELVIN_REF_YD: f32 = 3.0;
+const WU_KELVIN_DECAY: f32 = 14.0;
+const WU_KELVIN_REACH: f32 = 22.0;
+/// The transverse system's gain over the divergent one's (1 physical): at swim speed the patch
+/// spectrum leaves them faint, and a little more lets the wedge's inside read.
+const WU_KELVIN_TRANSVERSE: f32 = 1.6;
+/// tan and cos of the Kelvin cusp's polar angle, 19.47° (tan = 1/(2√2)).
+const WU_CUSP_TAN: f32 = 0.35355339;
+const WU_CUSP_COS: f32 = 0.94280904;
+/// The crest profile e^{q(cos φ − 1)}: its sharpness, its mean (e^{−q}·I0(q)), its steepest
+/// slope.
+const WU_CREST_Q: f32 = 1.1;
+const WU_CREST_MEAN: f32 = 0.4414;
+const WU_CREST_SLOPE: f32 = 0.57;
+/// How far the crests carry past the cusp line, in units of the Airy width (r/K²)^(1/3).
+const WU_FEATHER: f32 = 1.16;
+/// The bow wave's gain, and its crest's apex ahead of the bow point in head units.
+const WU_BOW_GAIN: f32 = 0.55;
+const WU_BOW_APEX: f32 = 0.015;
+/// The steepest normal tilt the summed wake may give.
+const WU_SLOPE_MAX: f32 = 0.85;
+/// A fragment takes a swimmer's wake only within this height of the swimmer's water, yards.
+const WU_SURFACE_MATCH: f32 = 1.0;
+/// The collar's strength on a swimmer at rest, against one under way.
+const WU_COLLAR_REST: f32 = 0.35;
+/// A ring's slope at its packet, per unit of strength (about 0.14 half a yard out from a hand at
+/// strength 0.8, against an ambient ripple tilt of 0.3 to 0.7 near the eye).
+const WU_RING_SLOPE: f32 = 1.0;
+
+/// Snell's window: its gain over the n² radiance the air's light gains entering the water, the
+/// land haze's share at its rim, the sun's halo and disc, and the transmitted glint's weight.
+const WU_WINDOW_GAIN: f32 = 0.75;
+const WU_RIM_LAND: f32 = 0.65;
+const WU_SUN_HALO: f32 = 0.6;
+const WU_SUN_DISC: f32 = 6.0;
+const WU_WINDOW_GLINT: f32 = 2.0;
+const WU_GLINT_ALPHA_MIN: f32 = 0.06;
+/// The internal mirror: the mirrored bed's share over the in-scatter, and its blur in pixels.
+const WU_TIR_BED: f32 = 0.45;
+const WU_TIR_BLUR_PX: f32 = 3.0;
+/// Foam seen from below: the light it passes, against its lit top.
+const WU_FOAM_UNDER: f32 = 0.45;
+/// The aerated water under a trail: how far it pales toward foam.
+const WU_AER_MILK: f32 = 0.3;
+
+/// The in-scatter's palette from the swapped fog colour: its luminance ceiling (linear), the floor
+/// its weakest channel keeps of its strongest, the deep and the shallow ends against the mid.
+const WU_INSCATTER_LUMA_MAX: f32 = 0.30;
+const WU_INSCATTER_SAT_FLOOR: f32 = 0.12;
+const WU_DEEP_SHARE: f32 = 0.30;
+const WU_SHALLOW_GAIN: f32 = 1.9;
+const WU_SHALLOW_LIFT: f32 = 0.01;
+/// The in-scatter's darkening with depth under the surface, per yard.
+const WU_DEPTH_DIM: f32 = 0.02;
+/// The shafts' and the caustics' strength, the caustics' fade depth (yards) and their cell rates
+/// (cells a yard: 56 and 80 to the 64-yard tile).
+const WU_SHAFT_GAIN: f32 = 0.9;
+const WU_CAUSTIC_GAIN: f32 = 0.55;
+const WU_CAUSTIC_DEPTH: f32 = 9.0;
+const WU_CAUSTIC_F1: f32 = 0.875;
+const WU_CAUSTIC_F2: f32 = 1.25;
+const WU_CAUSTIC_MEAN: f32 = 0.22;
+/// The light curtains: three plane waves on the 64-yard lattice (2π/64 × (11, 4), (−6, 10),
+/// (3, −12), about 5.4 yd apart), their phase turns per clock period, and the fundamentals' and
+/// harmonics' amplitudes.
+const WU_SHAFT_K0: vec2<f32> = vec2<f32>(1.0799225, 0.3926991);
+const WU_SHAFT_K1: vec2<f32> = vec2<f32>(-0.5890486, 0.9817477);
+const WU_SHAFT_K2: vec2<f32> = vec2<f32>(0.2945243, -1.1780972);
+const WU_SHAFT_M0: f32 = 23.0;
+const WU_SHAFT_M1: f32 = -17.0;
+const WU_SHAFT_M2: f32 = 29.0;
+const WU_SHAFT_A: f32 = 0.24;
+const WU_SHAFT_H: f32 = 0.12;
+/// The waterline's band at the near plane, pixels.
+const WU_MENISCUS_PX: f32 = 5.0;
+/// The combine's output range under water, gamma: no channel reaches 0 or 1.
+const WU_OUT_FLOOR: f32 = 0.016;
+const WU_OUT_TOP: f32 = 0.965;
+
+// ---- helpers ------------------------------------------------------------------------------------
+
+/// Gamma to linear light and back, the water's pure 2.2 power law (`liquid.wgsl`'s `WATER_GAMMA`).
+fn wu_dec(g: vec3<f32>) -> vec3<f32> {
+    return pow(max(g, vec3<f32>(0.0)), vec3<f32>(2.2));
+}
+
+fn wu_enc(l: vec3<f32>) -> vec3<f32> {
+    return pow(max(l, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+
+/// A lattice point hashed to [0, 1) (Hoskins' hash12).
+fn wu_hash21(p: vec2<f32>) -> f32 {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    p3 = p3 + dot(p3, p3.yzx + vec3<f32>(33.33));
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+/// A lattice point hashed to two values in [0, 1) (Hoskins' hash22).
+fn wu_hash22(p: vec2<f32>) -> vec2<f32> {
+    var p3 = fract(vec3<f32>(p.x, p.y, p.x) * vec3<f32>(0.1031, 0.1030, 0.0973));
+    p3 = p3 + dot(p3, p3.yzx + vec3<f32>(33.33));
+    return fract((p3.xx + p3.yz) * p3.zy);
+}
+
+/// Value noise in [0, 1], smooth across cells.
+fn wu_vnoise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    let u = f * f * (vec2<f32>(3.0) - 2.0 * f);
+    let a = wu_hash21(i);
+    let b = wu_hash21(i + vec2<f32>(1.0, 0.0));
+    let c = wu_hash21(i + vec2<f32>(0.0, 1.0));
+    let d = wu_hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+/// Worley's nearest and second-nearest feature distances on a jittered cell lattice; each feature
+/// point circles its cell's centre, `phase` radians along.
+fn wu_worley(p: vec2<f32>, phase: f32) -> vec2<f32> {
+    let i = floor(p);
+    let f = p - i;
+    var d1 = 8.0;
+    var d2 = 8.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let c = vec2<f32>(f32(x), f32(y));
+            let h = wu_hash22(i + c);
+            let o = vec2<f32>(0.5) + 0.38 * sin(vec2<f32>(phase) + WU_TAU * h);
+            let d = length(c + o - f);
+            if (d < d1) {
+                d2 = d1;
+                d1 = d;
+            } else if (d < d2) {
+                d2 = d;
+            }
+        }
+    }
+    return vec2<f32>(d1, d2);
+}
+
+/// GGX's distribution at `nh` for roughness `alpha`, over its peak: 1 on the mirror direction.
+fn wu_ggx_peak1(nh: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let d = nh * nh * (a2 - 1.0) + 1.0;
+    return a2 * a2 / max(d * d, 1e-8);
+}
+
+/// The exposure ceiling, linear: the peak channel rolls from `knee` toward `top` on a soft
+/// shoulder with the hue kept, and no channel falls under `floor_share` of the luminance.
+fn wu_ceiling(c: vec3<f32>, knee: f32, top: f32, floor_share: f32) -> vec3<f32> {
+    let m = max(max(c.r, c.g), max(c.b, 1e-6));
+    let span = max(top - knee, 1e-4);
+    let m2 = select(m, knee + span * (1.0 - exp(-(m - knee) / span)), m > knee);
+    let o = c * (m2 / m);
+    return max(o, vec3<f32>(dot(o, WU_LUMA) * floor_share));
+}
+
+// ---- the wake (INT-1/2/4/5) ---------------------------------------------------------------------
+
+/// What the wake adds at a fragment.
+struct WuWake {
+    // The height's gradient in world XZ; the normal's horizontal part is its negative.
+    grad: vec2<f32>,
+    // The height, yards.
+    h: f32,
+    // Foam coverage, 0-1: collar, bow crest, kicked trail, splash rings.
+    foam: f32,
+    // The aerated water's share under the foam, 0-1.
+    aer: f32,
+    // The share of the live wave field kept here.
+    keep: f32,
+};
+
+fn wu_wake_none() -> WuWake {
+    return WuWake(vec2<f32>(0.0), 0.0, 0.0, 0.0, 1.0);
+}
+
+/// Two wakes on one fragment: the waves add, the foams and aerations take the larger, the wave
+/// field keeps the smaller share.
+fn wu_wake_add(a: WuWake, b: WuWake) -> WuWake {
+    return WuWake(
+        a.grad + b.grad,
+        a.h + b.h,
+        max(a.foam, b.foam),
+        max(a.aer, b.aer),
+        min(a.keep, b.keep),
+    );
+}
+
+/// The summed wake's normal tilt −∇h, held under `WU_SLOPE_MAX` so no crest tips past it.
+fn wu_wake_tilt(w: WuWake) -> vec2<f32> {
+    let m = length(w.grad);
+    return -w.grad * min(1.0, WU_SLOPE_MAX / max(m, 1e-6));
+}
+
+/// The far field of a pressure patch moving at `u` yd/s over deep water, by stationary phase
+/// (Kelvin's ship wake): both wave systems that meet a point inside the 19.47° wedge, the crests
+/// fixed to the swimmer, on a peaked profile so they read as thin bright lines. `lat` is the offset
+/// across the track and `back` the distance behind the source, yards; `sig2` the patch's (σ/2)²,
+/// `fp` the pixel's footprint. Returns the height and its derivatives across and behind, unscaled
+/// ([`wu_kelvin_norm`]). Waves shorter than about three pixels fade out; past the cusp the crests
+/// carry on as feathers over an Airy width.
+fn wu_kelvin(lat: f32, back: f32, u: f32, sig2: f32, fp: f32) -> vec3<f32> {
+    if (back < 0.05 || u < WU_SPEED_MIN) {
+        return vec3<f32>(0.0);
+    }
+    // K = g/U², the transverse wavenumber: 2πU²/g is 13 yd at swim speed.
+    let kw = WU_G / (u * u);
+    let y = abs(lat);
+    let sy = select(1.0, -1.0, lat < 0.0);
+    let r = max(sqrt(lat * lat + back * back), 0.5);
+    var tau = y / back;
+    var out_d = 0.0;
+    if (tau > WU_CUSP_TAN) {
+        out_d = (y - WU_CUSP_TAN * back) * WU_CUSP_COS;
+        tau = WU_CUSP_TAN;
+    }
+    // tan φ = T/(1 + 2T²) has two roots T = tan θ: the transverse (θ < 35.26°) and the divergent.
+    let disc = sqrt(max(1.0 - 8.0 * tau * tau, 1e-12));
+    let ca = inverseSqrt(1.0 + tau * tau);
+    let sa = tau * ca;
+    // The cusp's caustic softened over its Airy scale, so the arms are crests and not beads.
+    let eps = 2.4 * pow(kw * r, -0.33333333);
+    let near = inverseSqrt(max(r, 1.0) / WU_KELVIN_REF_YD);
+    var acc = vec3<f32>(0.0);
+    for (var j = 0; j < 2; j = j + 1) {
+        let transverse = j == 0;
+        let t = select(
+            min((1.0 + disc) / (4.0 * tau + 1e-4), 40.0),
+            2.0 * tau / (1.0 + disc),
+            transverse,
+        );
+        let sec2 = 1.0 + t * t;
+        let c = inverseSqrt(sec2);
+        let s = t * c;
+        let k = kw * sec2;
+        // The phase's second derivative over θ, which sets the stationary-phase amplitude.
+        let f2 = sec2 * (c * ca + s * sa) * (1.0 - 2.0 * t * t);
+        var amp = sec2 * sec2 * exp(-k * k * sig2) * inverseSqrt(sqrt(f2 * f2 + eps * eps));
+        amp = amp * (1.0 - smoothstep(0.22, 0.45, fp * k / WU_TAU));
+        amp = amp * select(1.0, WU_KELVIN_TRANSVERSE, transverse);
+        let ph = k * (back * c + y * s) + select(-0.78539816, 0.78539816, transverse);
+        let ex = exp(WU_CREST_Q * (cos(ph) - 1.0));
+        let g = -WU_CREST_Q * sin(ph) * ex;
+        acc = acc + amp * vec3<f32>(ex - WU_CREST_MEAN, g * k * s * sy, g * k * c);
+    }
+    let band = WU_FEATHER * pow(r / (kw * kw), 0.33333333);
+    let fade = exp(-pow(max(out_d / band, 1e-6), 1.3)) * smoothstep(0.1, 1.1, back);
+    return acc * (fade * near);
+}
+
+/// The scale that brings [`wu_kelvin`]'s steepest crest near a slope of 1 at `WU_KELVIN_REF_YD`:
+/// over its divergent waves' spectral peak (sec²θ·e^{−k²(σ/2)²} at sec⁴θ = 1/(2K²(σ/2)²), the
+/// transverse wave's at a slow source), their wavenumber there and the crest profile's slope.
+fn wu_kelvin_norm(u: f32, sig2: f32) -> f32 {
+    let kw = WU_G / max(u * u, 1e-3);
+    let sec2 = max(inverseSqrt(2.0 * kw * kw * sig2), 1.0);
+    let k = kw * sec2;
+    let peak = sec2 * exp(-k * k * sig2);
+    return 1.0 / max(peak * k * WU_CREST_SLOPE, 1e-4);
+}
+
+/// The bow wave in head units (half a shoulder span is 0.285), `q` = (across, ahead) of the bow
+/// point: a crest wrapped round the head as a hyperbola opening at about 32° with a trough inside
+/// it, both gone within a body length. Returns the height (head units) and the crest's share.
+fn wu_bow(q: vec2<f32>) -> vec2<f32> {
+    let xb = WU_BOW_APEX - q.y;
+    let y = abs(q.x);
+    let yy = y / 0.19;
+    let sq = sqrt(1.0 + yy * yy);
+    let xc = 0.30 * (sq - 1.0) - 0.05;
+    let sl = 0.30 * yy / (0.19 * sq);
+    // Signed distance to the crest line, positive ahead of and outside it.
+    let d = (xc - xb) * inverseSqrt(1.0 + sl * sl);
+    let behind = max(xb, 0.0);
+    let along = sqrt(y * y + behind * behind);
+    let wd = 0.05 + 0.06 * along;
+    let cr = exp(-d * d / (wd * wd * select(1.0, 0.45, d > 0.0)));
+    let dt = d + 1.9 * wd;
+    let tr = exp(-dt * dt / (2.0 * wd * wd));
+    let a = 0.055 * exp(-along / 0.42);
+    return vec2<f32>(a * (cr - 0.8 * tr), cr * exp(-along / 0.45));
+}
+
+/// Distance from `q` (across, ahead; yards from the bow point) to the swimmer's footprint at the
+/// waterline: a capsule from the head back to the hips, `hw` its half width at the head, tapering.
+fn wu_body_dist(q: vec2<f32>, hw: f32) -> f32 {
+    let head = -0.9 * hw;
+    let hips = -3.2 * hw;
+    let t = clamp((q.y - head) / (hips - head), 0.0, 1.0);
+    let p = vec2<f32>(q.x, q.y - mix(head, hips, t));
+    return length(p) - hw * mix(1.0, 0.7, t);
+}
+
+/// The foam collar at the body's waterline: a thin broken cream band just outside the footprint,
+/// wider at the head where the bow piles water up. `dc` the footprint distance and `aa` the
+/// antialias width (yards), `front` 1 at the head and 0 at the hips, `brk` a cell-border break-up
+/// in [0, 1], `wob` the band's wobble in [−0.5, 0.5].
+fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
+    // The sketch's widths are metres on a 0.356 m shoulder; here they scale with the body.
+    let bs = hw / 0.356;
+    let cw = (0.030 + 0.045 * front + 0.03 * wob) * bs;
+    let band = 1.0 - smoothstep(cw - aa - 0.01, cw, dc);
+    return band * mix(0.45, 1.0, brk) * smoothstep(-0.02, 0.0, dc);
+}
+
+/// The kicked trail's coverage behind a swimmer, the sketch's law in its metres: `lat` across and
+/// `b` behind the kick's origin, `age` seconds since the water was kicked, `n1` and `n2` two value
+/// noises in world space. The churn just behind the feet, then a trail that widens with √age and
+/// thins over 0.8 s and 3 s.
+fn wu_trail_cover(lat: f32, b: f32, age: f32, n1: f32, n2: f32) -> f32 {
+    let churn = smoothstep(0.8, 1.4, b) * (1.0 - smoothstep(1.9, 3.0, b))
+        * (1.0 - smoothstep(0.18, 0.45, lat));
+    let latn = lat / (0.20 + 0.15 * sqrt(age));
+    var cov = (0.30 * exp(-age / 0.8) + 0.15 * exp(-age / 3.0))
+        * (1.0 - smoothstep(0.35, 1.1, latn + 0.45 * (n1 - 0.5)));
+    cov = max(cov, churn * 0.42) * smoothstep(0.05, 0.45, b) * (0.55 + 0.9 * n2);
+    return cov;
+}
+
+/// Foam as a web: the borders of warped bubble cells at two sizes. Coverage `c` widens the threads
+/// from lace to a holed sheet; as it falls they thin, break into islands and go. `aa` the pixel's
+/// footprint in cell units. A crisp outer edge, the thread's centre denser than its rim, and
+/// threads too thin to resolve fade instead of aliasing.
+fn wu_foam_lace(p: vec2<f32>, c: f32, aa: f32) -> f32 {
+    let q = p + 1.1 * vec2<f32>(wu_vnoise(p * 0.5), wu_vnoise(p * 0.5 + vec2<f32>(5.2)));
+    let w1 = wu_worley(q * 0.85, 0.0);
+    let w2 = wu_worley(q * 2.2 + vec2<f32>(7.0), 0.0);
+    let e = min(w1.y - w1.x, (w2.y - w2.x) * 0.8 + 0.10 * (1.0 - c));
+    let wid = mix(0.02, 0.36, c * c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
+    var a = 1.0 - smoothstep(wid - aa * 0.5, wid + aa, e);
+    a = a * mix(0.72, 1.0, smoothstep(0.0, wid * 0.8 + 1e-3, wid - e));
+    // Older foam: whole patches of the web gone.
+    a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * c);
+    return a * mix(0.70, 0.97, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
+        * smoothstep(0.04, 0.22, c);
+}
+
+/// One swimmer's wake at `xz`: the Kelvin field, the bow wave, the collar and the kicked trail,
+/// from its two lane rows `a` and `b` ([`WakeLanes::swimmer`]). `surf_y` is the fragment's surface
+/// height, `fp` its footprint and `aa` its antialias width in yards, `cfg` the wake's switch row.
+/// The trail and the collar's break-up read world space, so foam stays where it was made while the
+/// waves ride with the swimmer.
+fn wu_swimmer(
+    xz: vec2<f32>,
+    surf_y: f32,
+    fp: f32,
+    aa: f32,
+    a: vec4<f32>,
+    b: vec4<f32>,
+    cfg: vec4<f32>,
+) -> WuWake {
+    var o = wu_wake_none();
+    let bits = cfg.x;
+    let fwd = b.xy;
+    let side = vec2<f32>(fwd.y, -fwd.x);
+    let d = xz - a.xz;
+    // (across, ahead) of the bow point.
+    let q = vec2<f32>(dot(d, side), dot(d, fwd));
+    let back = -q.y;
+    let u = b.z;
+    let hw = max(b.w, 0.1);
+    if (abs(surf_y - a.y) > WU_SURFACE_MATCH
+        || q.y > 4.0 * hw + 1.0
+        || back > WU_KELVIN_REACH
+        || abs(q.x) > 1.5 + 0.5 * max(back, 0.0)) {
+        return o;
+    }
+    let st = a.w;
+    let ramp = smoothstep(WU_SPEED_MIN, WU_SPEED_FULL, u);
+    let ph = WU_TAU * cfg.y / WU_CLOCK_PERIOD;
+    // Gradient in (across, ahead).
+    var grad = vec2<f32>(0.0);
+    var h = 0.0;
+
+    if (wu_has(bits, WU_KELVIN) && back > 0.05) {
+        let sig = WU_PATCH_SIGMA * hw;
+        let sig2 = 0.25 * sig * sig;
+        let gain = st * ramp * WU_KELVIN_SLOPE * wu_kelvin_norm(u, sig2)
+            * exp(-back / WU_KELVIN_DECAY)
+            * (1.0 - smoothstep(0.7 * WU_KELVIN_REACH, WU_KELVIN_REACH, back));
+        let kv = wu_kelvin(q.x, back, u, sig2, fp) * gain;
+        h = h + kv.x;
+        grad = grad + vec2<f32>(kv.y, -kv.z);
+    }
+
+    var crest = 0.0;
+    if (wu_has(bits, WU_BOW)) {
+        let sl = 0.285 / hw;
+        let ql = q * sl;
+        if (ql.y > -3.5 && ql.y < 1.5 && abs(ql.x) < 2.4) {
+            let e = 0.015;
+            let b0 = wu_bow(ql);
+            let bx = wu_bow(ql + vec2<f32>(e, 0.0));
+            let bz = wu_bow(ql + vec2<f32>(0.0, e));
+            // The crest is 0.05 head units wide; past a pixel it becomes roughness, not a line.
+            let keep = (1.0 - smoothstep(0.5, 1.5, fp * sl / 0.05)) * st * ramp * WU_BOW_GAIN;
+            h = h + b0.x / sl * keep;
+            // Slopes are the same in head units and yards.
+            grad = grad + vec2<f32>(bx.x - b0.x, bz.x - b0.x) / e * keep;
+            crest = b0.y * st * ramp;
+        }
+    }
+
+    var foam = 0.0;
+    var aer = 0.0;
+    if (wu_has(bits, WU_COLLAR)) {
+        let dc = wu_body_dist(q, hw);
+        if (dc < 0.6 * hw + 0.1) {
+            let front = smoothstep(-2.5 * hw, 0.0, q.y);
+            let ang = atan2(q.x, q.y + 0.9 * hw);
+            // Whole turns of the angle, so the wobble meets itself behind the head.
+            let wob = 0.35 * sin(ang * 5.0 + ph * 19.0) + 0.15 * sin(ang * 11.0 - ph * 31.0);
+            let wc = wu_worley(xz * 12.8, ph * 7.0);
+            let brk = smoothstep(0.08, 0.22, wc.y - wc.x);
+            let rest = mix(WU_COLLAR_REST, 1.0, ramp);
+            foam = max(foam, wu_collar(dc, hw, front, brk, wob, aa) * st * rest);
+        }
+    }
+    if (crest > 0.01) {
+        // Two still noises crossfaded by the clock: the crest's foam breathes and never pops.
+        let n = mix(
+            wu_vnoise(xz * 8.2),
+            wu_vnoise(xz * 8.2 + vec2<f32>(7.3)),
+            0.5 + 0.5 * sin(ph * 23.0),
+        );
+        foam = max(foam, smoothstep(0.45, 0.75, crest * (0.7 + 0.6 * n)));
+    }
+    if (wu_has(bits, WU_TRAIL) && u > WU_SPEED_MIN) {
+        // Sketch metres for this body, measured from the kick's origin 0.73 m behind the head.
+        let bs = hw / 0.356;
+        let bk = back / bs - 0.73;
+        let age = max(back - 0.73 * bs, 0.0) / u;
+        if (bk > 0.05 && age < 4.5) {
+            let n1 = wu_vnoise(xz * 1.92 + vec2<f32>(3.0));
+            let n2 = wu_vnoise(xz * 1.28 + vec2<f32>(9.0));
+            let cov = wu_trail_cover(abs(q.x) / bs, bk, age, n1, n2) * st * ramp;
+            aer = max(aer, saturate(cov * 1.9) * 0.62);
+            if (cov > 0.02) {
+                // 3.2 cells a metre.
+                let s = 2.93;
+                let lace = wu_foam_lace(xz * s, saturate(cov / 0.58), fp * s * 1.5 + 0.015);
+                foam = max(foam, lace);
+            }
+        }
+    }
+
+    o.grad = grad.x * side + grad.y * fwd;
+    o.h = h;
+    o.foam = foam;
+    o.aer = aer;
+    // The wave field stands back inside the wedge, where this draws the swimmer's own waves.
+    let wedge = (1.0 - smoothstep(0.0, 1.5, abs(q.x) - 0.25 * max(back, 0.0) - 1.0))
+        * (1.0 - smoothstep(0.6 * WU_KELVIN_REACH, WU_KELVIN_REACH, back));
+    o.keep = mix(1.0, cfg.z, wedge * st * ramp);
+    return o;
+}
+
+/// The waves from one impulse at the surface (Cauchy–Poisson): at range `r` and age τ the local
+/// wavenumber is k = g·τ²/(4r²), so crests are born at the centre and run outward at twice the
+/// packet's speed. `a` the source's radius sets the packet, `decay` its life, `fp` the footprint.
+/// Returns the height in units of `a` and its gradient (world XZ, `dq` from the centre).
+fn wu_ring(dq: vec2<f32>, age: f32, a: f32, decay: f32, fp: f32) -> vec3<f32> {
+    let r = length(dq) + 1e-3;
+    let tau = age + 0.12;
+    let k = WU_G * tau * tau / (4.0 * r * r);
+    let ka = k * a;
+    var env = ka * ka * exp(-ka * ka) * exp(-age / decay) / (1.0 + r / (6.0 * a));
+    env = env * (1.0 - smoothstep(0.22, 0.45, fp * k / WU_TAU));
+    let ph = k * r;
+    return env * vec3<f32>(cos(ph), sin(ph) * k * dq / r);
+}
+
+/// The splash an impulse leaves: a broken foam ring spreading from the source and a short-lived
+/// core, gone within a second. `r` the range and `a` the source's radius (yards), `brk` the ring's
+/// angular break-up and `core_n` the core's, in [0, 1].
+fn wu_ring_foam(r: f32, age: f32, a: f32, brk: f32, core_n: f32) -> f32 {
+    // The sketch's hand is 0.07 yd; larger sources spread wider foam.
+    let s = sqrt(max(a, 0.01) / 0.07);
+    let rad = (0.07 + 0.30 * sqrt(age)) * s;
+    let life = 1.0 - smoothstep(0.2, 0.9, age);
+    let ring = (1.0 - smoothstep(0.010 * s, 0.035 * s, abs(r - rad))) * life
+        * smoothstep(0.4, 0.65, brk);
+    let core = (1.0 - smoothstep(rad * 0.2, rad * 0.8, r)) * (1.0 - smoothstep(0.05, 0.35, age))
+        * smoothstep(0.3, 0.5, core_n);
+    return max(ring, core * 0.9);
+}
+
+/// One ring event's waves and splash at `xz`, from its two lane rows `ra` and `rb`
+/// ([`WakeLanes::ring`]); nothing past the packet's reach.
+fn wu_ring_event(xz: vec2<f32>, fp: f32, ra: vec4<f32>, rb: vec4<f32>) -> WuWake {
+    var o = wu_wake_none();
+    let dq = xz - ra.xy;
+    let r = length(dq);
+    let age = ra.z;
+    let a = max(rb.x, 0.02);
+    // The packet sits where k·a ≈ 1: r = τ·√(g·a/4).
+    let reach = 0.5 + 2.5 * (age + 0.12) * sqrt(WU_G * a * 0.25);
+    if (r > reach) {
+        return o;
+    }
+    let rv = wu_ring(dq, age, a, max(rb.y, 0.1), fp);
+    let g = ra.w * WU_RING_SLOPE * a;
+    o.h = rv.x * g;
+    o.grad = rv.yz * g;
+    if (rb.z > 0.0 && age < 0.9) {
+        // The break-up reads the ring's direction, not its angle, so it has no seam behind.
+        let dirn = dq / max(r, 1e-4);
+        let seed = fract(ra.xy * 0.37);
+        let brk = wu_vnoise(dirn * 2.6 + vec2<f32>(age * 2.0, 0.0) + seed * 17.0);
+        let core_n = wu_vnoise(dq * (25.0 / sqrt(a / 0.07)) + seed * 29.0);
+        o.foam = wu_ring_foam(r, age, a, brk, core_n) * rb.z;
+    }
+    return o;
+}
+
+// ---- the underside, seen from below (UW-1) ------------------------------------------------------
+
+/// The view ray leaving the water upward.
+struct WuSnell {
+    // Its direction in the air above, at green's index.
+    a: vec3<f32>,
+    // The transmittance per channel: Fresnel's on the air side's cosine, 0 past the critical angle.
+    t: vec3<f32>,
+};
+
+/// Snell's window: the view ray `rd` (eye to surface, upward) refracted out through the surface of
+/// normal `n` (upward), per channel for the rim's fringe. `soft` widens the critical angle's edge
+/// by the roughness the surface does not resolve, so the rim breaks up instead of aliasing.
+fn wu_snell(rd: vec3<f32>, n: vec3<f32>, soft: f32) -> WuSnell {
+    let ci = clamp(dot(rd, n), 0.0, 1.0);
+    let s2 = WU_ETA_RGB * WU_ETA_RGB * (1.0 - ci * ci);
+    let k = vec3<f32>(1.0) - s2;
+    // Never the square root of an exact 0, which this backend can turn into a NaN.
+    let ct = sqrt(max(k, vec3<f32>(1e-12)));
+    let f = vec3<f32>(WU_F0) + (1.0 - WU_F0) * pow(vec3<f32>(1.0) - ct, vec3<f32>(5.0));
+    let t = (vec3<f32>(1.0) - f) * smoothstep(vec3<f32>(-soft), vec3<f32>(soft), k);
+    // refract(rd, −n, η) written out: η·rd + (√k − η·cos i)·n.
+    let a = normalize(WU_ETA * rd + (sqrt(max(k.g, 1e-4)) - WU_ETA * ci) * n);
+    return WuSnell(a, t);
+}
+
+/// The dry sky seen along the air direction `a`, linear: the dome's two stops by elevation (the
+/// underside's `sqrt` blend), and toward the horizon a band of land haze in the dry fog's colour,
+/// which the window compresses into its rim. Gamma stops in.
+fn wu_window_sky(
+    a: vec3<f32>,
+    zenith_g: vec3<f32>,
+    horizon_g: vec3<f32>,
+    land_g: vec3<f32>,
+) -> vec3<f32> {
+    let e = max(a.y, 1e-6);
+    let sky = mix(horizon_g, zenith_g, sqrt(e));
+    let rim = 1.0 - smoothstep(0.03, 0.16, e);
+    let land = land_g * 0.55 + horizon_g * 0.2;
+    return wu_dec(mix(sky, land, rim * WU_RIM_LAND));
+}
+
+/// The sun broken through the ripples to the eye below: GGX on the refraction half-vector
+/// −(L + η·V), over its peak.
+fn wu_window_glint(n: vec3<f32>, to_view: vec3<f32>, to_sun: vec3<f32>, alpha: f32) -> f32 {
+    var h = -(to_sun + WU_ETA * to_view);
+    h = select(h, -h, h.y < 0.0);
+    h = normalize(h + vec3<f32>(0.0, 1e-6, 0.0));
+    return wu_ggx_peak1(max(dot(n, h), 0.0), alpha);
+}
+
+/// The point the internal mirror reads: the view ray `rd` reflected off the flat underside, from
+/// the lookup point slid by the resolved ripple (`n_lo`'s tilt times `slide` yards, the mirrors'
+/// rule), carried down to a bed `bed_depth` yards under the surface.
+fn wu_tir_point(
+    world_pos: vec3<f32>,
+    rd: vec3<f32>,
+    n_lo: vec3<f32>,
+    slide: f32,
+    bed_depth: f32,
+) -> vec3<f32> {
+    let r = vec3<f32>(rd.x, -abs(rd.y), rd.z);
+    let p = world_pos + vec3<f32>(n_lo.x, 0.0, n_lo.z) * slide;
+    return p + r * (bed_depth / max(-r.y, 0.08));
+}
+
+/// The underside's radiance, linear and opaque.
+struct WuUnderside {
+    l: vec3<f32>,
+    // The window's share at this fragment (green's transmittance).
+    win: f32,
+};
+
+/// The surface seen from below: inside Snell's window the dry sky and the sun through the ripples,
+/// past the critical angle the internal mirror (`tir_base` the in-scatter along the reflected ray,
+/// `tir_bed` the mirrored bed by its weight `tir_bed_w`, both linear), under the exposure ceiling.
+/// `n` the rippled normal, `to_view` toward the eye, `alpha` the unresolved roughness; the stops
+/// and the sun colour in gamma, `to_sun` the visible sun and `sun_reach` how much of it gets
+/// through.
+fn wu_underside(
+    n: vec3<f32>,
+    to_view: vec3<f32>,
+    alpha: f32,
+    zenith_g: vec3<f32>,
+    horizon_g: vec3<f32>,
+    land_g: vec3<f32>,
+    sun_g: vec3<f32>,
+    to_sun: vec3<f32>,
+    sun_reach: f32,
+    tir_base: vec3<f32>,
+    tir_bed: vec3<f32>,
+    tir_bed_w: f32,
+) -> WuUnderside {
+    let rd = -to_view;
+    let sn = wu_snell(rd, n, 0.015 + 2.0 * alpha * alpha);
+    let sun_l = wu_dec(sun_g) * sun_reach;
+    var win = wu_window_sky(sn.a, zenith_g, horizon_g, land_g);
+    let sd = max(dot(sn.a, to_sun), 0.0);
+    let disc = WU_SUN_DISC * smoothstep(0.9990, 0.9996, sd);
+    win = win + sun_l * (WU_SUN_HALO * pow(sd, 24.0) + disc);
+    // Radiance gains n² entering the denser medium.
+    win = win * (WU_ETA * WU_ETA * WU_WINDOW_GAIN);
+    let glint = wu_window_glint(n, to_view, to_sun, max(alpha, WU_GLINT_ALPHA_MIN))
+        * WU_WINDOW_GLINT;
+    let tir = mix(tir_base, tir_bed, tir_bed_w);
+    var l = win * sn.t + tir * (vec3<f32>(1.0) - sn.t) + sun_l * (glint * sn.t.g);
+    l = wu_ceiling(l, 0.80, 1.0, 0.04);
+    return WuUnderside(l, sn.t.g);
+}
+
+// ---- under water: absorption, in-scatter, shafts, caustics, waterline (UW-2/3) ------------------
+
+/// The view ray through screen `uv` (0..1, y down) of the lanes' camera.
+fn wu_post_ray(uv: vec2<f32>, u: UnderLanes) -> vec3<f32> {
+    let s = uv * 2.0 - vec2<f32>(1.0);
+    return normalize(u.cam_fwd.xyz + s.x * u.cam_right.xyz - s.y * u.cam_up.xyz);
+}
+
+/// The GL linear fog's surviving share at eye Z `ez` between `start` and `end` (1.12's law).
+fn wu_fog_share(ez: f32, start: f32, end: f32) -> f32 {
+    return clamp((end - ez) / max(end - start, 0.001), 0.0, 1.0);
+}
+
+/// A colour `c_g` the world fogged at share `f` toward `fog_g` (gamma), the fog taken back off.
+/// Where little of it survived the un-fog would amplify noise, so it fades to the colour as it came
+/// between the shares 0.35 and 0.2, and stays within 0.25 of the colour or the fog.
+fn wu_unfog(c_g: vec3<f32>, f: f32, fog_g: vec3<f32>) -> vec3<f32> {
+    let clear = clamp(
+        (c_g - (1.0 - f) * fog_g) / max(f, 0.2),
+        vec3<f32>(0.0),
+        max(c_g, fog_g) + vec3<f32>(0.25),
+    );
+    return mix(c_g, clear, smoothstep(0.2, 0.35, f));
+}
+
+/// The in-scatter palette's mid, linear: the swapped fog colour (gamma) under a luminance ceiling,
+/// its weakest channel held at a share of its strongest, so the zone's hue stays and no channel
+/// clips or dies.
+fn wu_palette(fog_g: vec3<f32>) -> vec3<f32> {
+    let l = wu_dec(fog_g);
+    let y = dot(l, WU_LUMA);
+    let c = l * min(1.0, WU_INSCATTER_LUMA_MAX / max(y, 1e-4));
+    let m = max(c.r, max(c.g, c.b));
+    return max(c, vec3<f32>(m * WU_INSCATTER_SAT_FLOOR));
+}
+
+/// The light the water scatters toward the eye along `rd`, linear: the palette's deep end looking
+/// down, its mid level (the authored fog colour), its shallow end looking up, a forward glow toward
+/// the refracted sun `sun_up` of irradiance `sun_l`, darkening `depth` yards under the surface.
+fn wu_inscatter(
+    rd: vec3<f32>,
+    mid: vec3<f32>,
+    sun_up: vec3<f32>,
+    sun_l: vec3<f32>,
+    depth: f32,
+) -> vec3<f32> {
+    let x = clamp(0.5 + 0.6 * rd.y, 0.0, 1.0);
+    let deep = mid * WU_DEEP_SHARE;
+    let shallow = mid * WU_SHALLOW_GAIN + vec3<f32>(WU_SHALLOW_LIFT);
+    var c = select(mix(mid, shallow, 2.0 * x - 1.0), mix(deep, mid, 2.0 * x), x < 0.5);
+    let mu = max(dot(rd, sun_up), 0.0);
+    c = c + shallow * (0.10 * pow(mu, 6.0)) + sun_l * (0.012 * pow(mu, 40.0));
+    return c * exp(-WU_DEPTH_DIM * max(depth, 0.0));
+}
+
+/// The light-curtain field at the surface point `q`: three plane waves on the 64-yard lattice and
+/// their first harmonics, in about [−1, 1]; `phase` is the underwater clock in radians of its
+/// period.
+fn wu_shaft_field(q: vec2<f32>, phase: f32) -> f32 {
+    let a0 = dot(WU_SHAFT_K0, q) + WU_SHAFT_M0 * phase;
+    let a1 = dot(WU_SHAFT_K1, q) + WU_SHAFT_M1 * phase;
+    let a2 = dot(WU_SHAFT_K2, q) + WU_SHAFT_M2 * phase;
+    return WU_SHAFT_A * (cos(a0) + cos(a1) + cos(a2))
+        + WU_SHAFT_H * (cos(2.0 * a0) + cos(2.0 * a1) + cos(2.0 * a2));
+}
+
+/// ∫ e^{−bt}·cos(α + ωt) dt over [t0, t1], in closed form; `e0`, `e1` are e^{−b·t0} and e^{−b·t1}.
+fn wu_sheet(alpha: f32, omega: f32, b: f32, t0: f32, t1: f32, e0: f32, e1: f32) -> f32 {
+    let nx = e1 * cos(omega * t1) - e0 * cos(omega * t0);
+    let ny = e1 * sin(omega * t1) - e0 * sin(omega * t0);
+    // (nx + i·ny) / (−b + iω)
+    let den = max(b * b + omega * omega, 1e-8);
+    let qx = (ny * omega - nx * b) / den;
+    let qy = (-ny * b - nx * omega) / den;
+    return qx * cos(alpha) - qy * sin(alpha);
+}
+
+/// The shafts along a view segment [`t0`, `t1`] of the ray from `eye` along `rd`, as a modulation
+/// of the in-scatter: the curtain field is constant along the refracted sun `s` (up), so each point
+/// takes the field where its light entered, and the integral over the segment, weighted by the
+/// in-scatter's extinction `beta`, is closed-form per wave. Over the segment's mean, so 0 is no
+/// shaft; strongest looking along the sun, where the field holds still along the ray.
+fn wu_shafts(
+    eye: vec3<f32>,
+    rd: vec3<f32>,
+    t0: f32,
+    t1: f32,
+    beta: f32,
+    surf_y: f32,
+    s: vec3<f32>,
+    phase: f32,
+) -> f32 {
+    if (t1 <= t0) {
+        return 0.0;
+    }
+    let sy = max(s.y, 0.2);
+    // Where the light reaching eye + rd·t entered: q0 + t·qd.
+    let q0 = eye.xz + s.xz * ((surf_y - eye.y) / sy);
+    let qd = rd.xz - s.xz * (rd.y / sy);
+    let b = max(beta, 1e-3);
+    let e0 = exp(-b * t0);
+    let e1 = exp(-b * t1);
+    let mean = (e0 - e1) / b;
+    // Each wave's phase where the segment's light entered, and its rate along the ray.
+    let a0 = dot(WU_SHAFT_K0, q0) + WU_SHAFT_M0 * phase;
+    let a1 = dot(WU_SHAFT_K1, q0) + WU_SHAFT_M1 * phase;
+    let a2 = dot(WU_SHAFT_K2, q0) + WU_SHAFT_M2 * phase;
+    let w0 = dot(WU_SHAFT_K0, qd);
+    let w1 = dot(WU_SHAFT_K1, qd);
+    let w2 = dot(WU_SHAFT_K2, qd);
+    var acc = WU_SHAFT_A * wu_sheet(a0, w0, b, t0, t1, e0, e1);
+    acc = acc + WU_SHAFT_A * wu_sheet(a1, w1, b, t0, t1, e0, e1);
+    acc = acc + WU_SHAFT_A * wu_sheet(a2, w2, b, t0, t1, e0, e1);
+    acc = acc + WU_SHAFT_H * wu_sheet(2.0 * a0, 2.0 * w0, b, t0, t1, e0, e1);
+    acc = acc + WU_SHAFT_H * wu_sheet(2.0 * a1, 2.0 * w1, b, t0, t1, e0, e1);
+    acc = acc + WU_SHAFT_H * wu_sheet(2.0 * a2, 2.0 * w2, b, t0, t1, e0, e1);
+    return acc / max(mean, 1e-5);
+}
+
+/// The caustic web on a surface under `depth` yards of water whose sunlight entered at `q` (world
+/// XZ): two layers of cell borders whose points circle at whole turns of the clock, sharpest in the
+/// first yards, blue focusing a little deeper; over its mean, so 1 is plain light. Faded to 1 where
+/// the footprint `fp` (yards) cannot hold a cell.
+fn wu_caustic(q: vec2<f32>, depth: f32, fp: f32, phase: f32) -> vec3<f32> {
+    let sharp = mix(7.0, 3.0, smoothstep(0.3, 3.0, depth));
+    let rq = vec2<f32>(0.4536 * q.x - 0.8912 * q.y, 0.8912 * q.x + 0.4536 * q.y);
+    let w1 = wu_worley(q * WU_CAUSTIC_F1, phase * 48.0);
+    let w2 = wu_worley(rq * WU_CAUSTIC_F2 + vec2<f32>(3.1), -phase * 37.0);
+    let sh = vec3<f32>(0.96, 1.0, 1.05) * sharp;
+    let c1 = exp(-(w1.y - w1.x) * sh);
+    let c2 = exp(-(w2.y - w2.x) * sh);
+    let c = (c1 * c2 * 2.2 + (c1 + c2) * 0.28) / WU_CAUSTIC_MEAN;
+    let keep = 1.0 - smoothstep(0.12, 0.35, fp * WU_CAUSTIC_F2);
+    return mix(vec3<f32>(1.0), vec3<f32>(0.4) + 0.6 * c, keep);
+}
+
+/// The water's height over the plane where the near plane meets it, a few centimetres of slosh.
+fn wu_waterline(p: vec2<f32>, phase: f32) -> f32 {
+    return 0.035 * sin(p.x * 2.1 + phase * 61.0) + 0.025 * sin(p.y * 3.3 - phase * 87.0)
+        + 0.015 * sin(dot(p, vec2<f32>(1.7, -2.3)) + phase * 143.0);
+}
+
+/// The frame under water, per pixel, gamma in and out: `sg` the scene as drawn (the world fogged by
+/// the swapped underwater fog), `rd` the pixel's ray, `view_z` the opaque world's view Z behind it
+/// (0 where nothing was drawn), `n_recv` the receiving surface's normal from the depth's
+/// derivatives. Below the waterline the swapped fog comes off and the water's own transport goes
+/// on: per-channel absorption, in-scatter by direction and depth with the shafts in it, caustics on
+/// what lies under the plane, under the exposure ceiling; above it, the dry fog and sky come back;
+/// across it, the meniscus. The lanes' `surface.z` 0 returns the scene unchanged.
+fn wu_post(
+    sg: vec3<f32>,
+    rd: vec3<f32>,
+    view_z: f32,
+    n_recv: vec3<f32>,
+    u: UnderLanes,
+) -> vec3<f32> {
+    let bits = u.surface.w;
+    if (u.surface.z < 0.5 || !wu_has(bits, WU_TINT)) {
+        return sg;
+    }
+    let eye = u.cam_pos.xyz;
+    let h = u.surface.x;
+    let cosf = max(dot(rd, u.cam_fwd.xyz), 1e-3);
+    let phase = WU_TAU * u.clock.x / UW_CLOCK_PERIOD;
+    let nr = select(-n_recv, n_recv, dot(n_recv, rd) < 0.0);
+    // The opaque world behind the pixel, and where the ray crosses the plane ahead of the eye.
+    let t_d = select(WU_FAR, view_z / cosf, view_z > 0.0);
+    let t_raw = (h - eye.y) / select(rd.y, 1e-6, abs(rd.y) < 1e-6);
+    let t_c = select(WU_FAR, t_raw, t_raw > 0.0);
+    // The near plane's point on this ray, against the sloshing waterline.
+    let t_near = u.cam_pos.w / cosf;
+    let p0 = eye + rd * t_near;
+    let line = h + wu_waterline(p0.xz, phase);
+    let wl = wu_has(bits, WU_WATERLINE);
+    let starts_dry = wl && p0.y > line;
+    // What the pixel shows is the nearer of the two; the world fogged it at its eye Z.
+    let t_vis = min(t_d, t_c);
+    let ez = min(t_vis, WU_FAR) * cosf;
+    let f_wet = wu_fog_share(ez, u.fog_span.x, u.fog_span.y);
+    var c_g = sg;
+    if (starts_dry) {
+        if (t_vis >= WU_FAR && rd.y > 0.0) {
+            c_g = mix(u.sky_horizon.rgb, u.sky_zenith.rgb, sqrt(max(rd.y, 1e-6)));
+        } else {
+            let clear = wu_unfog(sg, f_wet, u.fog_wet.rgb);
+            c_g = mix(u.fog_dry.rgb, clear, wu_fog_share(ez, u.fog_span.z, u.fog_span.w));
+        }
+    } else {
+        // The water segment: from the eye to what the pixel shows, or to the surface's underside on
+        // a ray leaving upward; for an eye just above the plane, from where a downward ray enters
+        // it, and none on a ray going up.
+        let above = eye.y > h;
+        let down = rd.y < 0.0;
+        let t0 = select(0.0, select(0.0, t_c, down), above);
+        let t1 = select(min(t_d, t_c), select(0.0, t_d, down), above);
+        let open_water = t1 >= 0.5 * WU_FAR;
+        let wet_l = select(max(t1 - t0, 0.0), WU_FAR, open_water);
+        var lin = vec3<f32>(0.0);
+        if (!open_water) {
+            lin = wu_dec(wu_unfog(sg, f_wet, u.fog_wet.rgb));
+            // The segment ends on the opaque world: caustics where it lies under the plane.
+            if (wu_has(bits, WU_CAUSTICS) && t_d < 0.5 * WU_FAR && t_d <= t1 + 1e-3) {
+                let p = eye + rd * t_d;
+                let depth = h - p.y;
+                if (depth > 0.05) {
+                    let s = u.sun_refr.xyz;
+                    let q = p.xz + s.xz * (depth / max(s.y, 0.2));
+                    let cau = wu_caustic(q, depth, t_d * u.cam_fwd.w, phase)
+                        * (1.0 + 0.35 * wu_shaft_field(q, phase));
+                    let facing = smoothstep(0.05, 0.5, dot(nr, s));
+                    let k = WU_CAUSTIC_GAIN * u.sun_e.w * facing * smoothstep(0.1, 0.6, depth)
+                        * exp(-depth / WU_CAUSTIC_DEPTH);
+                    lin = lin * (vec3<f32>(1.0) + k * (cau - vec3<f32>(1.0)));
+                }
+            }
+        }
+        let tr = exp(-(u.sigma.rgb + vec3<f32>(u.sigma.w)) * min(wet_l, 4096.0));
+        let w_in = 1.0 - exp(-u.sigma.w * min(wet_l, 4096.0));
+        let t_mid = 0.5 * (t0 + min(t1, 60.0));
+        let depth_mid = h - (eye.y + rd.y * t_mid);
+        let mid = wu_palette(u.fog_wet.rgb);
+        var ins = wu_inscatter(rd, mid, u.sun_refr.xyz, u.sun_e.rgb, depth_mid);
+        if (wu_has(bits, WU_SHAFTS) && u.sun_e.w > 0.01) {
+            let t_a = max(t0, 1.0);
+            let t_b = min(t1, 60.0);
+            let sh = wu_shafts(eye, rd, t_a, t_b, u.sigma.w, h, u.sun_refr.xyz, phase);
+            ins = ins * max(1.0 + WU_SHAFT_GAIN * u.sun_e.w * sh, 0.0);
+        }
+        lin = lin * tr + ins * w_in;
+        c_g = wu_enc(wu_ceiling(lin, 0.55, 0.85, 0.04));
+    }
+    if (wl) {
+        // The meniscus where the near plane cuts the water: a dark lens of water, a bright lip.
+        let w = max(t_near * u.cam_fwd.w * WU_MENISCUS_PX, 1e-4);
+        let off = p0.y - line;
+        let m = 1.0 - smoothstep(0.0, w, abs(off));
+        let lip = 1.0 - smoothstep(0.0, 0.35 * w, abs(off - 0.6 * w));
+        c_g = mix(c_g, c_g * 0.55 + wu_enc(wu_palette(u.fog_wet.rgb)) * 0.2, m * 0.8)
+            + vec3<f32>(lip * 0.12);
+    }
+    return mix(vec3<f32>(WU_OUT_FLOOR), vec3<f32>(WU_OUT_TOP), saturate(c_g));
+}
+// ---- wu law: end ------------------------------------------------------------------------------
 #endif // WATER_PREVIEW
 // ── The stylised region ────────────────────────────────────────────────────────────────────────
 //
@@ -2139,12 +3169,12 @@ fn rough_lobe(a2: vec3<f32>, to_view: vec3<f32>, flat_n: vec3<f32>, gain: f32) -
     let t = select(vec2<f32>(1.0, 0.0), bearing / max(bl, 1e-6), bl > 1e-4);
     let along = lost.x * t.x * t.x + lost.y * t.y * t.y + 2.0 * lost.z * t.x * t.y;
     let across = lost.x * t.y * t.y + lost.y * t.x * t.x - 2.0 * lost.z * t.x * t.y;
-    let a_up = sqrt(max(along, 0.0));
+    let a_up = sqrt(max(along, 1e-12));
     let mu = saturate(dot(flat_n, to_view));
     let k = 1.41421356 * max(gain, 0.0);
     return RoughLobe(
         k * a_up,
-        k * sqrt(max(across, 0.0)) * mu,
+        k * sqrt(max(across, 1e-12)) * mu,
         RR_LIFT * max(gain, 0.0) * a_up * (1.0 - mu),
     );
 }
@@ -2696,6 +3726,11 @@ struct WaterSurface {
     a2: vec3<f32>,
     rho_a: f32,
     k: f32,
+#ifdef WATER_PREVIEW
+    // α² of the fully unresolved surface, the top of `rho_a`'s range, so a term that adds
+    // roughness later ([`surface_roughen`]) keeps `rho_a` on the same scale.
+    full2: f32,
+#endif
 };
 
 /// An octave's slope if its features span at least ~8 px: the resolved low band.
@@ -2784,6 +3819,9 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     s.alpha = sqrt(sqrt(c_maj * c_min));
     let alpha_full = sqrt(a0 * a0 + k2 * OCTAVE_W2_SUM * water_reflect.look.ripple_mean.z);
     s.rho_a = smoothstep(a0, max(alpha_full, a0 + 1e-4), s.alpha);
+#ifdef WATER_PREVIEW
+    s.full2 = alpha_full * alpha_full;
+#endif
     return s;
 }
 
@@ -3219,6 +4257,7 @@ fn water_surface_wg(
             + WG_W2_SHORT * g.short_oct * g.short_oct + cw * cw)
         + (g.rough2 + WG_SWELL_FULL2 * g.swell * g.swell) * scale * scale;
     s.rho_a = smoothstep(a0, max(sqrt(full), a0 + 1e-4), s.alpha);
+    s.full2 = full;
     return s;
 }
 
@@ -3339,8 +4378,8 @@ fn wg_spec_shape(c: vec3<f32>, resolved: f32) -> vec3<f32> {
 /// celestial tint, the moon's its hue at a fixed brightness cooled by [`WG_MOON_COOL`]; each times
 /// its HDR radiance, its disc's solid angle and the glint weight's share, under its reach
 /// (`sun.w`, `moon.w`) and the pixel's open reflected sky `open` ([`wg_glint_open`]). None where
-/// `lit` is false ([`wg_lit_sky`]).
-fn wg_glints(
+/// `lit` is false ([`wg_lit_sky`]). Before the knee: the composite shapes every highlight once.
+fn wg_glints_hdr(
     n: vec3<f32>,
     to_view: vec3<f32>,
     to_sun: vec3<f32>,
@@ -3371,7 +4410,7 @@ fn wg_glints(
             * (WG_MOON_HDR * 3.14159265 * r * r * weight * water_reflect.moon.w);
         c += e * wg_ggx(n, to_view, to_moon, surf.a2, 0.25 * r * r);
     }
-    return wg_spec_shape(c * open, 1.0 - surf.rho_a);
+    return c * open;
 }
 #endif // WATER_PREVIEW
 
@@ -4118,6 +5157,112 @@ fn light_release(h: vec3<u32>) -> LightHeld {
     return LightHeld(vec3<f32>(a, b.x), vec3<f32>(b.y, c));
 }
 
+#ifdef WATER_PREVIEW
+// ---- the preview's wake and underside glue (wake-underwater) -----------------------------------
+
+/// Every live swimmer's and ring's wake at `xz` on a surface at height `surf_y`
+/// (`preview.wake`), summed; nothing outside the lanes' bounding circle. `fp` the pixel's
+/// footprint, yards.
+fn wake_at(xz: vec2<f32>, surf_y: f32, fp: f32) -> WuWake {
+    var acc = wu_wake_none();
+    let cfg = water_reflect.preview.wake.cfg;
+    let bound = water_reflect.preview.wake.bound;
+    let d = xz - bound.xy;
+    if (bound.w < 0.5 || dot(d, d) > bound.z) {
+        return acc;
+    }
+    let aa = 1.5 * fp;
+    for (var i = 0u; i < WU_SWIMMERS; i = i + 1u) {
+        let a = water_reflect.preview.wake.swimmer[2u * i];
+        if (a.w <= 0.0) {
+            continue;
+        }
+        let b = water_reflect.preview.wake.swimmer[2u * i + 1u];
+        acc = wu_wake_add(acc, wu_swimmer(xz, surf_y, fp, aa, a, b, cfg));
+    }
+    if (wu_has(cfg.x, WU_RINGS)) {
+        for (var i = 0u; i < WU_RINGS_MAX; i = i + 1u) {
+            let ra = water_reflect.preview.wake.ring[2u * i];
+            if (ra.w <= 0.0) {
+                continue;
+            }
+            acc = wu_wake_add(acc, wu_ring_event(xz, fp, ra, water_reflect.preview.wake.ring[2u * i + 1u]));
+        }
+    }
+    return acc;
+}
+
+/// The underside's output ([`wu_underside`]): Snell's window over the internal mirror, the mirror
+/// reading the snapshot where the bed under the authored column `column` lies, four taps; foam
+/// floating on it from below; fogged as the world is, at the surface, and opaque.
+fn underside_out(
+    world_pos: vec3<f32>,
+    frag_coord: vec2<f32>,
+    n: vec3<f32>,
+    n_lo: vec3<f32>,
+    to_view: vec3<f32>,
+    alpha: f32,
+    to_light: vec3<f32>,
+    sun_reach: f32,
+    light: LightHeld,
+    fog: WaterFog,
+    foam: f32,
+    cover: f32,
+    column: f32,
+) -> vec4<f32> {
+    let u = water_reflect.preview.under;
+    let rd = -to_view;
+    let r_down = vec3<f32>(rd.x, -abs(rd.y), rd.z);
+    let tir_base = wu_inscatter(
+        r_down,
+        wu_palette(wow_light.fog_color.rgb),
+        u.sun_refr.xyz,
+        u.sun_e.rgb,
+        u.surface.y,
+    );
+    let p = wu_tir_point(world_pos, rd, n_lo, water_reflect.march.y, max(column, 1.5));
+    let ndc = position_world_to_ndc(p);
+    let uv = ndc_to_uv(ndc.xy);
+    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    let vp = view.viewport.zw;
+    let fits = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(vp));
+    let on = select(0.0, smoothstep(0.0, 0.08, edge), ndc.z > 0.0 && fits);
+    var bed = vec3<f32>(0.0);
+    if (on > 0.0) {
+        let c = uv * vp + view.viewport.xy;
+        let o = WU_TIR_BLUR_PX;
+        let hi = vec2<i32>(vp) - vec2<i32>(1);
+        let g = textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(-o, -o)), vec2<i32>(0), hi), 0).rgb
+            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(o, -o)), vec2<i32>(0), hi), 0).rgb
+            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(-o, o)), vec2<i32>(0), hi), 0).rgb
+            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(o, o)), vec2<i32>(0), hi), 0).rgb;
+        bed = water_dec(g * 0.25);
+    }
+    let us = wu_underside(
+        n,
+        to_view,
+        alpha,
+        u.sky_zenith.rgb,
+        u.sky_horizon.rgb,
+        u.fog_dry.rgb,
+        u.sun_dry.rgb,
+        to_light,
+        sun_reach,
+        tir_base,
+        bed,
+        on * WU_TIR_BED,
+    );
+    var layer = WaterLayer(fog_diffuse(us.l, fog.f, fog.g), vec3<f32>(0.0));
+    if (foam > 0.0) {
+        let foam_l = fog_diffuse(water_dec(FOAM_COLOR) * light.foam * WU_FOAM_UNDER, fog.f, fog.g);
+        layer = layer_over(foam_l, foam * 0.8, layer);
+    }
+    layer = layer_cover(layer, cover);
+    let snap = water_snapshot_px(frag_coord);
+    return water_output(layer, frag_coord, snap, water_dec(snap), 1.0);
+}
+#endif // WATER_PREVIEW
+
 #ifdef WATER_VIEW
 // ---- the debug views (`WaterDebug::view`, `$WOW_WATER_VIEW`) -----------------------------------
 //
@@ -4723,6 +5868,1704 @@ fn sc_layer(a: WaterLayer, sc: ShoreContact, f_surf: f32, refl: vec3<f32>, spec:
 }
 #endif // WATER_PREVIEW
 
+#ifdef WATER_PREVIEW
+// ---- rivers and falls (RIV-1..6, SHORE-3) -------------------------------------------------------
+//
+// What the current and the falls do to the surface, from the loaded flow map (`ATTRIBUTE_WOW_FLOW`,
+// the fragment's `flow`), the frame's depth behind the water ([`scene_behind`]), the heightfield's
+// smooth normal (`flat_n`) and the nearest falls' foot lines (`preview.falls`, from the classification):
+//
+//   * On flowing water: foam streaks along the current, beaded and broken, carried downstream by the
+//     two-phase flow map ([`FLOW_PERIOD_S`]); whitewater rafts where the current is fast, shallow for
+//     its speed (the Froude number) or steep, with chop and roughness under them; standing-wave
+//     diamonds where the flow is supercritical; tails of foam behind what breaks the surface.
+//   * Around a fall's foot, a plunge pool: dispersive ring waves, boil domes that clear holes in the
+//     foam, and foam riding the radial outflow from a dense boil through surge rings and rafts to a
+//     thinning lace. The foam is drawn in the outflow's Lagrangian frame (where along the foot line
+//     a parcel left, and when), so it moves exactly and needs no flow-map restart. The water is
+//     aerated near the foot and a low mist veil lies over it.
+//   * On steep sheets, falling water: streaks advected at the ballistic speed, labelled by the time
+//     the water crossed the lip, a glassy tongue turning white with fall time, a lit lip band, and a
+//     skirt at the foot.
+//
+// Pure functions of their inputs, called once in uniform control flow before `water_surface`
+// ([`rivers_falls`]); the composite takes the rest through four held words ([`rf_hold`]). Every tap
+// is a `textureSampleGrad` on the world position's hoisted screen derivatives, so the branches inside
+// are free to diverge; nothing here reads `fwidth` or an implicit-LOD sample.
+//
+// Every noise is the ripple map's height (B) read as a unit-variance field, with its gradient from
+// the map's own slope channels (R/G, see [`foam_noise`]). Reads are taken against an origin the eye
+// carries in 64-yd steps ([`rf_uv`]), so a lattice coordinate stays small far from the map's
+// centre. Rotated lattices are read on fixed bearings and blended by the current's bearing
+// ([`rf_streak_field`], [`rf_standing`]), never turned per pixel: a rotation that varies across the
+// surface shears world coordinates into swirls. Time enters through the river clock
+// (`preview.clocks.x`, [`RF_PERIOD_S`]) as whole turns per period, so nothing jumps when it wraps.
+
+/// Gravity in yards a second squared (9.81 m/s²).
+const RF_G: f32 = 10.728;
+/// Half a turn.
+const RF_PI: f32 = 3.1415927;
+/// The river clock's period (`preview.clocks.x`), seconds: `benilla_water`'s `RIVER_PERIOD_S`. Every
+/// Lagrangian label and quantised wave frequency below turns a whole number of times over it.
+const RF_PERIOD_S: f32 = 16.0;
+/// The falls the look rows carry (`preview.falls`, two rows each).
+const RF_FALLS_MAX: u32 = 8u;
+/// The ripple map's height spread about 0.5, one standard deviation, so a read is a unit field:
+/// measured over the generated map's level 0 (seed `RIPPLE_SEED`), mean 0.498.
+const RF_B_SD: f32 = 0.153;
+/// Slower than this, yards a second, the water is still and the river terms do not run.
+const RF_FLOW_MIN: f32 = 0.15;
+/// Whitewater from speed alone, from the first speed to the second, yards a second.
+const RF_FAST: vec2<f32> = vec2<f32>(2.5, 5.5);
+/// Whitewater from the Froude number v/√(g·h): the flow turns supercritical over shallows.
+const RF_FROUDE: vec2<f32> = vec2<f32>(0.7, 1.5);
+/// Whitewater from the surface's grade (rise over run) along a rapid.
+const RF_GRADE_RAPID: vec2<f32> = vec2<f32>(0.03, 0.12);
+/// A sheet: water steeper than the first grade starts to fall; past the second it is all fall.
+const RF_SHEET_GRADE: vec2<f32> = vec2<f32>(0.45, 1.1);
+/// The speed streaks run down a sheet no fall row covers, yards a second.
+const RF_SHEET_V: f32 = 7.0;
+/// The rapids' lumps, yards: where the bed breaks the flow, still in the world.
+const RF_LUMP_YD: f32 = 9.0;
+/// The whitewater rafts' size, yards.
+const RF_RAFT_YD: f32 = 1.4;
+/// The streaks' spacing across the current, yards, and how much longer than wide they are.
+const RF_STREAK_YD: f32 = 0.8;
+const RF_STREAK_STRETCH: f32 = 5.0;
+/// A streak line's half width at full load, yards.
+const RF_STREAK_W_YD: f32 = 0.06;
+/// The chop under whitewater: the unit field's height, yards.
+const RF_CHOP_YD: f32 = 0.025;
+/// The GGX α² churned water adds at full turbulence.
+const RF_TURB_ROUGH2: f32 = 0.05;
+/// The standing waves' slope amplitude at full envelope.
+const RF_STAND_SLOPE: f32 = 0.11;
+/// A pool's reach at the reference drop, yards, and the reference drop, yards.
+const RF_PLUNGE_REACH_YD: f32 = 14.0;
+const RF_DROP_REF_YD: f32 = 6.0;
+/// Yards of ring coordinate per radian round a foot line's end.
+const RF_RING_ARC_YD: f32 = 4.5;
+/// The boil domes' height and the plunge chop's: the unit field's, yards.
+const RF_BOIL_YD: f32 = 0.05;
+const RF_PLUNGE_CHOP_YD: f32 = 0.05;
+/// The churn under a plunge, its size in yards.
+const RF_CHURN_YD: f32 = 1.6;
+/// How white each foam gets at most: foam is never the brightest continuous line in the frame.
+const RF_WHITE_LEVEL: f32 = 0.8;
+const RF_STREAK_LEVEL: f32 = 0.40;
+const RF_POOL_LEVEL: f32 = 0.90;
+const RF_SHEET_LEVEL: f32 = 0.92;
+const RF_MIST_LEVEL: f32 = 0.30;
+/// Foam's light on its shaded underside and its lit top, relative to the foam illuminant: violet
+/// blue in shade, cream in sun.
+const RF_FOAM_SHADE: vec3<f32> = vec3<f32>(0.70, 0.78, 0.98);
+const RF_FOAM_LIT: vec3<f32> = vec3<f32>(1.06, 1.02, 0.94);
+/// The held tint's range ([`rf_hold`]).
+const RF_TINT_MAX: f32 = 1.25;
+/// A sheet's thickness for its glassy tongue's transmittance, yards.
+const RF_SHEET_THICK_YD: f32 = 0.5;
+/// The sheet's streak ridges: the unit field's height across the sheet, yards.
+const RF_SHEET_RIDGE_YD: f32 = 0.02;
+/// Aerated water: the share of the bed it shuts, its albedo's lift, the foam light it scatters.
+const RF_AER_SHUT: f32 = 0.85;
+const RF_AER_LIFT: f32 = 1.35;
+const RF_AER_MILK: f32 = 0.22;
+/// The lip band's light, times the foam illuminant.
+const RF_LIP_GAIN: f32 = 0.9;
+/// The mist veil's colour, times the foam illuminant.
+const RF_MIST_TINT: vec3<f32> = vec3<f32>(0.92, 0.96, 1.0);
+
+// ---- reading the map --------------------------------------------------------------------------
+
+fn rf_sq(x: f32) -> f32 {
+    return x * x;
+}
+
+/// The matrix whose rows are `r0` and `r1`: `m * v = (r0·v, r1·v)`.
+fn rf_rows(r0: vec2<f32>, r1: vec2<f32>) -> mat2x2<f32> {
+    return mat2x2<f32>(vec2<f32>(r0.x, r1.x), vec2<f32>(r0.y, r1.y));
+}
+
+/// A uniform scale by `k`.
+fn rf_scale(k: f32) -> mat2x2<f32> {
+    return mat2x2<f32>(vec2<f32>(k, 0.0), vec2<f32>(0.0, k));
+}
+
+/// The origin the reads are taken against: the eye's world XZ in 64-yd steps.
+fn rf_origin() -> vec2<f32> {
+    return floor(view.world_position.xz / 64.0) * 64.0;
+}
+
+/// Lattice coordinate `jac·q` of the world point `q`, taken as `jac·(q − o)` plus the origin's
+/// fractional part: the map tiles, so whole tiles are dropped and the coordinate stays small.
+fn rf_uv(q: vec2<f32>, jac: mat2x2<f32>, o: vec2<f32>) -> vec2<f32> {
+    return jac * (q - o) + fract(jac * o);
+}
+
+/// One read of the map's height as a unit-variance field and its gradient in world XZ.
+struct RfNoise {
+    n: f32,
+    g: vec2<f32>,
+};
+
+/// The field at lattice coordinate `uv`, whose derivative in world XZ is `jac`, filtered over the
+/// pixel's footprint `ddx`/`ddy` (world XZ per pixel). The gradient is `jacᵀ` times the map's
+/// stored slope, which is d(B)/d(uv) over half the map's width ([`foam_noise`]).
+fn rf_noise(uv: vec2<f32>, jac: mat2x2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> RfNoise {
+    let t = textureSampleGrad(ripples, ripples_samp, uv, jac * ddx, jac * ddy);
+    let g_uv = (t.rg * 2.0 - 1.0 - water_reflect.look.ripple_mean.xy) * (RIPPLE_TEXELS * 0.5);
+    return RfNoise((t.b - 0.5) / RF_B_SD, (transpose(jac) * g_uv) / RF_B_SD);
+}
+
+/// Two reads blended by `w0` and `1 − w0` and divided by √(w0² + w1²), so the blend keeps the
+/// field's variance and a crossfade does not flatten it.
+fn rf_mix2(a: RfNoise, b: RfNoise, w0: f32) -> RfNoise {
+    let w1 = 1.0 - w0;
+    let k = inverseSqrt(max(w0 * w0 + w1 * w1, 1e-4));
+    return RfNoise((a.n * w0 + b.n * w1) * k, (a.g * w0 + b.g * w1) * k);
+}
+
+/// The unit field's level above which a share `cov` of it lies: the logistic fit of the normal
+/// quantile, so a threshold opens a sheet of foam into lace and then islands as `cov` falls.
+fn rf_level(cov: f32) -> f32 {
+    let c = clamp(cov, 0.002, 0.998);
+    return log((1.0 - c) / c) / 1.702;
+}
+
+/// The flow map's two phases at this pixel, offset from the clock's restart phase by `offset`
+/// turns, and the first's triangle weight.
+struct RfPhase {
+    p0: f32,
+    p1: f32,
+    w0: f32,
+};
+
+fn rf_phase(offset: f32) -> RfPhase {
+    let p0 = fract(water_reflect.cycle.x + offset);
+    return RfPhase(p0, fract(p0 + 0.5), 1.0 - abs(2.0 * p0 - 1.0));
+}
+
+/// The visible sun's direction (`water_reflect.sun`), straight up while the lanes are unwritten.
+fn rf_to_sun() -> vec3<f32> {
+    let l = length(water_reflect.sun.xyz);
+    return select(vec3<f32>(0.0, 1.0, 0.0), water_reflect.sun.xyz / max(l, 1e-4), l > 1e-4);
+}
+
+// ---- what is here -----------------------------------------------------------------------------
+
+/// What the module reads at a fragment, all of it taken in uniform control flow.
+struct RfIn {
+    world_pos: vec3<f32>,
+    // The current, world XZ yards a second (`ATTRIBUTE_WOW_FLOW`).
+    flow: vec2<f32>,
+    // The heightfield's smooth normal, or the facet's (`stylised_water`'s `flat_n`).
+    flat_n: vec3<f32>,
+    // Yards of water under the pixel: the frame's bed where it is known (`sb.vertical`), the
+    // authored column (`bi.fallback_z`) otherwise.
+    depth: f32,
+    // 1 where `depth` is the frame's bed.
+    bed_known: f32,
+    // Yards to the terrain's waterline (`to_shore`).
+    to_shore: f32,
+    to_view: vec3<f32>,
+    // The world position's screen derivatives.
+    dp_dx: vec3<f32>,
+    dp_dy: vec3<f32>,
+};
+
+/// The fall rows' answer at a fragment: the pool it lies in and the sheet it lies on.
+struct RfFall {
+    // The pool's weight here, the distance from its foot line, the outward direction, the ring
+    // coordinate (yards along the line, then round its ends), that coordinate's world gradient,
+    // and the fall's drop.
+    pool: f32,
+    r: f32,
+    dir: vec2<f32>,
+    along: f32,
+    dalong: vec2<f32>,
+    pool_drop: f32,
+    // The sheet above a foot: its weight here, yards below its lip, the fall's drop.
+    sheet: f32,
+    fallen: f32,
+    sheet_drop: f32,
+};
+
+/// The nearest falls' rows (`preview.falls`, from the classification's foot lines) at `p`: the
+/// heaviest pool and the heaviest sheet. A row's `w` is its strength, 0 for an unused row, and the
+/// CPU eases it in and out as a fall joins or leaves the set.
+fn rf_fall_at(p: vec3<f32>) -> RfFall {
+    var f = RfFall(0.0, 1.0e4, vec2<f32>(0.0, 1.0), 0.0, vec2<f32>(1.0, 0.0), 0.0, 0.0, 0.0, 0.0);
+    for (var i = 0u; i < RF_FALLS_MAX; i = i + 1u) {
+        let foot = water_reflect.preview.falls[2u * i];
+        let at = water_reflect.preview.falls[2u * i + 1u];
+        if (at.w <= 0.0) {
+            continue;
+        }
+        let ab = foot.zw - foot.xy;
+        let len = length(ab);
+        let u = select(vec2<f32>(1.0, 0.0), ab / max(len, 1e-4), len > 1e-3);
+        let nrm = vec2<f32>(-u.y, u.x);
+        let rel = p.xz - foot.xy;
+        let proj = dot(rel, u);
+        let d = rel - u * clamp(proj, 0.0, len);
+        let r = length(d);
+        let dir = select(nrm, d / max(r, 1e-4), r > 1e-3);
+        let size = clamp(sqrt(at.y / RF_DROP_REF_YD), 0.6, 1.6);
+        let reach = RF_PLUNGE_REACH_YD * size;
+        let dy = p.y - at.x;
+        let pool = at.w * (1.0 - smoothstep(0.6 * reach, reach, r))
+            * (1.0 - smoothstep(0.4, 1.2, abs(dy)));
+        if (pool > f.pool) {
+            f.pool = pool;
+            f.r = r;
+            f.dir = dir;
+            // Round an end the coordinate turns with the angle from the line's normal, so it is
+            // carried along the radial outflow there as it is in front of the line.
+            let phi = atan2(dot(dir, u), abs(dot(dir, nrm)));
+            f.along = clamp(proj, 0.0, len) + phi * RF_RING_ARC_YD;
+            let beyond = proj < 0.0 || proj > len;
+            let tp = u - dir * dot(u, dir);
+            let tl = length(tp);
+            let t_hat = select(nrm, tp / max(tl, 1e-4), tl > 1e-3);
+            f.dalong = t_hat * select(1.0, RF_RING_ARC_YD / max(r, 0.5), beyond);
+            f.pool_drop = at.y;
+        }
+        // The sheet stands over the foot, within a run of its drop: no steeper than half a grade
+        // reaches further.
+        let run = 2.0 * at.y + 4.0;
+        let sheet = at.w * smoothstep(0.1, 0.5, dy)
+            * (1.0 - smoothstep(at.y + 0.3, at.y + 1.2, dy))
+            * (1.0 - smoothstep(0.8 * run, run, r));
+        if (sheet > f.sheet) {
+            f.sheet = sheet;
+            f.fallen = max(at.x + at.y - p.y, 0.0);
+            f.sheet_drop = at.y;
+        }
+    }
+    return f;
+}
+
+/// The water at a fragment as the river terms see it: the current's speed and bearing, the
+/// surface's grade and how much of it is a falling sheet, its downhill bearing, the Froude number,
+/// the whitewater's drive, and the falls' answer.
+struct RfSite {
+    speed: f32,
+    e1: vec2<f32>,
+    grade: f32,
+    steep: f32,
+    down: vec2<f32>,
+    froude: f32,
+    turb: f32,
+    fall: RfFall,
+};
+
+/// Whitewater is driven by speed, by the Froude number (fast water over a shallow bed breaks:
+/// `sb.vertical` sees submerged rocks as well as the bed) and by the grade along a rapid; water the
+/// map authors as rapids (`path.z` on its material) is never wholly calm. A falling sheet takes
+/// its own look instead.
+fn rf_site(i: RfIn) -> RfSite {
+    var s: RfSite;
+    s.speed = length(i.flow);
+    s.e1 = select(vec2<f32>(0.0), i.flow / max(s.speed, 1e-4), s.speed > 1e-3);
+    let gxz = length(i.flat_n.xz);
+    s.grade = gxz / max(i.flat_n.y, 0.05);
+    s.down = select(vec2<f32>(0.0), i.flat_n.xz / max(gxz, 1e-5), gxz > 1e-4);
+    s.steep = smoothstep(RF_SHEET_GRADE.x, RF_SHEET_GRADE.y, s.grade);
+    s.froude = s.speed / sqrt(RF_G * max(i.depth, 0.15));
+    let rapids = select(0.0, 1.0, w.path.z > 0.5);
+    let by_speed = smoothstep(RF_FAST.x, RF_FAST.y, s.speed);
+    let by_froude = smoothstep(RF_FROUDE.x, RF_FROUDE.y, s.froude) * smoothstep(0.6, 2.0, s.speed);
+    let by_grade = smoothstep(RF_GRADE_RAPID.x, RF_GRADE_RAPID.y, s.grade)
+        * smoothstep(0.5, 2.5, s.speed);
+    let by_kind = rapids * smoothstep(RF_FLOW_MIN, 1.5, s.speed);
+    s.turb = saturate(0.40 * by_speed + 0.35 * by_froude + 0.35 * by_grade + 0.2 * by_kind)
+        * (1.0 - s.steep);
+    s.fall = rf_fall_at(i.world_pos);
+    return s;
+}
+
+// ---- the parts ----------------------------------------------------------------------------------
+
+/// One part's share of the surface: slope (in `water_surface`'s convention, the normal is
+/// `(slope.x, 1, slope.y)`, so a height field H gives −∇H), GGX α² added, foam cover and its light
+/// (0 shaded underside, 1 lit top), aeration of the body, mist.
+struct RfPart {
+    slope: vec2<f32>,
+    add2: f32,
+    cover: f32,
+    shade: f32,
+    aer: f32,
+    mist: f32,
+};
+
+fn rf_part0() -> RfPart {
+    return RfPart(vec2<f32>(0.0), 0.0, 0.0, 0.5, 0.0, 0.0);
+}
+
+/// Foam's own light, 0 its shaded underside to 1 its lit top: wrapped diffuse on the normal of the
+/// field `g` heaped into a mass, the edge band facing the eye in its own shade and the far rim lit,
+/// as a backlit raft reads. Flat where the sun does not reach.
+fn rf_foam_shade(g: vec2<f32>, edge_band: f32, to_view: vec3<f32>, sun: vec3<f32>) -> f32 {
+    let nf = normalize(vec3<f32>(-0.12 * g.x, 1.0, -0.12 * g.y));
+    let wrap = saturate((dot(nf, sun) + 0.4) / 1.4);
+    let reach = saturate(water_reflect.sun.w);
+    var shade = mix(0.72, wrap, reach);
+    let gl = length(g);
+    let eye_xz = normalize(to_view.xz + vec2<f32>(1e-5, 0.0));
+    let toward = select(0.0, dot(g / max(gl, 1e-4), eye_xz), gl > 1e-3);
+    shade = shade - 0.30 * edge_band * smoothstep(0.1, 0.8, -toward);
+    shade = shade + 0.25 * edge_band * smoothstep(0.1, 0.8, toward) * reach;
+    return saturate(shade);
+}
+
+/// One fixed bearing's streak field: the map stretched [`RF_STREAK_STRETCH`] times along bearing
+/// `bin` (of four over half a turn), read at the two phases' points `q0` and `q1`.
+fn rf_streak_bin(
+    q0: vec2<f32>,
+    q1: vec2<f32>,
+    bin: f32,
+    o: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    w0: f32,
+) -> RfNoise {
+    let a = bin * (RF_PI / 4.0);
+    let along = vec2<f32>(cos(a), sin(a));
+    let across = vec2<f32>(-along.y, along.x);
+    let jac = rf_rows(
+        across / (4.0 * RF_STREAK_YD),
+        along / (4.0 * RF_STREAK_YD * RF_STREAK_STRETCH),
+    );
+    let off = vec2<f32>(0.13, 0.57) * bin;
+    let n0 = rf_noise(rf_uv(q0, jac, o) + off, jac, ddx, ddy);
+    let n1 = rf_noise(rf_uv(q1, jac, o) + off + vec2<f32>(0.37, 0.61), jac, ddx, ddy);
+    return rf_mix2(n0, n1, w0);
+}
+
+/// The streak field along the current `e1`: the two fixed bearings either side of its bearing,
+/// blended by how near each is. Streaks are lines, so the bearing is taken over half a turn.
+fn rf_streak_field(
+    q0: vec2<f32>,
+    q1: vec2<f32>,
+    e1: vec2<f32>,
+    o: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+    w0: f32,
+) -> RfNoise {
+    let f = fract(atan2(e1.y, e1.x) / RF_PI) * 4.0;
+    let b0 = floor(f);
+    let t = f - b0;
+    let b1 = select(b0 + 1.0, 0.0, b0 >= 3.0);
+    return rf_mix2(
+        rf_streak_bin(q0, q1, b0, o, ddx, ddy, w0),
+        rf_streak_bin(q0, q1, b1, o, ddx, ddy, w0),
+        1.0 - t,
+    );
+}
+
+/// The standing waves of supercritical water as a slope: the wave whose phase speed √(g/k) equals
+/// the current holds still in the ground, so its wavelength is 2πv²/g. Read on three fixed
+/// wavelengths and the two of six fixed bearings either side of the current's, weighted toward the
+/// physical wavelength and the current's bearing, so neither shears the world coordinates; where
+/// the two bearings cross the crests break into haystack diamonds. They breathe on the clock.
+fn rf_standing(xz: vec2<f32>, o: vec2<f32>, s: RfSite, px: f32) -> vec2<f32> {
+    let lam = clamp(TAU * s.speed * s.speed / RF_G, 1.5, 12.0);
+    let f = fract(atan2(s.e1.y, s.e1.x) / RF_PI) * 6.0;
+    let b0 = floor(f);
+    let t = f - b0;
+    let b1 = select(b0 + 1.0, 0.0, b0 >= 5.0);
+    let a0 = b0 * (RF_PI / 6.0);
+    let a1 = b1 * (RF_PI / 6.0);
+    let d0 = vec2<f32>(cos(a0), sin(a0));
+    let d1 = vec2<f32>(cos(a1), sin(a1));
+    let breathe0 = 0.05 * sin(TAU * 7.0 * water_reflect.preview.clocks.x);
+    let breathe1 = 0.37 + 0.05 * sin(TAU * 9.0 * water_reflect.preview.clocks.x);
+    var g = vec2<f32>(0.0);
+    for (var j = 0; j < 3; j = j + 1) {
+        let lj = 2.0 * exp2(f32(j));
+        let wj = exp(-2.0 * rf_sq(log2(lam / lj))) * saturate(2.0 - px * 6.0 / lj);
+        if (wj < 1e-3) {
+            continue;
+        }
+        let p0 = fract(dot(xz - o, d0) / lj + fract(dot(o, d0) / lj) + breathe0);
+        let p1 = fract(dot(xz - o, d1) / lj + fract(dot(o, d1) / lj) + breathe1);
+        // H = (S/k)·cos(2πp) along each bearing, so ∇H = −S·sin(2πp)·d.
+        g = g - RF_STAND_SLOPE * wj * ((1.0 - t) * sin(TAU * p0) * d0 + t * sin(TAU * p1) * d1);
+    }
+    return -g;
+}
+
+/// How much of something breaks the surface just upstream of `p`: two probes up the current, each
+/// the frame's opaque surface on the ray through the water point there, which is either the bed
+/// (a rock a hand under the surface) or something standing through the water at the probe (an
+/// emergent rock, a pier leg). A hit elsewhere on the ray (a tree in front) is not near the probe
+/// and counts for nothing; off the screen nothing is known.
+fn rf_obstacle(p: vec3<f32>, e1: vec2<f32>) -> f32 {
+    var hit = 0.0;
+    for (var k = 0; k < 2; k = k + 1) {
+        let d = select(2.8, 1.1, k == 0);
+        let q = vec3<f32>(p.x - e1.x * d, p.y, p.z - e1.y * d);
+        let clip = position_world_to_clip(q);
+        if (clip.w <= 1e-3) {
+            continue;
+        }
+        let uv = vec2<f32>(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
+        if (any(uv <= vec2<f32>(0.0)) || any(uv >= vec2<f32>(1.0))) {
+            continue;
+        }
+        let z = scene_view_z(vec2<i32>(floor(uv * view.viewport.zw + view.viewport.xy)));
+        if (z <= 0.0) {
+            continue;
+        }
+        let b = scene_world_pos(uv, z);
+        let near = 1.0 - smoothstep(0.6, 1.2, distance(b.xz, q.xz));
+        let up = smoothstep(-0.35, -0.08, b.y - q.y);
+        hit = max(hit, up * near * select(0.6, 1.0, k == 0));
+    }
+    return hit;
+}
+
+/// Flowing water (RIV-2/3): whitewater rafts, chop and roughness by the site's drive, modulated by
+/// the rapids' still lumps; streaks along the current where foam is carried (everywhere it runs,
+/// more below whitewater, along the banks' shear lines and behind obstacles); tails and rings round
+/// what breaks the surface; standing waves where the flow is supercritical.
+fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart {
+    var part = rf_part0();
+    let xz = i.world_pos.xz;
+    let ddx = i.dp_dx.xz;
+    let ddy = i.dp_dy.xz;
+    let j_lump = rf_scale(1.0 / (4.0 * RF_LUMP_YD));
+    let lump = rf_noise(rf_uv(xz, j_lump, o) + vec2<f32>(0.31, 0.77), j_lump, ddx, ddy);
+    let turb = saturate(s.turb * clamp(0.6 + 0.45 * lump.n, 0.1, 1.6));
+    // The two phases, offset per pixel by the lumps so the restarts do not beat in step across a
+    // river (RIV-2's per-pixel phase).
+    let ph = rf_phase(0.12 * lump.n);
+    let q0 = xz - i.flow * (ph.p0 * FLOW_PERIOD_S);
+    let q1 = xz - i.flow * (ph.p1 * FLOW_PERIOD_S);
+    let apart = vec2<f32>(0.37, 0.61);
+    let j_raft = rf_scale(1.0 / (4.0 * RF_RAFT_YD));
+    let raft = rf_mix2(
+        rf_noise(rf_uv(q0, j_raft, o), j_raft, ddx, ddy),
+        rf_noise(rf_uv(q1, j_raft, o) + apart, j_raft, ddx, ddy),
+        ph.w0,
+    );
+    // Resolved, the rafts' field is the chop under them; unresolved, its slope is roughness.
+    let keep = 1.0 - smoothstep(RF_RAFT_YD / 6.0, RF_RAFT_YD / 2.5, px);
+    part.slope = -raft.g * (RF_CHOP_YD * turb * keep);
+    part.add2 = RF_TURB_ROUGH2 * turb + (1.0 - keep) * rf_sq(RF_CHOP_YD * turb * TAU / RF_RAFT_YD);
+
+    // Whitewater: the field cut at the drive's coverage, a crisp rim antialiased by the field's own
+    // footprint and a translucent heart, its mean where the rafts are under a couple of pixels.
+    // Rafts, not a sheet: the coverage grows with the drive's square and stays under 60%.
+    let cov = min(0.55 * turb * turb, 0.6);
+    let lev = rf_level(cov);
+    let e = max(1.5 * length(raft.g) * px, 0.08);
+    let rim = smoothstep(lev, lev + e, raft.n);
+    let heart = smoothstep(lev + e, lev + e + 1.1, raft.n);
+    var white = rim * mix(1.0, 0.4, heart);
+    white = mix(white, cov * 0.8, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px));
+    white = white * RF_WHITE_LEVEL * smoothstep(0.0, 0.05, cov);
+
+    var streak = 0.0;
+#ifndef WATER_TIER_LOW
+    // Rocks, piles and their waterlines in running water, away from the terrain's: a bank is
+    // shallow too, and its foam is the shear streaks'.
+    let off_bank = smoothstep(1.0, 2.0, i.to_shore);
+    let tail = rf_obstacle(i.world_pos, s.e1) * smoothstep(0.9, 1.8, s.speed) * off_bank;
+    let contact = (1.0 - smoothstep(0.03, 0.14, i.depth)) * i.bed_known * off_bank
+        * smoothstep(1.0, 2.5, s.speed);
+    let sl = rf_streak_field(q0, q1, s.e1, o, ddx, ddy, ph.w0);
+    let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
+    // Foam is carried on running water, not on a lake's slow drift.
+    let carried = saturate(0.12 + 0.55 * s.turb + 0.35 * shear + 0.6 * tail)
+        * smoothstep(0.8, 2.6, s.speed);
+    // A line survives where the rafts' field clears the level its load sets, so lines break up and
+    // run out of the whitewater they come from.
+    let lev_c = rf_level(carried);
+    let brk = smoothstep(lev_c - 0.35, lev_c + 0.35, raft.n + 0.8);
+    // Yards to the field's zero line, its first-order distance |n| / |∇n|.
+    let dist = abs(sl.n) / max(length(sl.g), 0.5);
+    let wl = RF_STREAK_W_YD * (0.35 + 0.65 * brk) * (0.6 + 0.8 * carried);
+    let aa = max(0.6 * px, 0.01);
+    let line_v = (1.0 - smoothstep(wl - aa, wl + aa, dist)) * smoothstep(0.0, 0.3, brk)
+        * (0.55 + 0.45 * brk);
+    streak = mix(line_v, carried * 0.3, smoothstep(0.6 * wl, 2.0 * wl, px))
+        * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * (1.0 - saturate(turb * 1.3));
+    // Behind what breaks the surface a tail of rafts runs down the current; round it, a ring.
+    let tail_c = smoothstep(rf_level(0.7 * tail), rf_level(0.7 * tail) + e, raft.n)
+        * smoothstep(0.0, 0.1, tail);
+    let ring = contact * smoothstep(-1.2, -0.6, raft.n);
+    white = max(white, max(tail_c * 0.8, ring * 0.85));
+#endif
+
+    let env = smoothstep(0.8, 1.4, s.froude) * smoothstep(1.2, 3.5, s.speed)
+        * smoothstep(-0.3, 0.8, lump.n) * (1.0 - s.steep);
+    if (env > 0.0) {
+        part.slope = part.slope + rf_standing(xz, o, s, px) * env;
+    }
+    part.cover = max(white, streak);
+    part.shade = rf_foam_shade(raft.g, rim * (1.0 - heart), i.to_view, sun);
+    part.aer = 0.5 * turb;
+    return part;
+}
+
+/// One read in a pool's Lagrangian frame: `(along / lx, lag · k)` with `lag` the clock less the
+/// parcel's age as a share of the period, so a whole number `k` of the map's tiles pass per period.
+fn rf_lag_noise(
+    f: RfFall,
+    lag: f32,
+    dage: f32,
+    lx: f32,
+    k: f32,
+    off: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> RfNoise {
+    let jac = rf_rows(f.dalong / lx, f.dir * (-k * dage / RF_PERIOD_S));
+    return rf_noise(vec2<f32>(f.along / lx, lag * k) + off, jac, ddx, ddy);
+}
+
+/// A plunge pool (RIV-4), scaled by the fall's drop: ring waves on deep-water dispersion with
+/// their frequencies quantised to the river clock, boil domes, and the churn of the outflow, all as
+/// slope and roughness; foam riding the radial outflow, its coverage from the parcel's age (a dense
+/// boil at the impact, surge rings with a crisp front leaving every two seconds, rafts, then a lace
+/// thinning with age), with boils shoving it aside into clear holes ringed with white; aerated water
+/// and a mist veil near the foot.
+fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart {
+    var part = rf_part0();
+    let xz = i.world_pos.xz;
+    let ddx = i.dp_dx.xz;
+    let ddy = i.dp_dy.xz;
+    let size = clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.6, 1.6);
+    let e = f.pool * clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.35, 1.5);
+    let r = f.r / size;
+    let agit = e * exp(-r / 4.2);
+    // A parcel leaves the foot line and slows as it spreads, v = 1.25·size / (1 + 0.13 r): its age
+    // at r labels it for life.
+    let age = (r + 0.065 * r * r) / 1.25;
+    let dage = (1.0 + 0.13 * r) / (1.25 * size);
+    let lag = water_reflect.preview.clocks.x - age / RF_PERIOD_S;
+    let raft = rf_lag_noise(f, lag, dage, 4.85 * size, 3.0, vec2<f32>(0.11, 0.53), ddx, ddy);
+    let boil = rf_lag_noise(f, lag, dage, 5.3 * size, 2.0, vec2<f32>(0.71, 0.19), ddx, ddy);
+
+    // Ring waves: H = a·cos(k r − ωt), ω = √(g k) rounded to whole turns of the clock, a falling as
+    // 1/(1 + 0.3 r), unsteady along the ring, the shortest fading first into roughness.
+    var gh = vec2<f32>(0.0);
+    var lost = 0.0;
+    for (var k = 0; k < 3; k = k + 1) {
+        let fk = f32(k);
+        let lam = 2.6 * pow(0.56, fk) * size;
+        let kw = TAU / lam;
+        let turns = max(round(sqrt(RF_G * kw) * RF_PERIOD_S / TAU), 1.0);
+        let amp = 0.060 * pow(0.58, fk) * size / (1.0 + 0.30 * r) * e;
+        let md = 0.25 + 0.75 * saturate(0.5 + 0.3 * raft.n);
+        let phase = fract(f.r / lam - turns * water_reflect.preview.clocks.x + 0.29 * fk + 0.25 * raft.n);
+        let fade = saturate(2.2 - px * 7.0 / lam);
+        let sl = amp * kw * md;
+        gh = gh - sl * sin(TAU * phase) * f.dir * fade;
+        lost = lost + sl * sl * 0.5 * (1.0 - fade);
+    }
+    // Boil domes: H = h·smoothstep(0.5, 1.5, n) on the boil field, about a yard across.
+    let bzone = smoothstep(1.0, 2.2, r) * smoothstep(7.5, 3.5, r);
+    let tb = saturate(boil.n - 0.5);
+    let dome = RF_BOIL_YD * size * e * smoothstep(8.0, 1.2, r)
+        * (1.0 - smoothstep(0.25, 0.7, px / size));
+    gh = gh + boil.g * (dome * 6.0 * tb * (1.0 - tb));
+#ifndef WATER_TIER_LOW
+    // The churn: the map carried outward on the flow map's phases, strongest at the impact.
+    let u = f.dir * (1.7 * size / (1.0 + 0.32 * r));
+    let ph = rf_phase(0.0);
+    let j_t = rf_scale(1.0 / (4.0 * RF_CHURN_YD));
+    let churn = rf_mix2(
+        rf_noise(rf_uv(xz - u * (ph.p0 * FLOW_PERIOD_S), j_t, o), j_t, ddx, ddy),
+        rf_noise(rf_uv(xz - u * (ph.p1 * FLOW_PERIOD_S), j_t, o) + vec2<f32>(0.37, 0.61), j_t, ddx, ddy),
+        ph.w0,
+    );
+    let ckeep = 1.0 - smoothstep(RF_CHURN_YD / 6.0, RF_CHURN_YD / 2.5, px);
+    gh = gh + churn.g * (RF_PLUNGE_CHOP_YD * agit * ckeep);
+    lost = lost + (1.0 - ckeep) * rf_sq(RF_PLUNGE_CHOP_YD * agit * TAU / RF_CHURN_YD);
+#endif
+    part.slope = -gh;
+    part.add2 = rf_sq(0.2 * agit) + 2.0 * lost;
+
+    // Coverage by age: the boil, the surge rings, the rafts.
+    let ring_ph = fract(8.0 * water_reflect.preview.clocks.x - 0.5 * age + 0.05 * raft.n);
+    let fp_ring = px * dage * 0.5;
+    let ring_b = smoothstep(0.0, 0.04 + 2.0 * fp_ring, ring_ph) * smoothstep(0.46, 0.10, ring_ph);
+    let ring_k = ring_b * 1.15 * exp(-age / 8.0) * smoothstep(1.2, 2.4, r);
+    let patch_k = 0.80 * exp(-age / 4.2);
+    let dense = smoothstep(5.6, 2.6, r + 0.4 * raft.n);
+    let cov = saturate(max(max(dense, ring_k * 0.95), patch_k) * min(e * 1.2, 1.0));
+    let lev = rf_level(cov);
+    var pf = raft.n;
+#ifndef WATER_TIER_LOW
+    // The rafts' outline frays on a fine read, which also opens bubble holes in them.
+    let fine = rf_lag_noise(f, lag, dage, 0.6 * size, 16.0, vec2<f32>(0.47, 0.29), ddx, ddy);
+    let fine_keep = 1.0 - smoothstep(0.08, 0.25, px / size);
+    pf = pf + 0.35 * fine.n * fine_keep;
+#endif
+    let aa = max(length(raft.g) * px, 0.05);
+    let blob = smoothstep(lev - aa, lev + aa, pf);
+    let heart = smoothstep(lev + 0.3 + 2.0 * aa, lev + 1.6, pf) * (1.0 - dense);
+    var foam = blob * mix(1.0, 0.58, heart);
+#ifndef WATER_TIER_LOW
+    let holes = smoothstep(1.0, 1.5, fine.n) * fine_keep * smoothstep(0.2, 1.2, r);
+    foam = foam * (1.0 - 0.55 * holes);
+    // Lace: the zero lines of a third read, braided near the boil and thinning to threads with age,
+    // whole patches of it missing so clear water parts the foam.
+    let lace_n = rf_lag_noise(f, lag, dage, 5.5 * size, 5.0, vec2<f32>(0.43, 0.91), ddx, ddy);
+    let lpatch = smoothstep(-0.2, 0.7, 0.5 * boil.n + 0.5 * raft.n + 0.9 * exp(-age / 3.0));
+    let lwid = mix(0.32, 0.06, saturate(age / 16.0)) * size * (0.25 + 0.75 * lpatch);
+    let ldist = abs(lace_n.n) / max(length(lace_n.g), 0.3);
+    let laa = max(0.7 * px, 0.015);
+    let lk = smoothstep(1.4, 2.6, r) * (1.0 - smoothstep(12.0, 24.0, age));
+    let lace = (1.0 - smoothstep(lwid - laa, lwid + laa, ldist)) * smoothstep(0.45, 1.0, lwid / laa)
+        * lk * lpatch;
+    foam = max(foam, lace * (0.5 + 0.4 * smoothstep(-0.5, 0.5, fine.n)));
+#endif
+    // Boils shove the foam aside: clear holes ringed with white.
+    let hole = smoothstep(0.9, 1.4, boil.n) * bzone;
+    let brim = smoothstep(0.45, 0.85, boil.n) * (1.0 - hole) * bzone * smoothstep(-0.3, 0.5, raft.n);
+    foam = max(foam * (1.0 - 0.93 * hole), brim * 0.85);
+    part.cover = saturate(foam) * RF_POOL_LEVEL;
+    part.shade = rf_foam_shade(raft.g, blob * (1.0 - heart), i.to_view, sun);
+    part.aer = smoothstep(7.5, 1.0, r) * e;
+    part.mist = e * exp(-r / 1.8) * RF_MIST_LEVEL * (0.75 + 0.25 * smoothstep(-1.0, 1.0, raft.n));
+    return part;
+}
+
+/// A falling sheet's share and look (RIV-6).
+struct RfSheet {
+    // The sheet's share of the fragment, and its own normal: the heightfield's with the streak
+    // ridges across it, which the Fresnel takes on a sheet ([`rf_fresnel_normal`]).
+    w: f32,
+    n: vec3<f32>,
+    // Aerated cover, its light, the lip band, the glassy tongue's share, GGX α² added, aeration.
+    white: f32,
+    shade: f32,
+    lip: f32,
+    glass: f32,
+    add2: f32,
+    aer: f32,
+};
+
+/// One read across a sheet: the unit field and its derivative across (per yard), at the across
+/// coordinate `x0` (from the origin) plus the origin's `xo`, wavelength `lam` across, `k` of the
+/// map's tiles per period down the label `lab`. The label's screen derivatives come through the
+/// height (`dl_*`), the across coordinate's through XZ (`dx_*`).
+fn rf_sheet_oct(
+    x0: f32,
+    xo: f32,
+    lab: f32,
+    lam: f32,
+    k: f32,
+    dx_dx: f32,
+    dx_dy: f32,
+    dl_dx: f32,
+    dl_dy: f32,
+    off: vec2<f32>,
+) -> vec2<f32> {
+    let sx = 1.0 / (4.0 * lam);
+    let uv = vec2<f32>(x0 * sx + fract(xo * sx), lab * k) + off;
+    let t = textureSampleGrad(
+        ripples,
+        ripples_samp,
+        uv,
+        vec2<f32>(dx_dx * sx, dl_dx * k),
+        vec2<f32>(dx_dy * sx, dl_dy * k),
+    );
+    let gu = (t.r * 2.0 - 1.0 - water_reflect.look.ripple_mean.x) * (RIPPLE_TEXELS * 0.5);
+    return vec2<f32>((t.b - 0.5) / RF_B_SD, gu * sx / RF_B_SD);
+}
+
+/// The sheet's reads on one fixed bearing (of four over half a turn) for the across coordinate:
+/// the streaks (x, two octaves on Medium and High), their derivative across (y), the slow surge
+/// that carries whiter bands down and moves the aeration's onset along the lip (z).
+fn rf_sheet_bin(
+    xz: vec2<f32>,
+    o: vec2<f32>,
+    bin: f32,
+    lab: f32,
+    dlab: f32,
+    dp_dx: vec3<f32>,
+    dp_dy: vec3<f32>,
+) -> vec3<f32> {
+    let a = bin * (RF_PI / 4.0);
+    let across = vec2<f32>(-sin(a), cos(a));
+    let x0 = dot(xz - o, across);
+    let xo = dot(o, across);
+    let dx_dx = dot(dp_dx.xz, across);
+    let dx_dy = dot(dp_dy.xz, across);
+    let dl_dx = dlab * dp_dx.y;
+    let dl_dy = dlab * dp_dy.y;
+    let off = vec2<f32>(0.21, 0.63) * bin;
+    let s1 = rf_sheet_oct(x0, xo, lab, 0.45, 8.0, dx_dx, dx_dy, dl_dx, dl_dy, off);
+    var st = s1;
+#ifndef WATER_TIER_LOW
+    let s2 = rf_sheet_oct(x0, xo, lab, 0.17, 16.0, dx_dx, dx_dy, dl_dx, dl_dy, off + vec2<f32>(0.5, 0.25));
+    st = s1 * 0.8 + s2 * 0.6;
+#endif
+    let surge = rf_sheet_oct(x0, xo, lab, 2.2, 2.0, dx_dx, dx_dy, dl_dx, dl_dy, off + vec2<f32>(0.77, 0.4));
+    return vec3<f32>(st.x, st.y, surge.x);
+}
+
+/// Falling water on a steep sheet. Its label is when the water crossed the lip: τ = √(2·fallen/g)
+/// below a fall row's lip, so the streaks stretch and speed up as they fall; a sheet no row covers
+/// runs down at [`RF_SHEET_V`]. The two labels share the clock's rate, so blending them by the row's
+/// weight bends the streaks in space and never in time. Aeration follows fall time (from the
+/// grade where no row says how far the water has fallen), its onset wandering along the lip; the
+/// lip band and the skirt need the row.
+fn rf_sheet(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfSheet {
+    var sh = RfSheet(s.steep, i.flat_n, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0);
+    let xz = i.world_pos.xz;
+    let known = s.fall.sheet;
+    let tau_k = sqrt(2.0 * s.fall.fallen / RF_G + 0.004);
+    let lab_k = water_reflect.preview.clocks.x - tau_k / RF_PERIOD_S;
+    let lab_u = water_reflect.preview.clocks.x + i.world_pos.y / (RF_SHEET_V * RF_PERIOD_S);
+    let lab = mix(lab_u, lab_k, known);
+    // d(label)/d(height): dτ/dy = −1/(g τ) under a lip, −1/V without one.
+    let dlab = mix(1.0 / (RF_SHEET_V * RF_PERIOD_S), 1.0 / (RF_G * tau_k * RF_PERIOD_S), known);
+    let f = fract(atan2(s.down.y, s.down.x) / RF_PI) * 4.0;
+    let b0 = floor(f);
+    let t = f - b0;
+    let b1 = select(b0 + 1.0, 0.0, b0 >= 3.0);
+    let r0 = rf_sheet_bin(xz, o, b0, lab, dlab, i.dp_dx, i.dp_dy);
+    let r1 = rf_sheet_bin(xz, o, b1, lab, dlab, i.dp_dx, i.dp_dy);
+    let wb0 = 1.0 - t;
+    let rd = (r0 * wb0 + r1 * t) * inverseSqrt(max(wb0 * wb0 + t * t, 1e-4));
+    let surge01 = saturate(0.5 + 0.3 * rd.z);
+    let onset = 0.12 + 0.46 * surge01;
+    let tau_u = 0.3 + 1.2 * saturate((s.grade - RF_SHEET_GRADE.x) / 1.5);
+    let tau = mix(tau_u, tau_k, known);
+    let aer = smoothstep(onset, onset + 0.45, tau) * (0.70 + 0.5 * surge01);
+    let fw = abs(rd.y) * px + 0.15;
+    let white = saturate(
+        aer * smoothstep(-0.35 - fw, 0.15 + fw, rd.x * (0.85 + 0.3 * surge01)) + aer * aer * 0.18,
+    );
+    // The skirt: the last yard and a half above the foot whitens into the plunge's spray.
+    let skirt = known * smoothstep(s.fall.sheet_drop - 1.4, s.fall.sheet_drop - 0.2, s.fall.fallen);
+    sh.white = max(white, 0.85 * skirt) * RF_SHEET_LEVEL;
+    // The lip: the smooth crest catches the light in broken runs along the brink.
+    sh.lip = known * (1.0 - smoothstep(0.07, 0.16 + 1.5 * px, s.fall.fallen))
+        * mix(0.30, 1.0, smoothstep(0.35, 0.62, surge01));
+    sh.glass = (1.0 - white) * (1.0 - 0.5 * aer) * 0.8;
+    let across_w = vec3<f32>(-s.down.y, 0.0, s.down.x);
+    sh.n = normalize(i.flat_n - across_w * (RF_SHEET_RIDGE_YD * rd.y * smoothstep(0.1, 0.6, tau)));
+    sh.shade = saturate((dot(sh.n, sun) + 0.38) / 1.38);
+    sh.add2 = rf_sq(0.25 * aer);
+    sh.aer = aer;
+    return sh;
+}
+
+// ---- the module -------------------------------------------------------------------------------
+
+/// Everything the river terms do to a fragment. `slope` joins the wake's slope into
+/// `water_surface` and `add2` its roughness ([`surface_roughen`]); `sheet` and `sheet_n` the Fresnel
+/// ([`rf_fresnel_normal`]); the rest is held to the composite ([`rf_hold`]).
+struct RiverFalls {
+    slope: vec2<f32>,
+    add2: f32,
+    sheet: f32,
+    sheet_n: vec3<f32>,
+    cover: f32,
+    tint: vec3<f32>,
+    mist: f32,
+    lip: f32,
+    aer: f32,
+    glass: f32,
+};
+
+/// The river terms at a fragment, nothing at all with `rivers` and `falls` off, on
+/// still water with no fall near and no sheet, which is where open water returns at the cost of
+/// the falls' loop.
+fn rivers_falls(i: RfIn) -> RiverFalls {
+    var o = RiverFalls(
+        vec2<f32>(0.0),
+        0.0,
+        0.0,
+        vec3<f32>(0.0, 1.0, 0.0),
+        0.0,
+        vec3<f32>(1.0),
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    );
+    if (!pv_on(PV_RIVERS | PV_FALLS)) {
+        return o;
+    }
+    let s = rf_site(i);
+    let moving = s.speed > RF_FLOW_MIN && s.steep < 0.999;
+    if (!moving && s.fall.pool <= 0.0 && s.steep <= 0.0) {
+        return o;
+    }
+    let org = rf_origin();
+    let px = max(max(length(i.dp_dx.xz), length(i.dp_dy.xz)), 1e-4);
+    let sun = rf_to_sun();
+    var river = rf_part0();
+    if (moving && pv_on(PV_RIVERS)) {
+        river = rf_river(s, i, org, px, sun);
+    }
+    var pool = rf_part0();
+    if (s.fall.pool > 0.0 && pv_on(PV_FALLS)) {
+        pool = rf_plunge(s.fall, i, org, px, sun);
+    }
+    var sheet = RfSheet(0.0, i.flat_n, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0);
+    if (s.steep > 0.0 && pv_on(PV_RIVERS)) {
+        sheet = rf_sheet(s, i, org, px, sun);
+    }
+    let keep = 1.0 - sheet.w;
+    let gain = water_reflect.preview.gains.w;
+    o.slope = river.slope * keep + pool.slope;
+    o.add2 = river.add2 * keep + pool.add2 + sheet.add2 * sheet.w;
+    // `max`, not a sum: these are ways for one surface to be white.
+    let c_r = river.cover * keep * gain;
+    let c_p = pool.cover * gain;
+    let c_s = sheet.white * sheet.w;
+    o.cover = saturate(max(c_r, max(c_p, c_s)));
+    let csum = c_r + c_p + c_s;
+    let shade = select(
+        0.5,
+        (river.shade * c_r + pool.shade * c_p + sheet.shade * c_s) / max(csum, 1e-4),
+        csum > 1e-4,
+    );
+    o.tint = mix(RF_FOAM_SHADE, RF_FOAM_LIT, shade);
+    o.sheet = sheet.w;
+    o.sheet_n = sheet.n;
+    o.aer = saturate(max(max(river.aer * keep, pool.aer), sheet.aer * sheet.w));
+    o.glass = sheet.glass * sheet.w;
+    // From below the surface there is no mist over it and no lip to catch the light.
+    if (view.world_position.y > i.world_pos.y) {
+        o.mist = saturate(pool.mist * water_reflect.preview.weather.w);
+        o.lip = sheet.lip * sheet.w;
+    }
+    return o;
+}
+
+
+/// The normal the reflectance takes: the rippled one, turned toward a sheet's own by its share.
+/// The ripple normal is built about world up, which on a falling sheet would make it a grazing
+/// mirror.
+fn rf_fresnel_normal(n: vec3<f32>, sheet_n: vec3<f32>, sheet: f32) -> vec3<f32> {
+    if (sheet <= 0.0) {
+        return n;
+    }
+    return normalize(mix(n, sheet_n, sheet));
+}
+
+// ---- to the composite -------------------------------------------------------------------------
+
+/// What the composite takes, as [`rf_hold`] carries it across the reflection tiers.
+struct RfLate {
+    cover: f32,
+    tint: vec3<f32>,
+    sheet: f32,
+    mist: f32,
+    lip: f32,
+    aer: f32,
+    glass: f32,
+};
+
+/// The composite's terms in four words: half floats and the tint in bytes, like [`body_hold`],
+/// since they cross the tiers where the shader's register peak lies.
+fn rf_hold(r: RiverFalls) -> vec4<u32> {
+    return vec4<u32>(
+        pack2x16float(vec2<f32>(r.cover, r.mist)),
+        pack4x8unorm(vec4<f32>(r.tint / RF_TINT_MAX, r.sheet)),
+        pack2x16float(vec2<f32>(r.lip, r.aer)),
+        pack2x16float(vec2<f32>(r.glass, 0.0)),
+    );
+}
+
+/// [`rf_hold`]'s words back.
+fn rf_release(h: vec4<u32>) -> RfLate {
+    let a = unpack2x16float(h.x);
+    let b = unpack4x8unorm(h.y);
+    let c = unpack2x16float(h.z);
+    let d = unpack2x16float(h.w);
+    return RfLate(a.x, b.rgb * RF_TINT_MAX, b.a, a.y, c.x, c.y, d.x);
+}
+
+/// The body the composite passes and scatters, under falling and aerated water.
+struct RfBody {
+    t_bed: vec3<f32>,
+    w_in: f32,
+    in_scatter: vec3<f32>,
+};
+
+/// A sheet's glassy tongue passes the bed behind it through [`RF_SHEET_THICK_YD`] of water in the
+/// kind's own absorption and turbidity `sig` (rgb, w); aerated water shuts most of the bed, scatters
+/// what it no longer passes, and turns milky with the foam light `foam_e`. Unchanged where neither.
+fn rf_body(
+    t_bed: vec3<f32>,
+    w_in: f32,
+    in_scatter: vec3<f32>,
+    foam_e: vec3<f32>,
+    sig: vec4<f32>,
+    late: RfLate,
+) -> RfBody {
+    var b = RfBody(t_bed, w_in, in_scatter);
+    if (late.glass > 0.0) {
+        let thin = exp(-(sig.rgb + vec3<f32>(sig.w)) * RF_SHEET_THICK_YD);
+        b.t_bed = mix(b.t_bed, thin, late.glass);
+        b.w_in = mix(b.w_in, 1.0 - dot(thin, LUMA_709), late.glass);
+    }
+    if (late.aer > 0.0) {
+        b.t_bed = b.t_bed * (1.0 - RF_AER_SHUT * late.aer);
+        b.w_in = mix(b.w_in, 1.0 - dot(b.t_bed, LUMA_709), late.aer);
+        b.in_scatter = mix(
+            b.in_scatter,
+            b.in_scatter * RF_AER_LIFT + water_dec(FOAM_COLOR) * foam_e * RF_AER_MILK,
+            late.aer,
+        );
+    }
+    return b;
+}
+
+/// The foam the composite lays over the layer: the larger of the shore's `foam` and the river's
+/// (w), and the multiplier on the foam's colour (rgb), the river's light in proportion to its share.
+fn rf_foam_over(foam: f32, late: RfLate) -> vec4<f32> {
+    let cover = max(foam, late.cover);
+    if (late.cover <= 0.0) {
+        return vec4<f32>(vec3<f32>(1.0), foam);
+    }
+    return vec4<f32>(mix(vec3<f32>(1.0), late.tint, late.cover / max(cover, 1e-4)), cover);
+}
+
+/// The lip band's light, linear, added with the glints (and fogged as they are).
+fn rf_lip_light(late: RfLate, foam_e: vec3<f32>) -> vec3<f32> {
+    return water_dec(FOAM_COLOR) * foam_e * (late.lip * RF_LIP_GAIN);
+}
+
+/// The mist veil's colour, linear, laid over the layer at `late.mist`.
+fn rf_mist_light(foam_e: vec3<f32>) -> vec3<f32> {
+    return water_dec(FOAM_COLOR) * RF_MIST_TINT * foam_e;
+}
+
+#endif // WATER_PREVIEW
+
+// ==== PART C: the functions =======================================================================
+
+#ifdef WATER_PREVIEW
+
+// ---- switches, clock, hash -----------------------------------------------------------------------
+
+/// The features' bits, the preview's own (`PV_*`).
+const NWG_CAUSTICS: u32 = PV_CAUSTICS;
+const NWG_RAIN: u32 = PV_RAIN;
+const NWG_LIGHTS: u32 = PV_LIGHTS;
+const NWG_GLOW: u32 = PV_GLOW;
+const NWG_SPARKLES: u32 = PV_SPARKLES;
+const NWG_SSS: u32 = PV_CREST;
+const NWG_MIST: u32 = PV_MIST;
+
+/// What each tier draws: the lights a pixel considers, the first of the rain's two drop sizes it
+/// draws (0 the small drops and snow's dimples, 1 the large drops alone), and the sparkles. Low has
+/// no caustics (it does not refract the bed), no lights and no sparkles.
+#ifdef WATER_TIER_HIGH
+const NWG_LIGHTS_MAX: u32 = 8u;
+const NWG_RAIN_FIRST: i32 = 0;
+const NWG_SPARKLES_TIER: bool = true;
+#else
+#ifdef WATER_TIER_LOW
+const NWG_LIGHTS_MAX: u32 = 0u;
+const NWG_RAIN_FIRST: i32 = 1;
+const NWG_SPARKLES_TIER: bool = false;
+#else
+const NWG_LIGHTS_MAX: u32 = 4u;
+const NWG_RAIN_FIRST: i32 = 1;
+const NWG_SPARKLES_TIER: bool = false;
+#endif
+#endif
+
+/// Whether the feature `bit` is on this frame.
+fn nwg_on(bit: u32) -> bool {
+    return pv_on(bit);
+}
+
+/// The weather row as the module reads it: x rain, y snow, z the 60 s clock's phase, w the storm.
+fn nwg_wx() -> vec4<f32> {
+    let p = water_reflect.preview;
+    return vec4<f32>(p.weather.x, p.weather.y, p.clocks.y, p.wind.w);
+}
+
+/// The module clock's phase, 0..1 over 60 s. Every animated term runs a whole number of cycles in
+/// that period, so nothing jumps when the phase wraps.
+fn nwg_phase() -> f32 {
+    return water_reflect.preview.clocks.y;
+}
+
+/// A hash of an integer lattice cell and a salt: 32 well-mixed bits, which the callers split into
+/// fields ([`nwg_field`]) so one hash serves a cell's several draws.
+fn nwg_hash(c: vec2<i32>, salt: u32) -> u32 {
+    var h = (bitcast<u32>(c.x) * 0x8da6b343u) ^ (bitcast<u32>(c.y) * 0xd8163841u)
+        ^ (salt * 0x9e3779b9u);
+    h = (h ^ (h >> 15u)) * 0x2c1b3c6du;
+    h = (h ^ (h >> 12u)) * 0x297a2d39u;
+    return h ^ (h >> 15u);
+}
+
+/// `bits` bits of the hash `h` from bit `at`, uniform in [0, 1).
+fn nwg_field(h: u32, at: u32, bits: u32) -> f32 {
+    return f32((h >> at) & ((1u << bits) - 1u)) / f32(1u << bits);
+}
+
+/// The pixel's footprint on the water: its long and short extents in yards. Takes derivatives: call
+/// it in uniform control flow.
+struct NwgFrame {
+    major: f32,
+    minor: f32,
+};
+
+fn nwg_frame(world_pos: vec3<f32>) -> NwgFrame {
+    let lx = length(dpdx(world_pos.xz));
+    let ly = length(dpdy(world_pos.xz));
+    return NwgFrame(max(max(lx, ly), 1e-6), max(min(lx, ly), 1e-6));
+}
+
+/// Whether the eye is above the surface point: every term here is the view from above.
+fn nwg_above(world_pos: vec3<f32>) -> bool {
+    return view.world_position.y > world_pos.y;
+}
+
+// ---- caustics (BODY-5) ---------------------------------------------------------------------------
+//
+// The bed is lit through the surface's lenses: a ray of the lighting sun entering at `x` lands at
+// `x + D·κ·∇h(x)` on a bed `D` deep along the refracted ray, κ = 1 − 1/n, so the bed's irradiance is
+// the sun's over |det(I + D·κ·H)|, H the surface's Hessian. The surface here is six ripples of
+// 0.98-0.31 yd on golden-angle headings, each at half its deep-water phase speed and a whole number of
+// cycles in the clock's period. Their curvatures are scaled so the net is sharpest at
+// `NWG_CAUSTIC_FOCUS_YD`: a soft mottle in the first hand's breadth, bright lines at a yard, a finer
+// net below. The intensity is regularised (`NWG_CAUSTIC_EPS`) and divided by its mean at that depth
+// (`nwg_caustic_mean`), so the bed keeps its energy and only the sun's direct share is redistributed.
+
+/// The path along the refracted sun, yards, at which a curvature of one focuses: the net is
+/// sharpest at about 1.25 of it.
+const NWG_CAUSTIC_FOCUS_YD: f32 = 0.72;
+/// The intensity's regularisation, 1/sqrt(det² + ε²): the brightest line is 1/ε over the mean.
+const NWG_CAUSTIC_EPS: f32 = 0.15;
+/// The path over which the net's contrast fades out, yards.
+const NWG_CAUSTIC_FADE_YD: vec2<f32> = vec2<f32>(2.5, 6.0);
+/// The surface footprint over which the net resolves to its mean, yards.
+const NWG_CAUSTIC_FP_YD: vec2<f32> = vec2<f32>(0.03, 0.12);
+/// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
+const NWG_CAUSTIC_TURB: f32 = 1.5;
+
+/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus: `kd` its lattice in
+/// cycles a yard, `m` its cycles in the clock's period, `p0` its phase, `w` its curvature times
+/// `(d_x², d_z², d_x·d_z)` of its heading.
+fn nwg_cwave(x: vec2<f32>, phi: f32, kd: vec2<f32>, m: f32, p0: f32, w: vec3<f32>) -> vec3<f32> {
+    return -sin(TAU * fract(dot(x, kd) - m * phi + p0)) * w;
+}
+
+/// The six ripples' Hessian at the surface point `x` (world XZ yards), per unit focus.
+fn nwg_caustic_hessian(x: vec2<f32>, phi: f32) -> vec3<f32> {
+    var h = nwg_cwave(x, phi, vec2<f32>(0.61159, 0.82007), 40.0, 0.0000,
+        vec3<f32>(0.20635, 0.37100, 0.27669));
+    h += nwg_cwave(x, phi, vec2<f32>(-1.26768, -0.24166), 45.0, 0.6180,
+        vec3<f32>(0.55711, 0.02025, 0.10620));
+    h += nwg_cwave(x, phi, vec2<f32>(1.38509, -0.85543), 50.0, 0.2361,
+        vec3<f32>(0.41794, 0.15941, -0.25812));
+    h += nwg_cwave(x, phi, vec2<f32>(-0.55945, 1.97595), 56.0, 0.8541,
+        vec3<f32>(0.04285, 0.53450, -0.15133));
+    h += nwg_cwave(x, phi, vec2<f32>(-1.16335, -2.31469), 63.0, 0.4721,
+        vec3<f32>(0.11643, 0.46092, 0.23166));
+    h += nwg_cwave(x, phi, vec2<f32>(3.05450, 1.16175), 71.0, 0.0902,
+        vec3<f32>(0.50439, 0.07296, 0.19184));
+    return h;
+}
+
+/// The regularised intensity's mean over the pattern at focus ratio `rho` (path over
+/// `NWG_CAUSTIC_FOCUS_YD`): a rational fit, within 11% from 0 to 6.
+fn nwg_caustic_mean(rho: f32) -> f32 {
+    let r = min(rho, 6.0);
+    let r2 = r * r;
+    let r3 = r2 * r;
+    return (0.989 + 2.1614 * r2 - 0.1102 * r3) / (1.0 - 0.1993 * r2 + 0.6322 * r3);
+}
+
+/// The caustic at the surface entry point `x` and focus ratio `rho`, mean 1.
+fn nwg_caustic_at(x: vec2<f32>, rho: f32, phi: f32) -> f32 {
+    let h = nwg_caustic_hessian(x, phi);
+    let jxx = 1.0 + rho * h.x;
+    let jzz = 1.0 + rho * h.y;
+    let jxz = rho * h.z;
+    let det = jxx * jzz - jxz * jxz;
+    return inverseSqrt(det * det + NWG_CAUSTIC_EPS * NWG_CAUSTIC_EPS) / nwg_caustic_mean(rho);
+}
+
+/// The lighting sun's direct share of the bed's light: its irradiance under the shadow `lit`
+/// over all the body's (`body_irradiance`'s rows, the sky through `vis.g`).
+fn nwg_sun_share(lit: f32, vis: vec4<f32>) -> f32 {
+    let b = water_reflect.look.body;
+    let sun = luma709(b.e_sun.rgb);
+    let total = luma709(b.e_sky.rgb) * vis.g + sun * mix(b.e_sky.w, 1.0, lit);
+    return saturate(sun * lit / max(total, 1e-4));
+}
+
+/// The gain on the bed the water passes at `world_pos`, 1 where there is none: the caustic at the
+/// point the lighting sun's refracted ray through the bed `sb.bed` entered the surface, `z` yards
+/// above it (`BodyOptics::z`), carried along `flow` by the two-phase flow map like the ripple.
+/// Its contrast is the sun's direct share under the MCSH shadow at the bed and the body's sun
+/// visibility `vis.b`, faded with the path, the kind's turbidity `sig_turb` and the footprint.
+fn nwg_caustic_gain(
+    world_pos: vec3<f32>,
+    sb: SceneBehind,
+    z: f32,
+    flow: vec2<f32>,
+    sig_turb: f32,
+    vis: vec4<f32>,
+    bi: BodyIn,
+    fr: NwgFrame,
+) -> f32 {
+    if (!nwg_on(NWG_CAUSTICS) || !sb.known || bi.unlit || !nwg_above(world_pos)) {
+        return 1.0;
+    }
+    let travel = normalize(wow_light.light_sun.xyz);
+    if (travel.y > -0.02) {
+        return 1.0;
+    }
+    let t = refract(travel, vec3<f32>(0.0, 1.0, 0.0), INV_IOR);
+    let path = max(z, 0.0) / max(-t.y, 0.2);
+    let k = (1.0 - smoothstep(NWG_CAUSTIC_FADE_YD.x, NWG_CAUSTIC_FADE_YD.y, path))
+        * exp(-sig_turb * path * NWG_CAUSTIC_TURB)
+        * (1.0 - smoothstep(NWG_CAUSTIC_FP_YD.x, NWG_CAUSTIC_FP_YD.y, fr.major));
+    let lit = select(1.0, lighting_sun_mcsh(sb.bed, 0.0), bi.adt) * vis.b;
+    let amp = k * nwg_sun_share(lit, vis) * water_reflect.preview.gains.x;
+    if (amp < 1.0 / 256.0) {
+        return 1.0;
+    }
+    let entry = sb.bed.xz - t.xz * path;
+    let rho = path / NWG_CAUSTIC_FOCUS_YD;
+    let phi = nwg_phase();
+    var c = 0.0;
+    if (dot(flow, flow) < 1e-4) {
+        c = nwg_caustic_at(entry, rho, phi);
+    } else {
+        // Two phases half a period apart, blended so the net's variance holds through the restart.
+        let ph0 = water_reflect.cycle.x;
+        let ph1 = fract(ph0 + 0.5);
+        let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+        let a = nwg_caustic_at(entry - flow * (ph0 * FLOW_PERIOD_S), rho, phi) - 1.0;
+        let b = nwg_caustic_at(entry - flow * (ph1 * FLOW_PERIOD_S) + vec2<f32>(0.37, 0.61), rho, phi)
+            - 1.0;
+        c = 1.0 + (a * w0 + b * (1.0 - w0)) * inverseSqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
+    }
+    return max(1.0 + amp * (c - 1.0), 0.0);
+}
+
+// ---- rain and snow (WX-1) ------------------------------------------------------------------------
+//
+// Each drop size has its own world lattice, turned against the world axes and against the other.
+// Each cell drops at most one drop per cycle, at a hashed spot near its centre, with the rain's
+// intensity as the chance; its cycle is a whole number of the clock's period. The ring is a
+// capillary packet running out from the impact: radius `v·age`, a width that grows with age, a few
+// ripples behind its front, decaying over its life. Its slope joins the full band; where its ripples
+// span 8 px it also joins the resolved low band, which is the shader's own rule for what may slide
+// the reflections. Where the rings no longer resolve they become roughness, and rain roughens the
+// water everywhere a little.
+
+/// The two drop sizes: lattice cell, ring life (s), ring speed (yd/s), width at impact and its
+/// growth per second (yd), slope at the front, cycles per clock period (lowest), lattice turn.
+struct NwgDrop {
+    cell: f32,
+    life: f32,
+    speed: f32,
+    w0: f32,
+    w1: f32,
+    amp: f32,
+    rate: f32,
+    rot: vec2<f32>,
+};
+
+fn nwg_drop(i: i32) -> NwgDrop {
+    if (i == 0) {
+        return NwgDrop(0.42, 0.55, 0.22, 0.018, 0.035, 0.45, 36.0, vec2<f32>(0.8660, 0.5000));
+    }
+    return NwgDrop(0.95, 0.90, 0.30, 0.030, 0.050, 0.35, 30.0, vec2<f32>(0.7660, -0.6428));
+}
+
+/// How far a drop lands from its cell's centre, in cells. With a ring's reach (its last radius and
+/// two widths, under half a cell) it stays under a cell, so the 2×2 cells around the pixel hold
+/// every ring that reaches it.
+const NWG_RAIN_JITTER: f32 = 0.3;
+/// Rain's roughness, GGX α² everywhere and where the rings no longer resolve.
+const NWG_RAIN_A2: vec2<f32> = vec2<f32>(0.004, 0.012);
+/// How much snow stills the full band's slope.
+const NWG_SNOW_STILL: f32 = 0.25;
+
+/// One drop size's ring slope at world `xz` (world XZ, the full band): the 2×2 cells nearest the
+/// point on its lattice, each with its drop of this cycle. `rain` is the chance a cell drops this
+/// cycle, `amp` the slope's scale.
+fn nwg_rings(xz: vec2<f32>, d: NwgDrop, rain: f32, amp: f32, salt: u32) -> vec2<f32> {
+    let r = mat2x2<f32>(d.rot.x, -d.rot.y, d.rot.y, d.rot.x);
+    let g = (r * xz) / d.cell;
+    let base = vec2<i32>(floor(g - 0.5));
+    let phi = nwg_phase();
+    var s = vec2<f32>(0.0);
+    for (var k = 0; k < 4; k = k + 1) {
+        let c = base + vec2<i32>(k & 1, k >> 1u);
+        // The cell's rate and phase, then this cycle's chance and spot, from two hashes.
+        let hc = nwg_hash(c, salt);
+        let m = floor(d.rate + d.rate * nwg_field(hc, 0u, 16u));
+        let tt = m * phi + nwg_field(hc, 16u, 16u);
+        let cyc = i32(u32(tt) % u32(m));
+        let age = fract(tt) * (60.0 / m);
+        if (age >= d.life) {
+            continue;
+        }
+        let hd = nwg_hash(c + vec2<i32>(cyc * 7, cyc * 13), salt + 1u);
+        if (nwg_field(hd, 0u, 16u) >= rain) {
+            continue;
+        }
+        let at = vec2<f32>(c) + vec2<f32>(0.5) + NWG_RAIN_JITTER
+            * (vec2<f32>(nwg_field(hd, 16u, 8u), nwg_field(hd, 24u, 8u)) * 2.0 - 1.0);
+        let dp = (g - at) * d.cell;
+        let dist = length(dp) + 1e-5;
+        let w = d.w0 + d.w1 * age;
+        let x = dist - d.speed * age;
+        let env = exp(-(x * x) / (w * w)) * exp(-age / (0.45 * d.life)) * saturate(age / 0.03);
+        s += dp * (env * sin(TAU * x / (1.6 * w)) / dist);
+    }
+    // Back from the lattice to world XZ.
+    return transpose(r) * s * amp;
+}
+
+/// The weather's change to the surface: the rings in its full band and, where they resolve, its
+/// low band; snow's stillness on the full band; rain's roughness in the tensor, α and its share
+/// `rho_a`. `fr` is the pixel's footprint ([`nwg_frame`]).
+fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSurface {
+    let wx = nwg_wx();
+    let rain = wx.x;
+    let snow = wx.y;
+    if (!nwg_on(NWG_RAIN) || rain + snow <= 0.0) {
+        return s;
+    }
+    var full = vec2<f32>(0.0);
+    var lo = vec2<f32>(0.0);
+    var unresolved = 0.0;
+    for (var i = NWG_RAIN_FIRST; i < 2; i = i + 1) {
+        let d = nwg_drop(i);
+        // The ring's ripples are about 1.6 times its width, at mid-life.
+        let lam = 1.6 * (d.w0 + d.w1 * 0.5 * d.life);
+        let keep = smoothstep(2.0, 4.0, lam / fr.major);
+        unresolved = max(unresolved, 1.0 - keep);
+        // Snow lands as dimples: the small drops at a quarter of the slope, none of the large.
+        let chance = select(rain, rain + 0.5 * snow, i == 0);
+        let amp = select(1.0, 1.0 - 0.75 * snow / max(rain + snow, 1e-4), i == 0);
+        if (keep > 0.0 && chance > 0.0) {
+            let ring = nwg_rings(xz, d, chance, amp * keep, 40u + u32(i) * 8u);
+            full += ring;
+            lo += ring * smoothstep(4.0, 8.0, lam / fr.major);
+        }
+    }
+    var o = s;
+    let still = 1.0 - NWG_SNOW_STILL * snow;
+    let n_s = o.n.xz / max(o.n.y, 1e-3) * still + full;
+    o.n = normalize(vec3<f32>(n_s.x, 1.0, n_s.y));
+    let n_lo_s = o.n_lo.xz / max(o.n_lo.y, 1e-3) + lo;
+    o.n_lo = normalize(vec3<f32>(n_lo_s.x, 1.0, n_lo_s.y));
+    let add = rain * (NWG_RAIN_A2.x + NWG_RAIN_A2.y * unresolved);
+    o.a2 = s.a2 + vec3<f32>(add, add, 0.0);
+    o.alpha = sqrt(sqrt(max(o.a2.x * o.a2.y - o.a2.z * o.a2.z, 1e-12)));
+    o.full2 = s.full2 + add;
+    let a0 = water_reflect.look.surf.x;
+    o.rho_a = smoothstep(a0, max(sqrt(o.full2), a0 + 1e-4), o.alpha);
+    return o;
+}
+
+// ---- lights (SPEC-6) -----------------------------------------------------------------------------
+//
+// The packed point lights (`wow_light.points`, nearest the camera first) seen in the water: GGX on the
+// surface's roughness tensor and the lamp's own disc, so a lamp over rough water stretches into a
+// broken streak toward the eye and over calm water it is a spot. A wider, softer column on the
+// resolved low band carries the glow under the streak. A pixel considers the first
+// `NWG_LIGHTS_MAX` lights and shades only those whose streak can reach it: the reflection of a lamp
+// lies near the vertical plane through the eye and the lamp, between the two. The authored falloff
+// `1/(0.7·d + 0.03·d²)` is terrain's, so a streak and the lit bank under its lamp agree. Reflections
+// are graded by the SIDN night track, the authored "lights on" curve, floored by day. The same
+// lights add their light to the body's in-scatter and to foam, as the bank beside the water takes it.
+
+/// A lamp's radius, yards: it widens the lobe by its disc.
+const NWG_LAMP_RADIUS_YD: f32 = 0.22;
+/// The reflections' share by day, where the SIDN track is 0.
+const NWG_LAMP_DAY: f32 = 0.25;
+/// The soft column under a streak: its share, and its GGX α² along and across the view.
+const NWG_LAMP_TAIL: f32 = 0.3;
+const NWG_LAMP_TAIL_A2: vec2<f32> = vec2<f32>(0.05, 0.004);
+/// How many slope deviations of the roughness a streak spreads across the view.
+const NWG_LAMP_CORRIDOR: f32 = 4.5;
+/// The lights' pool in the body and foam, as a share of the light the bank takes.
+const NWG_POOL_GAIN: f32 = 0.6;
+
+/// Terrain's and the models' point-light falloff (`point_light_sum`).
+fn nwg_light_atten(d: f32) -> f32 {
+    return 1.0 / (0.7 * d + 0.03 * d * d);
+}
+
+/// The light from `l` the surface sends toward `v` per unit of the light's irradiance, both unit:
+/// GGX in slope space about world up, centred on the slope `ns` and spread by the roughness tensor
+/// `a2` (GGX α², world XZ: xx, zz, xz); Smith's G on the tensor along each direction, Schlick's F
+/// on the half vector. `D·G·F / (4·v.y)`.
+fn nwg_ggx(ns: vec2<f32>, v: vec3<f32>, l: vec3<f32>, a2: vec3<f32>) -> f32 {
+    if (l.y <= 0.0 || v.y <= 0.0) {
+        return 0.0;
+    }
+    let h = normalize(v + l);
+    if (h.y <= 1e-3) {
+        return 0.0;
+    }
+    let det = max(a2.x * a2.y - a2.z * a2.z, 1e-12);
+    let d = ns - h.xz / h.y;
+    let q = (a2.y * d.x * d.x - 2.0 * a2.z * d.x * d.y + a2.x * d.y * d.y) / det;
+    let c2 = h.y * h.y;
+    let dist = 1.0 / (3.14159265 * sqrt(det) * c2 * c2 * (1.0 + q) * (1.0 + q));
+    let pv = a2.x * v.x * v.x + 2.0 * a2.z * v.x * v.z + a2.y * v.z * v.z;
+    let pl = a2.x * l.x * l.x + 2.0 * a2.z * l.x * l.z + a2.y * l.z * l.z;
+    let lam_v = 0.5 * (sqrt(1.0 + pv / (v.y * v.y)) - 1.0);
+    let lam_l = 0.5 * (sqrt(1.0 + pl / (l.y * l.y)) - 1.0);
+    let f = F0_WATER + (1.0 - F0_WATER) * pow(1.0 - saturate(dot(v, h)), 5.0);
+    return dist * f / ((1.0 + lam_v + lam_l) * 4.0 * v.y);
+}
+
+/// The lights the pixel considers: the packed table's first entries, none from below the surface.
+fn nwg_light_count(world_pos: vec3<f32>) -> u32 {
+    if (!nwg_on(NWG_LIGHTS) || !nwg_above(world_pos)) {
+        return 0u;
+    }
+    return min(u32(max(wow_light.point_count.x, 0.0) + 0.5), NWG_LIGHTS_MAX);
+}
+
+/// The lights' irradiance on the surface point, in terrain's units (gamma, as `point_light_sum`
+/// adds it to a lit vertex), within each light's range and faded over its last quarter.
+fn nwg_pool(world_pos: vec3<f32>) -> vec3<f32> {
+    let count = nwg_light_count(world_pos);
+    var acc = vec3<f32>(0.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pr = wow_light.points[2u * i];
+        let lv = pr.xyz - world_pos;
+        let range = max(pr.w, 1.0);
+        let d2 = dot(lv, lv);
+        if (lv.y <= 0.0 || d2 >= range * range) {
+            continue;
+        }
+        let d = sqrt(d2);
+        let fade = 1.0 - smoothstep(0.75 * range, range, d);
+        acc += wow_light.points[2u * i + 1u].rgb * (nwg_light_atten(d) * (lv.y / d) * fade);
+    }
+    return acc;
+}
+
+/// The body's light `l` with the lights' pool `pool_g` ([`nwg_pool`]) added as the bank takes it:
+/// in gamma, to the in-scatter in the albedo's colour `a_g` and to foam's illuminant. Unchanged on a
+/// WMO interior pool, which keeps its authored body.
+fn nwg_light_pool(l: BodyLight, a_g: vec3<f32>, pool_g: vec3<f32>, unlit: bool) -> BodyLight {
+    if (unlit || max(pool_g.r, max(pool_g.g, pool_g.b)) < 1.0 / 1024.0) {
+        return l;
+    }
+    let k = NWG_POOL_GAIN * water_reflect.preview.gains.y;
+    var o = l;
+    o.in_scatter = water_dec(water_enc(l.in_scatter) + a_g * pool_g * k);
+    o.foam_irradiance = water_dec(water_enc(l.foam_irradiance) + pool_g * k);
+    return o;
+}
+
+/// The lights reflected at `world_pos` toward `to_view`, linear, before the fog: each light's lobe on
+/// the full band `n` and the tensor `a2`, widened by its disc, plus the soft column on the low band
+/// `n_lo`. `fr` is the pixel's footprint.
+fn nwg_lamps(
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    n_lo: vec3<f32>,
+    to_view: vec3<f32>,
+    a2: vec3<f32>,
+    fr: NwgFrame,
+) -> vec3<f32> {
+    let count = nwg_light_count(world_pos);
+    if (count == 0u) {
+        return vec3<f32>(0.0);
+    }
+    let eye = view.world_position.xyz;
+    let ve = world_pos.xz - eye.xz;
+    let s_e = length(ve);
+    let e = ve / max(s_e, 1e-4);
+    let ns = n.xz / max(n.y, 1e-3);
+    let ns_lo = n_lo.xz / max(n_lo.y, 1e-3);
+    // The column's tensor: α² along the view's heading and across it.
+    let ta = NWG_LAMP_TAIL_A2;
+    let tail = vec3<f32>(
+        ta.y + (ta.x - ta.y) * e.x * e.x,
+        ta.y + (ta.x - ta.y) * e.y * e.y,
+        (ta.x - ta.y) * e.x * e.y,
+    );
+    // The widest the lobes spread across the view, in slope.
+    let spread = sqrt(max(a2.x, a2.y) + ta.y);
+    var acc = vec3<f32>(0.0);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let pr = wow_light.points[2u * i];
+        let lv = pr.xyz - world_pos;
+        if (lv.y < 0.05) {
+            continue;
+        }
+        // Only between the eye and the lamp, near the vertical plane through both.
+        let el = pr.xz - eye.xz;
+        let len_el = length(el);
+        let u = el / max(len_el, 1e-4);
+        let along = dot(ve, u);
+        if (along < 0.0 || along > len_el + 2.0) {
+            continue;
+        }
+        let s_l = length(lv.xz);
+        let lateral = abs(ve.x * u.y - ve.y * u.x);
+        let width = NWG_LAMP_CORRIDOR * spread * s_e * s_l / max(s_e + s_l, 1e-3)
+            + NWG_LAMP_RADIUS_YD + 2.0 * fr.major;
+        if (lateral > width) {
+            continue;
+        }
+        let d = length(lv);
+        let l = lv / d;
+        let rgb = water_dec(min(wow_light.points[2u * i + 1u].rgb, vec3<f32>(4.0)));
+        let disc = 0.25 * (NWG_LAMP_RADIUS_YD / d) * (NWG_LAMP_RADIUS_YD / d);
+        let a = a2 + vec3<f32>(disc, disc, 0.0);
+        let lobe = nwg_ggx(ns, to_view, l, a) + NWG_LAMP_TAIL * nwg_ggx(ns_lo, to_view, l, a + tail);
+        acc += rgb * (nwg_light_atten(d) * lobe);
+    }
+    // Indoors (a WMO interior pool) the room's lights are on whatever the hour.
+    let night = select(mix(NWG_LAMP_DAY, 1.0, saturate(wow_light.grade.x)), 1.0, w.path.x > 1.5);
+    return acc * (night * water_reflect.preview.gains.y);
+}
+
+// ---- sparkles (SPEC-5) ---------------------------------------------------------------------------
+//
+// The glint lobe's unresolved share drawn as facets: a world lattice at two power-of-two cell sizes,
+// at least `NWG_SPARK_CELL` pixels along the footprint's long axis and blended between, so a sparkle
+// stays where it is on the water as the camera moves. Each cell holds one candidate a time slot,
+// hashed in place, lit with the chance that keeps the lobe's energy: a sparkle is a bright point of
+// fixed radiance, and the lobe decides how many there are. The cells are square on the water, so at
+// a grazing view they span more pixels across the screen than up it, and far down a glitter path
+// the sparkles lie as short horizontal flecks.
+
+/// A cell's least extent along the footprint's long axis, pixels, and in yards: below a few
+/// centimetres the world position's own precision far from the map's centre would move the points.
+const NWG_SPARK_CELL: f32 = 2.0;
+const NWG_SPARK_CELL_MIN_YD: f32 = 0.04;
+/// A sparkle's radius, in cells; with the jitter it stays inside its cell.
+const NWG_SPARK_RADIUS: f32 = 0.25;
+/// The share of the lobe's unresolved light the sparkles carry.
+const NWG_SPARK_SHARE: f32 = 0.35;
+/// A sparkle's luminance over display white.
+const NWG_SPARK_RADIANCE: f32 = 6.0;
+/// The time slots per clock period, the lowest and the highest a cell takes.
+const NWG_SPARK_RATE: vec2<f32> = vec2<f32>(100.0, 160.0);
+
+/// What the sparkles add to the glint, and the share of the smooth glint that stays.
+struct NwgSparkle {
+    add: vec3<f32>,
+    keep: f32,
+};
+
+/// One lattice level of cell `cell` yards: the pixel's own cell's sparkle, as luminance, carrying
+/// `mean` on average; `aa` the soft edge in cells.
+fn nwg_spark_level(xz: vec2<f32>, cell: f32, mean: f32, aa: f32, salt: u32) -> f32 {
+    let g = xz / cell;
+    let c = vec2<i32>(floor(g));
+    // The point's area (π r², 0.196 of the cell) and its twinkle (sin², half on average).
+    let p = min(mean / (0.098 * NWG_SPARK_RADIANCE), 1.0);
+    if (p <= 0.0) {
+        return 0.0;
+    }
+    // The cell's rate and phase, then this slot's chance and spot, from two hashes.
+    let hc = nwg_hash(c, salt);
+    let m = floor(mix(NWG_SPARK_RATE.x, NWG_SPARK_RATE.y, nwg_field(hc, 0u, 16u)));
+    let tt = m * nwg_phase() + nwg_field(hc, 16u, 16u);
+    let slot = i32(u32(tt) % u32(m));
+    let hs = nwg_hash(c + vec2<i32>(slot * 7, slot * 13), salt + 1u);
+    if (nwg_field(hs, 0u, 16u) >= p) {
+        return 0.0;
+    }
+    let at = vec2<f32>(c) + vec2<f32>(0.5)
+        + (vec2<f32>(nwg_field(hs, 16u, 8u), nwg_field(hs, 24u, 8u)) - 0.5)
+            * (1.0 - 2.0 * NWG_SPARK_RADIUS);
+    let cover = 1.0 - smoothstep(NWG_SPARK_RADIUS - aa, NWG_SPARK_RADIUS + aa, length(g - at));
+    let twinkle = sin(3.14159265 * fract(tt));
+    return cover * twinkle * twinkle * (mean / (0.098 * p));
+}
+
+/// The sparkles on the glint `glint` (linear, fogged, before the knee) where `unresolved` of the
+/// surface's roughness is beyond the pixel (`WaterSurface::rho_a`); `fr` the footprint. High only.
+fn nwg_sparkles(xz: vec2<f32>, fr: NwgFrame, glint: vec3<f32>, unresolved: f32) -> NwgSparkle {
+    var o = NwgSparkle(vec3<f32>(0.0), 1.0);
+    if (!NWG_SPARKLES_TIER || !nwg_on(NWG_SPARKLES)) {
+        return o;
+    }
+    let lum = luma709(glint);
+    let share = NWG_SPARK_SHARE * saturate(unresolved) * water_reflect.preview.gains.z;
+    if (lum * share < 1e-3) {
+        return o;
+    }
+    o.keep = 1.0 - share;
+    let lv = log2(max(fr.major * NWG_SPARK_CELL, NWG_SPARK_CELL_MIN_YD));
+    let l0 = floor(lv);
+    let t = lv - l0;
+    let fine = exp2(l0 + 1.0);
+    let mean = share * lum;
+    let a = nwg_spark_level(xz, fine, mean, fr.major / fine, 60u);
+    let b = nwg_spark_level(xz, 2.0 * fine, mean, 0.5 * fr.major / fine, 70u);
+    o.add = glint * (mix(a, b, t) / lum);
+    return o;
+}
+
+// ---- crest glow (BODY-4) -------------------------------------------------------------------------
+
+/// The crest glow's peak over the celestial tint, linear, and how steeply a face must turn to the
+/// eye to carry it.
+const NWG_SSS_GAIN: f32 = 0.35;
+const NWG_SSS_SLOPE: f32 = 7.0;
+
+/// The low celestial sun seen through wave faces turned toward the eye, linear, before the fog and
+/// the surface's (1 − F): the hue of the shallow swatch `shallow_g` (gamma, the zone's own) at unit
+/// luminance under the celestial tint, on the resolved low band `n_lo`'s faces, looking toward the
+/// sun, under the sun's reach and the body's sun visibility `vis_b`.
+fn nwg_crest_glow(
+    world_pos: vec3<f32>,
+    n_lo: vec3<f32>,
+    to_view: vec3<f32>,
+    shallow_g: vec3<f32>,
+    vis_b: f32,
+) -> vec3<f32> {
+    let sun = water_reflect.sun;
+    let len = length(sun.xyz);
+    if (!nwg_on(NWG_SSS) || len < 1e-4 || sun.w <= 0.0 || !nwg_above(world_pos)) {
+        return vec3<f32>(0.0);
+    }
+    let l = sun.xyz / len;
+    let low = smoothstep(-0.02, 0.05, l.y) * (1.0 - smoothstep(0.25, 0.6, l.y));
+    let v_xz = normalize(to_view.xz + vec2<f32>(1e-6, 0.0));
+    let toward = dot(-v_xz, normalize(l.xz + vec2<f32>(1e-6, 0.0)));
+    let face = saturate(dot(n_lo.xz, v_xz) * NWG_SSS_SLOPE);
+    if (low <= 0.0 || toward <= 0.0 || face <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let back = pow(toward, 5.0);
+    let s = water_dec(shallow_g);
+    let lum = luma709(s);
+    let hue = select(vec3<f32>(1.0), s / max(lum, 1e-4), lum > 1e-4);
+    return hue * water_dec(wow_light.light_spec.rgb)
+        * (NWG_SSS_GAIN * face * face * back * low * sun.w * vis_b);
+}
+
+// ---- mist (WX-2) ---------------------------------------------------------------------------------
+
+/// The mist layer's depth over the water, yards; its extinction per yard at full density; the most
+/// of the surface it hides.
+const NWG_MIST_LAYER_YD: f32 = 2.5;
+const NWG_MIST_SIGMA: f32 = 0.0045;
+const NWG_MIST_MAX: f32 = 0.75;
+/// The scene fog's end, yards, over which the fog counts from thick (the near end) to none.
+const NWG_MIST_FOG_YD: vec2<f32> = vec2<f32>(80.0, 250.0);
+
+/// The mist between the eye and the surface point: rgb its colour (linear, before the surface's
+/// fog), a its cover. The view ray crosses the layer for its last `NWG_MIST_LAYER_YD` of height;
+/// the density follows the storm, the rain, a low sun and a near fog end; the colour is the scene
+/// fog's, warmed toward a low sun. Thinned within 6 yd of the shore, so it does not end in a line
+/// where the water meets the bank.
+fn nwg_mist(world_pos: vec3<f32>, to_view: vec3<f32>, to_shore: f32) -> vec4<f32> {
+    let eye = view.world_position.xyz;
+    let dy = eye.y - world_pos.y;
+    if (!nwg_on(NWG_MIST) || dy <= 0.0 || w.path.x > 1.5) {
+        return vec4<f32>(0.0);
+    }
+    let wx = nwg_wx();
+    let fog = wow_light.fog_color;
+    let thick = select(0.0, 1.0 - smoothstep(NWG_MIST_FOG_YD.x, NWG_MIST_FOG_YD.y, wow_light.fog_params.y),
+        fog.w > 0.5);
+    let sun = water_reflect.sun;
+    let sun_l = sun.xyz / max(length(sun.xyz), 1e-4);
+    let low = smoothstep(-0.12, 0.0, sun_l.y) * (1.0 - smoothstep(0.08, 0.3, sun_l.y));
+    let m = max(max(0.6 * wx.w, 0.6 * wx.x), max(0.45 * low, 0.7 * thick));
+    if (m <= 0.0) {
+        return vec4<f32>(0.0);
+    }
+    let path = distance(eye, world_pos) * min(1.0, NWG_MIST_LAYER_YD / dy);
+    let cover = (1.0 - exp(-NWG_MIST_SIGMA * m * path)) * NWG_MIST_MAX
+        * smoothstep(0.0, 6.0, to_shore);
+    let forward = pow(saturate(dot(-to_view, sun_l)), 8.0) * low * sun.w;
+    let colour = water_dec(fog.rgb) + water_dec(wow_light.light_spec.rgb) * (0.3 * forward);
+    return vec4<f32>(colour, cover);
+}
+
+// ---- the specular and the glow (FND-3) -----------------------------------------------------------
+
+/// The highlight's knee, linear: the brightest channel approaches it and the hue holds (the waves
+/// module's `WG_SPEC_KNEE`).
+const NWG_SPEC_KNEE: f32 = 1.4;
+
+/// The specular `c` (linear) shaped for the gamma target: a soft knee on its brightest channel
+/// toward [`NWG_SPEC_KNEE`], the others keeping their ratio to it.
+fn nwg_spec_knee(c: vec3<f32>) -> vec3<f32> {
+    let m = max(c.r, max(c.g, c.b));
+    if (m <= 1e-6) {
+        return vec3<f32>(0.0);
+    }
+    return c * (NWG_SPEC_KNEE * (1.0 - exp(-m / NWG_SPEC_KNEE)) / m);
+}
+
+/// All the specular at the pixel before its knee, linear: the glint `glint` (fogged) less the share
+/// the sparkles take, the sparkles, and the lights reflected (fogged by `fog_f`).
+fn nwg_spec_hdr(
+    glint: vec3<f32>,
+    world_pos: vec3<f32>,
+    n: vec3<f32>,
+    n_lo: vec3<f32>,
+    to_view: vec3<f32>,
+    surf: WaterSurface,
+    fr: NwgFrame,
+    fog_f: f32,
+) -> vec3<f32> {
+    let sp = nwg_sparkles(world_pos.xz, fr, glint, surf.rho_a);
+    let lamps = nwg_lamps(world_pos, n, n_lo, to_view, surf.a2, fr);
+    return glint * sp.keep + sp.add + lamps * fog_f;
+}
+
+/// The glow's excess for the pixel: the specular the knee removed `e_spec` (already scaled by the
+/// share of the pixel the surface shows), and whatever the composite `C = l + t·bed` still holds
+/// above display white, which the glow's clamped taps cannot see.
+fn nwg_glow_excess(a: WaterLayer, bed: vec3<f32>, e_spec: f32) -> f32 {
+    if (!nwg_on(NWG_GLOW)) {
+        return 0.0;
+    }
+    return e_spec + max(luma709(a.l + a.t * bed) - 1.0, 0.0);
+}
+
+#ifdef WATER_GLOW_STORE
+// The water's highlight excess for the glow, a quarter of the view's resolution
+// (`ffx_glow::quarter_size`), 16.16 fixed point, summed over each texel's 4×4 pixels; cleared
+// before the water draws and read by FFXGlow's water downsample.
+@group(#{MATERIAL_BIND_GROUP}) @binding(118) var<storage, read_write> water_glow_acc: array<atomic<u32>>;
+
+/// The accumulator's fixed point, and the most one pixel adds: 16 pixels a texel stay below 2³².
+const NWG_GLOW_FIXED: f32 = 65536.0;
+const NWG_GLOW_MAX: f32 = 256.0;
+
+/// Add the excess `e` of the pixel at `frag_xy` to its quarter texel.
+fn nwg_glow_add(frag_xy: vec2<f32>, e: f32) {
+    if (e <= 0.0) {
+        return;
+    }
+    let q = max(vec2<u32>(view.viewport.zw) / 4u, vec2<u32>(8u));
+    let p = min(vec2<u32>(max(frag_xy - view.viewport.xy, vec2<f32>(0.0))) / 4u, q - 1u);
+    let i = p.y * q.x + p.x;
+    if (i < arrayLength(&water_glow_acc)) {
+        atomicAdd(&water_glow_acc[i], u32(min(e, NWG_GLOW_MAX) * NWG_GLOW_FIXED + 0.5));
+    }
+}
+#endif
+
+
+#endif // WATER_PREVIEW
+
+
 fn stylised_water(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
@@ -4755,6 +7598,15 @@ fn stylised_water(
     // uniform control flow.
     let facet_n = surface_normal(world_pos);
     let flat_n = select(facet_n, normalize(smooth_normal), dot(smooth_normal, smooth_normal) > 0.25);
+#ifdef WATER_PREVIEW
+    // The preview's derivatives, while control flow is uniform: the world position's screen
+    // derivatives and the pixel's footprint on the water, long and short ([`NwgFrame`]).
+    let pv_dp_dx = dpdx(world_pos);
+    let pv_dp_dy = dpdy(world_pos);
+    let pv_lx = length(pv_dp_dx.xz);
+    let pv_ly = length(pv_dp_dy.xz);
+    let pv_fr = NwgFrame(max(max(pv_lx, pv_ly), 1e-6), max(min(pv_lx, pv_ly), 1e-6));
+#endif
 #ifndef WATER_REFRACT
     // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
     let snap_px = water_snapshot_px(frag_coord);
@@ -4799,12 +7651,32 @@ fn stylised_water(
 #ifdef WATER_PREVIEW
     // `waves`: the wind's field around the same octaves ([`water_surface_wg`]); a uniform branch,
     // so both arms' implicit-LOD taps stay legal.
+    // `wake`: every live swimmer's and ring's analytic wake over the field ([`wake_at`]);
+    // `rivers`/`falls`: the current's and the falls' slope and roughness ([`rivers_falls`]).
+    let wk = wake_at(xz, world_pos.y, pv_fr.major);
+    let rf = rivers_falls(RfIn(
+        world_pos,
+        flow,
+        flat_n,
+        select(bi.fallback_z, max(sb.vertical, 0.0), sb.known),
+        select(0.0, 1.0, sb.known),
+        pv_to_shore(shore, shore_offset),
+        normalize(view.world_position.xyz - world_pos),
+        pv_dp_dx,
+        pv_dp_dy,
+    ));
+    let pv_slope = wake_slope * wk.keep + wu_wake_tilt(wk) + rf.slope;
     var surf: WaterSurface;
     if (pv_on(PV_WAVES)) {
-        surf = water_surface_wg(xz, flow, wake_slope, wg_wave_kind(flow, shore, sb, tilt));
+        surf = water_surface_wg(xz, flow, pv_slope, wg_wave_kind(flow, shore, sb, tilt));
     } else {
-        surf = water_surface(xz, flow, wake_slope);
+        surf = water_surface(xz, flow, pv_slope);
     }
+    // The river's churn, then rain and snow ([`nwg_weather_surface`]), on the final roughness.
+    surf = nwg_weather_surface(surface_roughen(surf, rf.add2), xz, pv_fr);
+    // Held across the tiers to the composite in five words.
+    let rf_held = rf_hold(rf);
+    let wk_held = pack2x16float(vec2<f32>(wk.foam, wk.aer));
 #else
     let surf = water_surface(xz, flow, wake_slope);
 #endif
@@ -4827,7 +7699,13 @@ fn stylised_water(
 #endif
 
     // The wake rides the body's column with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
+#ifdef WATER_PREVIEW
+    // `wake`: the body's depth push cut, the analytic wake reading through the normal instead.
+    let wake_push = wake_height * WAKE_BODY_DEPTH
+        * select(1.0, water_reflect.preview.wake.cfg.w, pv_on(PV_WAKE));
+#else
     let wake_push = wake_height * WAKE_BODY_DEPTH;
+#endif
     // The sun's bearing, taken flat — see [`BODY_RIPPLE_SHADE`]. The epsilon is for the frame at
     // startup before the lanes are written, and for the instant the sun crosses the zenith.
     let sun_xz = normalize(water_reflect.sun.xz + vec2<f32>(1e-4, 1e-4));
@@ -4839,6 +7717,26 @@ fn stylised_water(
     // `shore`: the contact geometry while derivatives are defined, held across the tiers.
     let sc_held = sc_geometry_hold(sc_geometry(world_pos, sb, bi.fallback_z));
 #endif
+#ifdef WATER_PREVIEW
+    // `caustics`: the bed under the lighting sun's caustic net ([`nwg_caustic_gain`]), which reads
+    // the body's sun visibility first; `lights`: their warm pool in the body ([`nwg_light_pool`]).
+    let vis = body_visibility(world_pos, frag_coord);
+#ifdef WATER_REFRACT
+    let held = body_hold(
+        water_bed(water_snapshot_px(frag_coord), optics.bed_uv_r, optics.accept)
+            * nwg_caustic_gain(world_pos, sb, optics.z, flow, bi.sig_turb, vis, bi, pv_fr),
+        optics.t_bed,
+        optics.w_in,
+    );
+#endif
+    let body_light = nwg_light_pool(
+        water_body_light(optics, world_pos, vis, bi, wave_tilt),
+        optics.a_g,
+        nwg_pool(world_pos),
+        bi.unlit,
+    );
+    let pv_vis_b = vis.b;
+#else
 #ifdef WATER_REFRACT
     // The refracted bed, read here where its lookup is made, held with the bed's transmittance
     // ([`body_hold`]) across the tiers to the composite.
@@ -4852,6 +7750,7 @@ fn stylised_water(
     // over the surface, and the sun under the terrain's shadow.
     let vis = body_visibility(world_pos, frag_coord);
     let body_light = water_body_light(optics, world_pos, vis, bi, wave_tilt);
+#endif
     // Held to the composite in half precision ([`light_hold`]).
     let light_held = light_hold(body_light);
 
@@ -4884,7 +7783,15 @@ fn stylised_water(
     // tiers below are answers to *what* is reflected, and they share it. The share is
     // [`water_fresnel`] on the filtered normal at the surface's roughness, under the grazing limit
     // `look.composite.x` (1 for none).
+#ifdef WATER_PREVIEW
+    // A falling sheet takes its own normal for the reflectance ([`rf_fresnel_normal`]).
+    let f_surf = min(
+        water_fresnel(dot(rf_fresnel_normal(n, rf.sheet_n, rf.sheet), to_view), surf.alpha),
+        water_reflect.look.composite.x,
+    );
+#else
     let f_surf = min(water_fresnel(dot(n, to_view), surf.alpha), water_reflect.look.composite.x);
+#endif
 
     // ---- the cubemap probe, tier four ---------------------------------------------------------
     //
@@ -4956,7 +7863,12 @@ fn stylised_water(
         wsum = wsum + w[k];
         cover = cover + wt[k];
     }
+#ifdef WATER_PREVIEW
+    // `window`: from below, the internal mirror replaces the probe.
+    if (wsum > 1e-8 && (eye_above || !(pv_on(PV_WINDOW) && pv_eye_wet()))) {
+#else
     if (wsum > 1e-8) {
+#endif
         // The cube is read through a FLATTER normal than the water draws with — see
         // `liquid::probe::probe_normal` for the measurement and for why a prefiltered cube is the
         // real answer.
@@ -5343,10 +8255,19 @@ fn stylised_water(
     // same surface to be white, and adding them blows out where a swimmer crosses a waterline —
     // which is precisely where a player spends their time in the water.
 #ifdef WATER_PREVIEW
+    // `wake_foam`: the collar, bow crest, trail lace and splash rings beside them.
+    let wk_late = unpack2x16float(wk_held);
     let foam = max(
         max(max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL), sc.foam),
-        wake_foam * WAKE_FOAM_LEVEL,
+        max(wake_foam * WAKE_FOAM_LEVEL, wk_late.x),
     );
+    let rf_late = rf_release(rf_held);
+    // `window`: the underside seen from below, Snell's window over the internal mirror. Every
+    // derivative is taken above, so this per-fragment return is safe.
+    if (!eye_above && pv_eye_wet() && !bi.unlit && pv_on(PV_WINDOW)) {
+        return underside_out(world_pos, frag_coord, n, surf.n_lo, to_view, surf.alpha, to_light,
+            sun_reach, light_release(light_held), fog, foam, sc.cover, bi.fallback_z);
+    }
 #else
     let foam = max(
         max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL),
@@ -5454,7 +8375,7 @@ fn stylised_water(
     // `glint`: the sun's and the moon's GGX lobes on the surface's roughness ([`wg_glints`]).
     var spec_glint: vec3<f32>;
     if (pv_on(PV_GLINT)) {
-        spec_glint = wg_glints(n, to_view, to_light, to_moon, surf, wg_open, wg_lit_sky(eye_above, room_fog));
+        spec_glint = wg_glints_hdr(n, to_view, to_light, to_moon, surf, wg_open, wg_lit_sky(eye_above, room_fog));
     } else {
         spec_glint = water_dec(wow_light.light_spec.rgb)
             * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
@@ -5463,7 +8384,16 @@ fn stylised_water(
                 * glint_lobe_p1(n, to_moon, to_view, MOON_SPEC_POWER, lost2)
                 * (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w);
     }
-    let spec_l = spec_glint * fog.f;
+    // Every highlight before one knee: the glint less the sparkles' share, the sparkles, the lamps
+    // ([`nwg_spec_hdr`]); what the knee takes off is the glow's excess. The crest glow is body light.
+    let spec_hdr = nwg_spec_hdr(spec_glint * fog.f, world_pos, n, n_slide, to_view, surf, pv_fr, fog.f);
+    var spec_shown = spec_hdr;
+    if (pv_on(PV_GLINT | PV_SPARKLES | PV_LIGHTS)) {
+        spec_shown = wg_spec_shape(spec_hdr, 1.0 - surf.rho_a);
+    }
+    let pv_e_spec = max(luma709(spec_hdr) - luma709(spec_shown), 0.0);
+    let spec_l = spec_shown
+        + nwg_crest_glow(world_pos, n_slide, to_view, bi.s, pv_vis_b) * ((1.0 - f_surf) * fog.f);
 #else
     let spec_l = (water_dec(wow_light.light_spec.rgb)
         * glint_lobe_p1(n, to_light, to_view, SPEC_POWER, lost2)
@@ -5523,6 +8453,27 @@ fn stylised_water(
     if (!eye_above) {
         refl_out = fog_diffuse(refl_g, fog.f, fog.g);
     }
+#ifdef WATER_PREVIEW
+    // `rivers`/`falls`: a sheet's glassy tongue and aerated water in the body ([`rf_body`]), the
+    // lip's light with the glints.
+    let rf_b = rf_body(
+        body.t_bed,
+        body.w_in,
+        light.in_scatter,
+        light.foam,
+        vec4<f32>(bi.sig_abs, bi.sig_turb),
+        rf_late,
+    );
+    let spec_all = spec_l * (1.0 - rf_late.sheet) + rf_lip_light(rf_late, light.foam) * fog.f;
+    var layer = layer_surface(
+        f_surf,
+        refl_out,
+        spec_all,
+        fog_diffuse(rf_b.in_scatter, fog.f, fog.g),
+        vec3<f32>(rf_b.w_in),
+        rf_b.t_bed,
+    );
+#else
     var layer = layer_surface(
         f_surf,
         refl_out,
@@ -5531,24 +8482,47 @@ fn stylised_water(
         vec3<f32>(body.w_in),
         body.t_bed,
     );
+#endif
 #ifdef WATER_PREVIEW
     // `shore`: the edge's coverage with the swash's draw-back, then the wet bed, film and rim.
     layer = layer_cover(layer, sc.cover);
-    layer = sc_layer(layer, sc, f_surf, refl_out, spec_l);
+    layer = sc_layer(layer, sc, f_surf, refl_out, spec_all);
+    // `wake_foam`: the kicked water's bubble cloud, the body paled toward foam, under the foam.
+    if (wk_late.y > 0.0) {
+        let aer_l = fog_diffuse(
+            mix(light.in_scatter * 1.6, water_dec(FOAM_COLOR) * light.foam, WU_AER_MILK),
+            fog.f,
+            fog.g,
+        );
+        layer = layer_over(aer_l, wk_late.y, layer);
+    }
 #else
     layer = layer_cover(layer, soft);
 #endif
     // Foam is coverage: spray over the surface, hiding what is under it.
     // Lit by the body's light in the terrain light's colour (warm at dusk, blue under the moon),
     // and fogged as a surface is.
-    if (foam > 0.0) {
 #ifdef WATER_PREVIEW
-        let foam_l = fog_diffuse(sc.foam_albedo * light.foam, fog.f, fog.g);
+    // The shore's, the wake's and the river's foam as one cover, the river's two-tone light by its
+    // share ([`rf_foam_over`]); then the plunge's mist and the weather's ([`nwg_mist`]).
+    let rf_over = rf_foam_over(foam, rf_late);
+    if (rf_over.w > 0.0) {
+        let foam_l = fog_diffuse(sc.foam_albedo * light.foam * rf_over.rgb, fog.f, fog.g);
+        layer = layer_over(foam_l, rf_over.w, layer);
+    }
+    if (rf_late.mist > 0.0) {
+        layer = layer_over(fog_diffuse(rf_mist_light(light.foam), fog.f, fog.g), rf_late.mist, layer);
+    }
+    let nwg_m = nwg_mist(world_pos, to_view, to_shore);
+    if (nwg_m.a > 0.0) {
+        layer = layer_over(fog_diffuse(nwg_m.rgb, fog.f, fog.g), nwg_m.a, layer);
+    }
 #else
+    if (foam > 0.0) {
         let foam_l = fog_diffuse(water_dec(FOAM_COLOR) * light.foam, fog.f, fog.g);
-#endif
         layer = layer_over(foam_l, foam, layer);
     }
+#endif
 #ifdef WATER_REFRACT
     let snap_px = water_snapshot_px(frag_coord);
     var bed_out = body.bed;
@@ -5562,6 +8536,16 @@ fn stylised_water(
     } else if (view_id == WV_DISCARD) {
         return vec4<f32>(0.0);
     }
+#endif
+#ifdef WATER_PREVIEW
+    // `glow`: what the knee took off the highlights where the surface shows (not under foam, mist
+    // or the edge's draw-back), and whatever the composite still holds above white, into the
+    // quarter-resolution accumulator the Improved FFXGlow combine adds as light.
+    let pv_cut = sc.cover * (1.0 - rf_over.w) * (1.0 - rf_late.mist) * (1.0 - nwg_m.a);
+    let pv_glow = nwg_glow_excess(layer, bed_out, pv_e_spec * pv_cut);
+#ifdef WATER_GLOW_STORE
+    nwg_glow_add(frag_coord, pv_glow);
+#endif
 #endif
     return water_output(layer, frag_coord, snap_px, bed_out, 1.0);
 }
@@ -5697,6 +8681,10 @@ fn swatch_at(shallow: vec4<f32>, deep: vec4<f32>, v: f32, ocean: bool) -> vec4<f
 }
 
 @fragment
+#ifdef WATER_GLOW_STORE
+// The glow store is a side effect: without the forced early test, water behind a hill would add.
+@early_depth_test(force)
+#endif
 fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
     // The far-clip wall, as terrain and models: discard beyond `fog_params.w` (0 disables it).
     if (wow_light.fog_params.w > 0.0) {

@@ -15,15 +15,18 @@ use bevy::render::camera::ExtractedCamera;
 use bevy::render::diagnostic::RecordDiagnostics;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
+use bevy::render::render_asset::RenderAssets;
 use bevy::render::render_graph::{
     NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel, ViewNode, ViewNodeRunner,
 };
 use bevy::render::render_phase::{TrackedRenderPass, ViewSortedRenderPhases};
-use bevy::render::render_resource::binding_types::{sampler, texture_2d, uniform_buffer_sized};
+use bevy::render::render_resource::binding_types::{
+    sampler, storage_buffer_read_only_sized, texture_2d, uniform_buffer_sized,
+};
 use bevy::render::render_resource::*;
 use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::sync_world::MainEntity;
-use bevy::render::texture::{CachedTexture, TextureCache};
+use bevy::render::texture::{CachedTexture, GpuImage, TextureCache};
 use bevy::render::view::{ExtractedView, ViewDepthTexture, ViewTarget};
 use bevy::render::{Render, RenderApp, RenderStartup, RenderSystems};
 
@@ -287,6 +290,42 @@ fn sync_wave(
     }
 }
 
+/// The Improved Water preview's underwater combine (`fs_combine_wave_improved`): the eye-below
+/// lanes (`liquid.wgsl`'s `UnderLanes`, 16 rows) and the opaque world's linear depth, written by
+/// the water plugin. While `lanes[18]` (`surface.z`, the eye in water with the preview's `tint`)
+/// is 0 or the depth is missing, the reference warp runs.
+#[derive(Resource, Clone, ExtractResource)]
+pub struct FfxUnderwater {
+    pub lanes: [f32; 64],
+    pub depth: Option<Handle<Image>>,
+}
+
+impl Default for FfxUnderwater {
+    fn default() -> Self {
+        Self {
+            lanes: [0.0; 64],
+            depth: None,
+        }
+    }
+}
+
+impl FfxUnderwater {
+    /// Whether the improved combine replaces the warp this frame.
+    fn armed(&self) -> bool {
+        self.lanes[18] > 0.5 && self.depth.is_some()
+    }
+}
+
+/// The Improved Water preview's glow (FND-3): the water's highlight excess per quarter texel
+/// (`liquid.wgsl`'s `water_glow_acc`), which the water downsample puts in the blur's alpha and the
+/// combine adds as light at `weight`, capped at `cap`. `None` keeps the reference glow.
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct FfxWaterGlow {
+    pub buf: Option<Buffer>,
+    pub weight: f32,
+    pub cap: f32,
+}
+
 /// Whether a view draws the warped combine: the WorldFrame pair (the glue pair reaches the same
 /// render, but the guard's in-world half `0x467d00` never trips there), [`FfxWave::active`], no
 /// ghost, whose `CFFXDeath::Render` (`0x6cdf20`) has one list and no guard, and a glow pass that
@@ -350,6 +389,10 @@ struct FfxGlowLabel;
 struct FfxGlowPipelines {
     layout_filter: BindGroupLayoutDescriptor,
     layout_combine: BindGroupLayoutDescriptor,
+    /// The improved underwater combine's: the combine's six, the eye-below lanes and the depth.
+    layout_combine_uw: BindGroupLayoutDescriptor,
+    /// The water downsample's: the filter's two and the glow accumulator at 8.
+    layout_filter_water: BindGroupLayoutDescriptor,
     sampler: Sampler,
     /// The 128×128 sine bump map, built once as the reference builds it (`0x6cbcf0`), and its
     /// sampler, which must repeat (`D3DTADDRESS_WRAP`, `0x5a2646`/`0x5a266a`): the texcoord spans
@@ -357,6 +400,8 @@ struct FfxGlowPipelines {
     wave_view: TextureView,
     wave_sampler: Sampler,
     downsample: CachedRenderPipelineId,
+    /// Box4 with the water's excess in alpha (`fs_downsample_water`).
+    downsample_water: CachedRenderPipelineId,
     gauss_h: CachedRenderPipelineId,
     gauss_v: CachedRenderPipelineId,
     combine: FfxCombinePipeline,
@@ -366,6 +411,7 @@ struct FfxGlowPipelines {
 /// `Write` view's HDR main texture ([`crate::final_pass`]), or a backdrop camera's UI target.
 struct FfxCombinePipeline {
     layout: BindGroupLayoutDescriptor,
+    layout_uw: BindGroupLayoutDescriptor,
     shader: Handle<Shader>,
     fullscreen: FullscreenShader,
 }
@@ -381,28 +427,42 @@ struct FfxCombineKey {
     inside_2d: Option<u32>,
     /// The underwater entry (`fs_combine_wave`), its own pipeline so a dry frame pays nothing.
     wave: bool,
+    /// The Improved Water preview's underwater entry (`fs_combine_wave_improved`), with `wave`.
+    improved: bool,
+    /// The preview's water glow over the combine (`WATER_GLOW`).
+    water: bool,
 }
 
 impl SpecializedRenderPipeline for FfxCombinePipeline {
     type Key = FfxCombineKey;
 
     fn specialize(&self, key: Self::Key) -> RenderPipelineDescriptor {
-        let (label, entry) = if key.wave {
-            ("ffx_glow_combine_wave", "fs_combine_wave")
-        } else {
-            ("ffx_glow_combine", "fs_combine")
+        let (label, entry) = match (key.wave, key.improved) {
+            (true, true) => ("ffx_glow_combine_wave_improved", "fs_combine_wave_improved"),
+            (true, false) => ("ffx_glow_combine_wave", "fs_combine_wave"),
+            _ => ("ffx_glow_combine", "fs_combine"),
         };
+        let mut shader_defs: Vec<bevy::shader::ShaderDefVal> = Vec::new();
+        if key.gamma_out {
+            shader_defs.push("GAMMA_OUT".into());
+        }
+        if key.improved {
+            shader_defs.push("UNDERWATER_IMPROVED".into());
+        }
+        if key.water {
+            shader_defs.push("WATER_GLOW".into());
+        }
         RenderPipelineDescriptor {
             label: Some(label.into()),
-            layout: vec![self.layout.clone()],
+            layout: vec![if key.improved {
+                self.layout_uw.clone()
+            } else {
+                self.layout.clone()
+            }],
             vertex: self.fullscreen.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: self.shader.clone(),
-                shader_defs: if key.gamma_out {
-                    vec!["GAMMA_OUT".into()]
-                } else {
-                    vec![]
-                },
+                shader_defs,
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format: key.format,
@@ -464,6 +524,33 @@ fn init_pipelines(
             ),
         ),
     );
+    let layout_combine_uw = BindGroupLayoutDescriptor::new(
+        "ffx_glow_combine_uw_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
+                texture_2d(TextureSampleType::Float { filterable: true }),
+                sampler(SamplerBindingType::Filtering),
+                uniform_buffer_sized(false, Some(std::num::NonZero::new(256).unwrap())),
+                texture_2d(TextureSampleType::Float { filterable: false }),
+            ),
+        ),
+    );
+    let layout_filter_water = BindGroupLayoutDescriptor::new(
+        "ffx_glow_filter_water_layout",
+        &BindGroupLayoutEntries::with_indices(
+            ShaderStages::FRAGMENT,
+            (
+                (0, texture_2d(TextureSampleType::Float { filterable: true })),
+                (1, sampler(SamplerBindingType::Filtering)),
+                (8, storage_buffer_read_only_sized(false, None)),
+            ),
+        ),
+    );
     let sampler = render_device.create_sampler(&SamplerDescriptor {
         min_filter: FilterMode::Linear,
         mag_filter: FilterMode::Linear,
@@ -511,7 +598,11 @@ fn init_pipelines(
             vertex: fullscreen_shader.to_vertex_state(),
             fragment: Some(FragmentState {
                 shader: shader.clone(),
-                shader_defs: vec![],
+                shader_defs: if entry == "fs_downsample_water" {
+                    vec!["WATER_GLOW".into()]
+                } else {
+                    vec![]
+                },
                 entry_point: Some(entry.into()),
                 targets: vec![Some(ColorTargetState {
                     format: ViewTarget::TEXTURE_FORMAT_HDR,
@@ -527,22 +618,36 @@ fn init_pipelines(
         &layout_filter,
         "fs_downsample",
     ));
+    // Queued only while the preview's glow runs.
+    let downsample_water = if benilla_assets::preview::on(benilla_assets::preview::GLOW) {
+        pipeline_cache.queue_render_pipeline(pipeline(
+            "ffx_glow_downsample_water",
+            &layout_filter_water,
+            "fs_downsample_water",
+        ))
+    } else {
+        downsample
+    };
     let gauss_h =
         pipeline_cache.queue_render_pipeline(pipeline("ffx_glow_h", &layout_filter, "fs_gauss_h"));
     let gauss_v =
         pipeline_cache.queue_render_pipeline(pipeline("ffx_glow_v", &layout_filter, "fs_gauss_v"));
     let combine = FfxCombinePipeline {
         layout: layout_combine.clone(),
+        layout_uw: layout_combine_uw.clone(),
         shader,
         fullscreen: fullscreen_shader.clone(),
     };
     commands.insert_resource(FfxGlowPipelines {
         layout_filter,
         layout_combine,
+        layout_combine_uw,
+        layout_filter_water,
         sampler,
         wave_view,
         wave_sampler,
         downsample,
+        downsample_water,
         gauss_h,
         gauss_v,
         combine,
@@ -565,6 +670,8 @@ struct FfxGlowTextures {
     /// This view's combine pair, keyed on its camera's output (`FinalPassTarget::format`), or
     /// `None` while an [`FfxBackdrop`] claims the view.
     combine: Option<FfxCombinePair>,
+    /// The improved underwater combine's 256-byte uniform, [`FfxUnderwater::lanes`].
+    uw_buf: Buffer,
 }
 
 /// One view's dry and underwater combine pipelines, and the key they were specialised on.
@@ -572,18 +679,27 @@ struct FfxGlowTextures {
 struct FfxCombinePair {
     dry: CachedRenderPipelineId,
     wave: CachedRenderPipelineId,
+    /// The improved underwater entry; `wave` itself while the preview's `tint` is off.
+    wave_uw: CachedRenderPipelineId,
+    /// The dry and the warped entries with the preview's water glow; `dry` and `wave` while its
+    /// `glow` is off.
+    dry_water: CachedRenderPipelineId,
+    wave_water: CachedRenderPipelineId,
     format: TextureFormat,
     /// 1 for the combine's own pass, the view's count for a backdrop draw inside a 2D main pass.
     samples: u32,
 }
 
 impl FfxCombinePair {
-    /// The pipeline the pass-list swap selects: the underwater entry while the wave is armed.
-    fn armed(&self, wave: bool) -> CachedRenderPipelineId {
-        if wave {
-            self.wave
-        } else {
-            self.dry
+    /// The pipeline the pass-list swap selects: the underwater entry while the wave is armed, the
+    /// improved one where that is armed too.
+    fn armed(&self, wave: bool, improved: bool, water: bool) -> CachedRenderPipelineId {
+        match (wave, improved, water) {
+            (true, true, _) => self.wave_uw,
+            (true, false, false) => self.wave,
+            (true, false, true) => self.wave_water,
+            (false, _, false) => self.dry,
+            (false, _, true) => self.dry_water,
         }
     }
 }
@@ -613,7 +729,7 @@ impl CombineSpecializer<'_> {
         gamma_out: bool,
         inside_2d: Option<u32>,
     ) -> FfxCombinePair {
-        let mut key = |wave| {
+        let mut key = |wave, improved, water| {
             self.cache.specialize(
                 &self.pipeline_cache,
                 &self.pipelines.combine,
@@ -622,12 +738,20 @@ impl CombineSpecializer<'_> {
                     wave,
                     gamma_out,
                     inside_2d,
+                    improved,
+                    water,
                 },
             )
         };
+        // The preview's entries, only while its `tint` and `glow` run.
+        let improved = benilla_assets::preview::on(benilla_assets::preview::TINT);
+        let water = benilla_assets::preview::on(benilla_assets::preview::GLOW);
         FfxCombinePair {
-            dry: key(false),
-            wave: key(true),
+            dry: key(false, false, false),
+            wave: key(true, false, false),
+            wave_uw: key(true, improved, false),
+            dry_water: key(false, false, water),
+            wave_water: key(true, false, water),
             format,
             samples: inside_2d.unwrap_or(1),
         }
@@ -709,6 +833,12 @@ fn prepare_textures(
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let uw_buf = render_device.create_buffer(&BufferDescriptor {
+            label: Some("ffx_glow_underwater"),
+            size: 256,
+            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         commands.entity(entity).insert(FfxGlowTextures {
             quarter_a,
             quarter_b,
@@ -716,6 +846,7 @@ fn prepare_textures(
             gauss_h_bind,
             gauss_v_bind,
             combine,
+            uw_buf,
         });
     }
 }
@@ -830,8 +961,16 @@ impl ViewNode for FfxGlowNode {
         let pipelines = world.resource::<FfxGlowPipelines>();
         let pipeline_cache = world.resource::<PipelineCache>();
         let (uniform, wave) = live_combine(world, glow);
+        let (uniform, preview) = preview_combine(world, glow, wave, uniform);
+        let (uw, uw_depth, water_glow) = (preview.uw, preview.uw_depth, preview.water_glow);
+        let improved = uw_depth.is_some();
+        let water = water_glow.is_some();
         let (Some(downsample), Some(gauss_h), Some(gauss_v)) = (
-            pipeline_cache.get_render_pipeline(pipelines.downsample),
+            pipeline_cache.get_render_pipeline(if water {
+                pipelines.downsample_water
+            } else {
+                pipelines.downsample
+            }),
             pipeline_cache.get_render_pipeline(pipelines.gauss_h),
             pipeline_cache.get_render_pipeline(pipelines.gauss_v),
         ) else {
@@ -843,7 +982,9 @@ impl ViewNode for FfxGlowNode {
             None => None,
             Some(pair) => {
                 // The pass-list swap (`0x6cc630`): the two lists differ only in the combine.
-                let Some(combine) = pipeline_cache.get_render_pipeline(pair.armed(wave)) else {
+                let Some(combine) =
+                    pipeline_cache.get_render_pipeline(pair.armed(wave, improved, water))
+                else {
                     return Ok(());
                 };
                 Some((combine, FinalPassTarget::resolve(camera, view_target)))
@@ -860,11 +1001,22 @@ impl ViewNode for FfxGlowNode {
         if blur_read(&uniform) {
             let layout_filter = pipeline_cache.get_bind_group_layout(&pipelines.layout_filter);
             // Per frame: a `Write` view flips its main texture per call ([`FfxGlowTextures`]).
-            let down_bind = render_device.create_bind_group(
-                "ffx_glow_down_quarter",
-                &layout_filter,
-                &BindGroupEntries::sequential((source, &pipelines.sampler)),
-            );
+            let down_bind = match &water_glow {
+                Some((buf, ..)) => render_device.create_bind_group(
+                    "ffx_glow_down_quarter_water",
+                    &pipeline_cache.get_bind_group_layout(&pipelines.layout_filter_water),
+                    &BindGroupEntries::with_indices((
+                        (0, source),
+                        (1, &pipelines.sampler),
+                        (8, buf.as_entire_binding()),
+                    )),
+                ),
+                None => render_device.create_bind_group(
+                    "ffx_glow_down_quarter",
+                    &layout_filter,
+                    &BindGroupEntries::sequential((source, &pipelines.sampler)),
+                ),
+            };
 
             // source → ¼a (one Box4), ¼a → ¼b (Gauss H), ¼b → ¼a (Gauss V), each in its own
             // diagnostic span; the journal's `gpu_glow` column is their sum.
@@ -922,19 +1074,46 @@ impl ViewNode for FfxGlowNode {
             bytemuck::cast_slice(&uniform),
         );
         // The combine into the view's output, bound per frame as the downsample is.
-        let layout_combine = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
-        let bind = render_device.create_bind_group(
-            "ffx_glow_combine",
-            &layout_combine,
-            &BindGroupEntries::sequential((
-                out.source,
-                &pipelines.sampler,
-                &textures.quarter_a.default_view,
-                textures.gain_buf.as_entire_binding(),
-                &pipelines.wave_view,
-                &pipelines.wave_sampler,
-            )),
-        );
+        let bind = match (uw, uw_depth.as_ref()) {
+            (Some(uw), Some(depth)) => {
+                world.resource::<RenderQueue>().write_buffer(
+                    &textures.uw_buf,
+                    0,
+                    bytemuck::cast_slice(&uw.lanes),
+                );
+                let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine_uw);
+                render_device.create_bind_group(
+                    "ffx_glow_combine_uw",
+                    &layout,
+                    &BindGroupEntries::sequential((
+                        out.source,
+                        &pipelines.sampler,
+                        &textures.quarter_a.default_view,
+                        textures.gain_buf.as_entire_binding(),
+                        &pipelines.wave_view,
+                        &pipelines.wave_sampler,
+                        textures.uw_buf.as_entire_binding(),
+                        depth,
+                    )),
+                )
+            }
+            _ => {
+                let layout_combine =
+                    pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
+                render_device.create_bind_group(
+                    "ffx_glow_combine",
+                    &layout_combine,
+                    &BindGroupEntries::sequential((
+                        out.source,
+                        &pipelines.sampler,
+                        &textures.quarter_a.default_view,
+                        textures.gain_buf.as_entire_binding(),
+                        &pipelines.wave_view,
+                        &pipelines.wave_sampler,
+                    )),
+                )
+            }
+        };
         let scissor = out.scissor_rect();
         let mut pass = render_context
             .command_encoder()
@@ -957,10 +1136,54 @@ impl ViewNode for FfxGlowNode {
     }
 }
 
-/// Whether a combine reads the blur: only through `w` (`x`) and the haze (`z`), so with both zero
-/// the three filter passes (Box4, Gauss4 H and V) do not run.
+/// The Improved Water preview's inputs to a world view's combine this frame.
+struct PreviewCombine<'w> {
+    /// The underwater combine's lanes and the linear depth's view, while armed.
+    uw: Option<&'w FfxUnderwater>,
+    uw_depth: Option<TextureView>,
+    /// The water glow's accumulator, weight and cap, while armed.
+    water_glow: Option<(Buffer, f32, f32)>,
+}
+
+/// [`PreviewCombine`] for a view of `glow`'s pair with the warp `wave` armed, and the combine
+/// uniform with the water glow's weight and cap in `wave.zw`.
+fn preview_combine<'w>(
+    world: &'w World,
+    glow: &FfxGlow,
+    wave: bool,
+    mut uniform: [f32; 8],
+) -> ([f32; 8], PreviewCombine<'w>) {
+    let player = glow.state == FfxState::Player;
+    let uw = world
+        .get_resource::<FfxUnderwater>()
+        .filter(|u| player && wave && u.armed());
+    let uw_depth = uw
+        .and_then(|u| u.depth.as_ref())
+        .and_then(|h| world.resource::<RenderAssets<GpuImage>>().get(h))
+        .map(|g| g.texture_view.clone());
+    let water_glow = world
+        .get_resource::<FfxWaterGlow>()
+        .filter(|_| player)
+        .and_then(|g| g.buf.clone().map(|b| (b, g.weight, g.cap)));
+    if let Some((_, weight, cap)) = &water_glow {
+        uniform[6] = *weight;
+        uniform[7] = *cap;
+    }
+    (
+        uniform,
+        PreviewCombine {
+            uw,
+            uw_depth,
+            water_glow,
+        },
+    )
+}
+
+/// Whether a combine reads the blur: only through `w` (`x`), the haze (`z`) and the preview's water
+/// glow weight (`wave.z`), so with all zero the three filter passes (Box4, Gauss4 H and V) do not
+/// run.
 fn blur_read(uniform: &[f32; 8]) -> bool {
-    uniform[0] != 0.0 || uniform[2] != 0.0
+    uniform[0] != 0.0 || uniform[2] != 0.0 || uniform[6] != 0.0
 }
 
 /// One view's combine uniform and whether its underwater entry is armed, for both combine nodes.
@@ -1085,27 +1308,46 @@ impl ViewNode for FfxTransparent2dNode {
                 let pipelines = world.resource::<FfxGlowPipelines>();
                 let pipeline_cache = world.resource::<PipelineCache>();
                 let (uniform, wave) = live_combine(world, glow);
+                let (uniform, preview) = preview_combine(world, glow, wave, uniform);
+                let improved = preview.uw_depth.is_some();
+                let water = preview.water_glow.is_some();
                 // Still compiling: this frame has no world in it.
-                let combine = pipeline_cache.get_render_pipeline(view.pair.armed(wave))?;
-                world.resource::<RenderQueue>().write_buffer(
-                    &textures.gain_buf,
-                    0,
-                    bytemuck::cast_slice(&uniform),
-                );
-                let layout = pipeline_cache.get_bind_group_layout(&pipelines.layout_combine);
+                let combine =
+                    pipeline_cache.get_render_pipeline(view.pair.armed(wave, improved, water))?;
+                let queue = world.resource::<RenderQueue>();
+                queue.write_buffer(&textures.gain_buf, 0, bytemuck::cast_slice(&uniform));
                 // The world view's finished main texture and this frame's ¼-res blur, per frame.
-                let bind = render_context.render_device().create_bind_group(
-                    "ffx_glow_combine",
-                    &layout,
-                    &BindGroupEntries::sequential((
-                        world_target.main_texture_view(),
-                        &pipelines.sampler,
-                        &textures.quarter_a.default_view,
-                        textures.gain_buf.as_entire_binding(),
-                        &pipelines.wave_view,
-                        &pipelines.wave_sampler,
-                    )),
-                );
+                let bind = match (preview.uw, preview.uw_depth.as_ref()) {
+                    (Some(uw), Some(depth)) => {
+                        queue.write_buffer(&textures.uw_buf, 0, bytemuck::cast_slice(&uw.lanes));
+                        render_context.render_device().create_bind_group(
+                            "ffx_glow_combine_uw",
+                            &pipeline_cache.get_bind_group_layout(&pipelines.layout_combine_uw),
+                            &BindGroupEntries::sequential((
+                                world_target.main_texture_view(),
+                                &pipelines.sampler,
+                                &textures.quarter_a.default_view,
+                                textures.gain_buf.as_entire_binding(),
+                                &pipelines.wave_view,
+                                &pipelines.wave_sampler,
+                                textures.uw_buf.as_entire_binding(),
+                                depth,
+                            )),
+                        )
+                    }
+                    _ => render_context.render_device().create_bind_group(
+                        "ffx_glow_combine",
+                        &pipeline_cache.get_bind_group_layout(&pipelines.layout_combine),
+                        &BindGroupEntries::sequential((
+                            world_target.main_texture_view(),
+                            &pipelines.sampler,
+                            &textures.quarter_a.default_view,
+                            textures.gain_buf.as_entire_binding(),
+                            &pipelines.wave_view,
+                            &pipelines.wave_sampler,
+                        )),
+                    ),
+                };
                 Some((combine, bind))
             });
 
@@ -1164,6 +1406,8 @@ impl Plugin for FfxGlowPlugin {
             .init_resource::<FfxHazeMix>()
             .init_resource::<FfxWave>()
             .init_resource::<FfxSwitches>()
+            .init_resource::<FfxUnderwater>()
+            .init_resource::<FfxWaterGlow>()
             .add_plugins((
                 ExtractComponentPlugin::<FfxGlow>::default(),
                 ExtractComponentPlugin::<FfxBackdrop>::default(),
@@ -1173,6 +1417,8 @@ impl Plugin for FfxGlowPlugin {
                 ExtractResourcePlugin::<FfxHazeMix>::default(),
                 ExtractResourcePlugin::<FfxWave>::default(),
                 ExtractResourcePlugin::<FfxSwitches>::default(),
+                ExtractResourcePlugin::<FfxUnderwater>::default(),
+                ExtractResourcePlugin::<FfxWaterGlow>::default(),
             ))
             .add_systems(
                 Update,

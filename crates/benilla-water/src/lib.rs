@@ -21,12 +21,14 @@ mod clock;
 mod depth;
 mod floor_share;
 mod flow;
+mod glow_acc;
 mod hiz;
 mod liquid_planar;
 mod look;
 mod mcsh;
 mod mirror_chain;
 mod preview;
+mod preview_rows;
 mod probe;
 mod reflect;
 mod ripple_sim;
@@ -86,6 +88,7 @@ impl Plugin for ImprovedWaterPlugin {
         floor_share::register(app);
         depth::register(app);
         probe::register(app);
+        glow_acc::register(app);
         app.add_systems(
             Startup,
             publish_pass_images
@@ -114,13 +117,24 @@ fn register_caps(app: &mut App) {
 fn drive_pipeline_caps(
     dev: Res<dev_state::DebugState>,
     quality: Res<WaterQuality>,
+    device: Option<Res<bevy::render::renderer::RenderDevice>>,
     mut caps: ResMut<WaterPipelineCaps>,
     mut aniso: ResMut<RippleAniso>,
 ) {
+    // The preview's glow store, from Medium up, on a device that forces the early depth test the
+    // store's side effect needs (`liquid.wgsl`'s `@early_depth_test(force)`).
+    // Assumed while the device is not up yet: Vulkan, Metal and DX12 all have it.
+    let early_z = device.is_none_or(|d| {
+        d.features()
+            .contains(bevy::render::render_resource::WgpuFeatures::SHADER_EARLY_DEPTH_TEST)
+    });
     let next = WaterPipelineCaps {
         view: dev.water.view != 0,
         tier: quality.tier(),
         ssr: dev.water.ssr,
+        glow: benilla_assets::preview::on(benilla_assets::preview::GLOW)
+            && quality.tier() >= 1
+            && early_z,
         ..*caps
     };
     caps.set_if_neq(next);
@@ -140,6 +154,7 @@ fn publish_pass_images(
     lut: Option<Res<sky_lut::SkyLut>>,
     sim: Option<Res<ripple_sim::RippleSim>>,
     shadow: Res<mcsh::WaterShadow>,
+    glow: Option<Res<glow_acc::WaterGlowAcc>>,
 ) {
     let (
         Some(reflect),
@@ -150,7 +165,18 @@ fn publish_pass_images(
         Some(occ),
         Some(lut),
         Some(sim),
-    ) = (reflect, reflect_buf, scene_color, probe, hiz, occ, lut, sim)
+        Some(glow),
+    ) = (
+        reflect,
+        reflect_buf,
+        scene_color,
+        probe,
+        hiz,
+        occ,
+        lut,
+        sim,
+        glow,
+    )
     else {
         return;
     };
@@ -170,6 +196,7 @@ fn publish_pass_images(
         shadow: shadow.image(),
         wake: sim.image.clone(),
         reflect_buf: reflect_buf.0.clone(),
+        glow_acc: glow.buf.clone(),
     });
 }
 

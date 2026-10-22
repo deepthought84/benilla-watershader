@@ -226,6 +226,78 @@ fn hsv_value_scale(c: [f32; 3], f: f32) -> [f32; 3] {
     [c[0] * f, c[1] * f, c[2] * f]
 }
 
+/// The dry atmosphere while the eye is under water, for the Improved Water preview's view from
+/// below (Snell's window, the waterline): the zone's dry sky stops, fog and sun colour, which the
+/// underwater `LightParams` slot replaces in [`WowLighting`]; a copy of the resolved ones while dry
+/// or with the preview off. The `wet_*` fog is the one the frame is drawn with.
+#[derive(Resource, Clone, Copy, Default, PartialEq)]
+pub struct DrySky {
+    pub sky_zenith: [f32; 3],
+    pub sky_horizon: [f32; 3],
+    pub fog_color: [f32; 3],
+    pub fog_start: f32,
+    pub fog_end: f32,
+    pub sun_color: [f32; 3],
+    pub wet_fog_color: [f32; 3],
+    pub wet_fog_start: f32,
+    pub wet_fog_end: f32,
+}
+
+/// [`DrySky`]: a second `Light.dbc` blend on the dry slot (with the storm lerp) while submerged.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn update_dry_sky(
+    sampler: Option<Res<LightSampler>>,
+    current_map: Option<Res<CurrentMap>>,
+    cam: Query<&GlobalTransform, With<WorldCamera>>,
+    clock: Res<GameClock>,
+    eye_liquid: crate::liquid::EyeLiquid,
+    viewer: Res<crate::view::Viewer>,
+    weather: Option<Res<crate::weather::WeatherState>>,
+    view: Res<crate::view::ViewDistance>,
+    lighting: Res<WowLighting>,
+    mut dry: ResMut<DrySky>,
+) {
+    let mut next = DrySky {
+        sky_zenith: lighting.sky[0],
+        sky_horizon: lighting.sky[4],
+        fog_color: lighting.fog_color,
+        fog_start: lighting.fog_start,
+        fog_end: lighting.fog_end,
+        sun_color: lighting.spec,
+        wet_fog_color: lighting.fog_color,
+        wet_fog_start: lighting.fog_start,
+        wet_fog_end: lighting.fog_end,
+    };
+    if eye_liquid.submersion().any() && benilla_assets::preview::any() {
+        if let (Some(s), Ok(t)) = (sampler.as_ref(), cam.single()) {
+            let wow_pos = bevy_to_wow(t.translation());
+            let map = current_map.as_ref().map_or(0, |m| m.0);
+            let storm = weather
+                .as_ref()
+                .map_or(0.0, |w| crate::weather::storm_blend(w.sky_density));
+            let dry_slot = benilla_formats::Submersion::Dry;
+            let at = clock.minute * 2;
+            let clear =
+                s.0.sample_blended(map, wow_pos, at, false, dry_slot, viewer.ghost);
+            let atmo = if storm > 0.0 {
+                let stormy =
+                    s.0.sample_blended(map, wow_pos, at, true, dry_slot, viewer.ghost);
+                clear.lerp(&stormy, storm)
+            } else {
+                clear
+            };
+            let (fog_start, fog_end) = scene_fog(atmo.fog_end, atmo.fog_start_frac, view.farclip);
+            next.sky_zenith = atmo.sky[0];
+            next.sky_horizon = atmo.sky[4];
+            next.fog_color = atmo.fog_color;
+            next.fog_start = fog_start;
+            next.fog_end = fog_end;
+            next.sun_color = atmo.sun_color;
+        }
+    }
+    dry.set_if_neq(next);
+}
+
 pub(super) fn update_time_lighting(
     world_time: Res<super::WorldTime>,
     sampler: Option<Res<LightSampler>>,

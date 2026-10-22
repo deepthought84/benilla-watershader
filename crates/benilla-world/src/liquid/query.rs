@@ -727,6 +727,11 @@ impl EyeLiquid<'_> {
     pub fn depth(&self) -> f32 {
         self.eye.as_ref().map_or(0.0, |e| e.depth)
     }
+
+    /// The liquid surface's world Z over the probe; `0.0` when dry.
+    pub fn surface_z(&self) -> f32 {
+        self.eye.as_ref().map_or(0.0, |e| e.surface_z)
+    }
 }
 
 /// The submerged camera's two scalars, published beside [`Underwater`].
@@ -738,6 +743,9 @@ pub struct SubmergedEye {
     /// The eye's absolute world Z. The ocean ramp clamps it raw, `clamp(eye.z, −30, 0)`, since
     /// ocean surfaces are pinned to z = 0 by a branch (`0x69ba85`), not by data.
     pub eye_z: f32,
+    /// The world Z of the liquid surface over the probe, `0.0` when dry: the Improved Water
+    /// preview's view from below reads it.
+    pub surface_z: f32,
 }
 
 /// How far the near rectangle's lowest corner sits below the eye, `≤ 0` yd: `eye_z + drop` is the
@@ -788,6 +796,7 @@ pub(super) fn detect_submersion(
     // Depth from the probe, not the eye, so the fade agrees with the verdict.
     submerged_eye.depth = verdict.map_or(0.0, |(_, z)| (z - probe_z).max(0.0));
     submerged_eye.eye_z = eye[2];
+    submerged_eye.surface_z = verdict.map_or(0.0, |(_, z)| z);
     // `WOW_FOG_DUMP`: once a second, the eye, the verdict and every surface over the eye's XY.
     static FOG_DUMP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *FOG_DUMP.get_or_init(|| std::env::var_os("WOW_FOG_DUMP").is_some()) {

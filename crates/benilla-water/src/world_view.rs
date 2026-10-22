@@ -221,7 +221,26 @@ pub(crate) fn water_screen_rect(
         With<LiquidSurface>,
     >,
     materials: Res<Assets<LiquidMaterial>>,
+    eye_liquid: benilla_world::liquid::EyeLiquid,
 ) {
+    // The preview's underwater combine (`tint`) reads the linear depth under every pixel while the
+    // eye is in water, surface on screen or not.
+    if benilla_assets::preview::on(benilla_assets::preview::TINT)
+        && eye_liquid.submersion().is_water()
+    {
+        if let Some(size) = cameras
+            .single()
+            .ok()
+            .and_then(|(camera, _)| camera.physical_target_size())
+        {
+            rect.set_if_neq(WaterScreenRect {
+                visible: true,
+                min: UVec2::ZERO,
+                max: size,
+            });
+            return;
+        }
+    }
     let found = cameras.single().ok().and_then(|(camera, eye)| {
         let size = camera.physical_target_size()?;
         let clip_from_view = camera.clip_from_view();

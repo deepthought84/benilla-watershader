@@ -399,7 +399,7 @@ impl LiquidKey {
     /// bit 6) is spare.
     pub const SSR: u16 = 1 << 5;
     /// The highlight excess stored for the glow (`path.w` bit 5): a pipeline of its own, for which
-    /// [`Self::frag_defs`] pushes no def.
+    /// [`Self::frag_defs`] pushes `WATER_GLOW_STORE` while the preview's `glow` runs.
     pub const GLOW: u16 = 1 << 7;
     /// Per-channel transmittance through dual-source blending (`path.w` bit 6): a pipeline of its
     /// own, for which [`Self::frag_defs`] pushes no def.
@@ -501,6 +501,10 @@ impl LiquidKey {
         // its features runs; the features branch on the reflection block's mask row.
         if crate::preview::any() {
             defs.push("WATER_PREVIEW");
+            // Its glow store, on the glow variant alone.
+            if self.has(Self::GLOW) && crate::preview::on(crate::preview::GLOW) {
+                defs.push("WATER_GLOW_STORE");
+            }
         }
         defs
     }
@@ -704,6 +708,10 @@ pub struct LiquidExt {
     /// per-frame write does not rebuild every liquid material's bind group.
     #[storage(107, read_only, buffer, visibility(fragment))]
     pub reflect_buf: Buffer,
+    /// The preview glow's accumulator (`WATER_GLOW_STORE`): the water's highlight excess per
+    /// quarter-resolution texel, 16.16 fixed point, which FFXGlow's water downsample reads.
+    #[storage(118, buffer, visibility(fragment))]
+    pub glow_acc: Buffer,
     /// Which lanes of the shared light this surface reads:
     /// - `x` = fullbright (magma, slime): the sheet is the opaque body.
     /// - `y` = ocean: rows 15/16 (`Light.dbc` IntBand 14/15), else rows 13/14 (IntBand 16/17).

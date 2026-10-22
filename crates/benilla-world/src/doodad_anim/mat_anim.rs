@@ -249,6 +249,21 @@ struct UvAffine {
 }
 
 impl UvAnimEntry {
+    /// A shared loop's mean texture scroll a second, `[du, dv]`: its last key less its first over
+    /// its period. `None` for any other loop, or one that does not translate.
+    pub fn scroll(&self) -> Option<[f32; 2]> {
+        let UvLoop::Shared(Some(anim)) = &self.anim else {
+            return None;
+        };
+        let (first, last) = (anim.keys.first()?, anim.keys.last()?);
+        (anim.period > 0.0).then(|| {
+            [
+                (last.1[0] - first.1[0]) / anim.period,
+                (last.1[1] - first.1[1]) / anim.period,
+            ]
+        })
+    }
+
     /// The slot's delta row for `now`: the quantized sample minus the built seed, which the shader
     /// adds back onto `sun_scale.zw`. `playing` is the host's `(slot, clip time)`; a gone host or a
     /// slot with no loop samples a zero offset.

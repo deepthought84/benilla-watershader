@@ -5,6 +5,10 @@
 //! - `$WOW_PREVIEW` sets the start: unset or `all` every feature, `0`/`off`/`none` none, a comma
 //!   list of names exactly those, a list of `-name` entries every feature but those.
 //! - `$WOW_PREVIEW_<NAME>=0` then turns one feature off (`=1` on), e.g. `WOW_PREVIEW_WAVES=0`.
+//! - Sub-levers, numbers ([`number`]): `ROUGH_CONE` (0.2), `SEA` (unset: the wind's),
+//!   `CAUSTICS_GAIN`, `LIGHTS_GAIN`, `SPARKLES_GAIN`, `RIVER_FOAM_GAIN`, `RIVER_MIST_GAIN` (1),
+//!   `FORCE_RAIN` and `FORCE_SNOW` (0..1 over the zone weather), and `SWIMMER` (yards: a phantom
+//!   swimmer that far ahead of the camera, for a still capture of the wake).
 //!
 //! With no feature on, no stylised pipeline compiles the preview and the frame is today's.
 
@@ -47,12 +51,46 @@ pub const ROUGH_SKY: u32 = 1 << 3;
 pub const SHORE: u32 = 1 << 4;
 /// SHORE-4: the sea's swash, bores and whitecaps.
 pub const SURF: u32 = 1 << 5;
+/// RIV-2/3/6: foam streaks, whitewater, standing waves and tails on flowing water; steep sheets.
+pub const RIVERS: u32 = 1 << 6;
+/// RIV-4: plunge pools at the feet of the falls found at runtime.
+pub const FALLS: u32 = 1 << 7;
+/// INT-1/2/4: a Kelvin wake and a bow wave behind every swimmer, the body's trench cut.
+pub const WAKE: u32 = 1 << 8;
+/// INT-2/4: the swimmer's foam collar, bow crest and kicked trail over milky water.
+pub const WAKE_FOAM: u32 = 1 << 9;
+/// INT-2/5: impulse rings for strokes, entry and exit.
+pub const RINGS: u32 = 1 << 10;
+/// UW-1: Snell's window over the internal mirror, seen from below.
+pub const WINDOW: u32 = 1 << 11;
+/// UW-2: the water's own absorption and in-scatter under water (the improved FFX combine).
+pub const TINT: u32 = 1 << 12;
+/// UW-4: light shafts under water.
+pub const SHAFTS: u32 = 1 << 13;
+/// UW-4: caustics on the bed under water.
+pub const UW_CAUSTICS: u32 = 1 << 14;
+/// UW-3: the waterline split and meniscus at the near plane.
+pub const WATERLINE: u32 = 1 << 15;
+/// BODY-5: the caustic net on the bed seen from above.
+pub const CAUSTICS: u32 = 1 << 16;
+/// WX-1: rain rings, rain's roughness, snow's stillness.
+pub const RAIN: u32 = 1 << 17;
+/// SPEC-6: point lights reflected as streaks, and their warm pool in the body.
+pub const LIGHTS: u32 = 1 << 18;
+/// SPEC-5: sub-pixel sparkles on the glint (High).
+pub const SPARKLES: u32 = 1 << 19;
+/// BODY-4: wave faces glowing toward a low sun.
+pub const CREST: u32 = 1 << 20;
+/// WX-2: a mist veil over the water in fog, rain, storm, dawn and dusk.
+pub const MIST: u32 = 1 << 21;
+/// FND-3: the highlights' excess into the glow, added by the Improved FFXGlow combine (Medium up).
+pub const GLOW: u32 = 1 << 22;
 
 /// Every feature bit.
 pub const ALL: u32 = (1 << NAMES.len()) - 1;
 
 /// The features that draw something so far; the other names are reserved for later rounds.
-pub const LIVE: u32 = WAVES | GLINT | ROUGH | ROUGH_SKY | SHORE | SURF;
+pub const LIVE: u32 = ALL;
 
 /// The bit of the feature called `name` (any case), if there is one.
 pub fn bit(name: &str) -> Option<u32> {

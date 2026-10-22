@@ -284,6 +284,9 @@ pub struct WaterPassImages {
     pub wake: Handle<Image>,
     /// The reflection block, [`REFLECT_FLOATS`] floats, written once a frame in the render world.
     pub reflect_buf: bevy::render::render_resource::Buffer,
+    /// The preview glow's accumulator; the placeholder is 16 bytes, which the shader's length test
+    /// writes nothing into.
+    pub glow_acc: bevy::render::render_resource::Buffer,
 }
 
 /// The variants a water plugin asks the stylised liquid pipelines to compile; all off without one.
@@ -411,6 +414,12 @@ pub(super) fn placeholder_pass_images(
         usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let glow_acc = device.create_buffer(&BufferDescriptor {
+        label: Some("water_glow_acc_placeholder"),
+        size: 16,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     commands.insert_resource(WaterPassImages {
         reflection: flat.clone(),
         reflection2: flat.clone(),
@@ -427,6 +436,7 @@ pub(super) fn placeholder_pass_images(
         shadow,
         wake: flat,
         reflect_buf,
+        glow_acc,
     });
 }
 

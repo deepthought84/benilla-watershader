@@ -1062,6 +1062,7 @@ pub(super) fn setup_liquid(
                     shadow: pass.shadow.clone(),
                     wake: wake.clone(),
                     reflect_buf: pass.reflect_buf.clone(),
+                    glow_acc: pass.glow_acc.clone(),
                     // x = fullbright (the sheet as body, still fogged); y = the ocean swatch;
                     // z = the interior fog block; w = water's sun-sheen exponent.
                     kind: Vec4::new(
@@ -1072,11 +1073,16 @@ pub(super) fn setup_liquid(
                     ),
                     // Which of the reference's three liquid renderers `liquid.wgsl` runs; the
                     // stylised lane and its pipeline variants (both rewritten by
-                    // [`apply_water_style`]); magma rather than slime.
+                    // [`apply_water_style`]); magma rather than slime on the fullbright kinds,
+                    // and on water the authored rapids, which the preview's river terms read.
                     path: Vec4::new(
                         path.shader_id(),
                         style_flag,
-                        if kind == LiquidKind::Magma { 1.0 } else { 0.0 },
+                        if matches!(kind, LiquidKind::Magma | LiquidKind::Rapids) {
+                            1.0
+                        } else {
+                            0.0
+                        },
                         style_bits,
                     ),
                     // x = the sheet's mean alpha, the stylised lane's lift; y = frame count;
