@@ -470,6 +470,46 @@ const FALL_FOOT_SLACK: f32 = 2.0;
 /// `FALL_LINE_MAX`, which no single part may exceed either.
 const FALL_JOIN: f32 = 3.0;
 const FALL_LINE_MAX: f32 = 60.0;
+/// The gap rule's reach from the eye, yards, how far out past a surface's end it looks for the
+/// lower one, yards, and how often (seconds) or after how far a move (yards) it rescans.
+const FALL_GAP_REACH: f32 = 140.0;
+const FALL_GAP_OUT: [f32; 3] = [2.0, 6.0, 12.0];
+const FALL_GAP_RESCAN: (f32, f32) = (4.0, 20.0);
+
+/// Join `fall` to a fall in `found` it overlaps or nearly does while the joined line stays under
+/// [`FALL_LINE_MAX`], or add it.
+fn join_fall(found: &mut Vec<Fall>, fall: Fall) {
+    let near = |f: &Fall| {
+        let seg = |p: Vec2| {
+            let ab = f.b - f.a;
+            let t = ((p - f.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
+            (f.a + ab * t).distance(p)
+        };
+        seg(fall.a).min(seg(fall.b)) < FALL_JOIN && (f.foot_y - fall.foot_y).abs() < 1.0
+    };
+    let joined = |f: &Fall| {
+        [f.a, f.b, fall.a, fall.b]
+            .iter()
+            .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
+                (l.min(*p), h.max(*p))
+            })
+    };
+    if let Some(f) = found
+        .iter_mut()
+        .find(|f| near(f) && (joined(f).1 - joined(f).0).max_element() <= FALL_LINE_MAX)
+    {
+        let (pl, ph) = joined(f);
+        let mz = (pl + ph) * 0.5;
+        (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
+            (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))
+        } else {
+            (Vec2::new(mz.x, pl.y), Vec2::new(mz.x, ph.y))
+        };
+        f.drop = f.drop.max(fall.drop);
+    } else {
+        found.push(fall);
+    }
+}
 
 /// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop.
 #[derive(Clone, Copy)]
@@ -500,6 +540,7 @@ fn drive_fall_lanes(
     index: Res<WaterIndex>,
     mut last: Local<f32>,
     mut found: Local<Vec<Fall>>,
+    mut gaps: Local<(Vec3, f32, Vec<Fall>)>,
     mut lanes: ResMut<PreviewLanes>,
 ) {
     let base = at(PV_FALLS);
@@ -565,31 +606,13 @@ fn drive_fall_lanes(
                     .map(|s| wow_to_bevy([w[0], w[1], s]).y)
                     .filter(|&y| lo.y <= y + FALL_FOOT_SLACK && hi.y >= y + FALL_MIN_HEIGHT)
                 };
-                // The foot: where the sheet meets the water. A thick part (a dam's spillway) has
-                // its foot on the side of its short axis that stands in water at its bottom, not
-                // through its middle; the middle when both sides or neither do.
+                // The foot: the water under the part's middle at its bottom. (Round 2 tried the
+                // wet side of a thick part's short axis; at Elwynn that put a line along a
+                // cascade's flow, through the pool to the camera.)
                 let along_x = hi.x - lo.x >= hi.z - lo.z;
-                let inset = (0.25 * short).min(1.5);
-                let (s_lo, s_hi) = if along_x {
-                    (lo.z + inset, hi.z - inset)
-                } else {
-                    (lo.x + inset, hi.x - inset)
-                };
-                let probe = |s: f32| {
-                    if along_x {
-                        surface_y(mid.x, s)
-                    } else {
-                        surface_y(s, mid.z)
-                    }
-                };
-                let at_mid = if along_x { mid.z } else { mid.x };
-                let (side, foot_y) = match (short > 2.0, probe(s_lo), probe(s_hi)) {
-                    (true, Some(y), None) => (s_lo, y),
-                    (true, None, Some(y)) => (s_hi, y),
-                    _ => match probe(at_mid) {
-                        Some(y) => (at_mid, y),
-                        None => continue,
-                    },
+                let side = if along_x { mid.z } else { mid.x };
+                let Some(foot_y) = surface_y(mid.x, mid.z) else {
+                    continue;
                 };
                 // The line along the part's longer side at its foot.
                 let (l0, l1) = if along_x { (lo.x, hi.x) } else { (lo.z, hi.z) };
@@ -643,6 +666,72 @@ fn drive_fall_lanes(
                     }
                 }
             }
+        }
+        // The classification's gap rule (RIV-4): where a water surface ends and another lies at
+        // least `FALL_MIN_HEIGHT` below a few yards further out, water falls over that edge; its
+        // foot line runs along the edge on the lower surface. Rescanned every few seconds or
+        // after a move, over the wet cells within `FALL_GAP_REACH` of the eye.
+        if now - gaps.1 >= FALL_GAP_RESCAN.0 || gaps.0.distance(eye) >= FALL_GAP_RESCAN.1 {
+            gaps.0 = eye;
+            gaps.1 = now;
+            gaps.2.clear();
+            let ew = bevy_to_wow(eye);
+            let surface = |x: f32, y: f32, z: f32| {
+                benilla_world::liquid::water_surface_at(
+                    index.over(x, y).iter().filter_map(|&e| water.get(e).ok()),
+                    [x, y, z],
+                    LiquidClaim::Unknown,
+                )
+            };
+            let mut edges: Vec<Fall> = Vec::new();
+            let r = FALL_GAP_REACH;
+            for e in index.over_box([ew[0] - r, ew[1] - r], [ew[0] + r, ew[1] + r]) {
+                let Ok(chunk) = water.get(e) else {
+                    continue;
+                };
+                chunk.for_each_wet_cell(|c| {
+                    let cx = 0.25 * (c[0][0] + c[1][0] + c[2][0] + c[3][0]);
+                    let cy = 0.25 * (c[0][1] + c[1][1] + c[2][1] + c[3][1]);
+                    for (a, b) in [(c[0], c[1]), (c[1], c[3]), (c[3], c[2]), (c[2], c[0])] {
+                        let m = Vec2::new(0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]));
+                        if m.distance(Vec2::new(ew[0], ew[1])) > r {
+                            continue;
+                        }
+                        let top = 0.5 * (a[2] + b[2]);
+                        let d = (m - Vec2::new(cx, cy)).normalize_or_zero();
+                        // The surface goes on past the edge at its own height: no end here.
+                        let p1 = m + d;
+                        if surface(p1.x, p1.y, top - 0.5).is_some_and(|z| z <= top + 0.5) {
+                            continue;
+                        }
+                        for out in FALL_GAP_OUT {
+                            let p = m + d * out;
+                            let Some(low) = surface(p.x, p.y, top - 300.0) else {
+                                continue;
+                            };
+                            let drop = top - low;
+                            if !(FALL_MIN_HEIGHT..=150.0).contains(&drop) {
+                                continue;
+                            }
+                            let ba = wow_to_bevy([a[0] + d.x * out, a[1] + d.y * out, low]);
+                            let bb = wow_to_bevy([b[0] + d.x * out, b[1] + d.y * out, low]);
+                            edges.push(Fall {
+                                a: Vec2::new(ba.x, ba.z),
+                                b: Vec2::new(bb.x, bb.z),
+                                foot_y: ba.y,
+                                drop,
+                            });
+                            break;
+                        }
+                    }
+                });
+            }
+            for f in edges {
+                join_fall(&mut gaps.2, f);
+            }
+        }
+        for f in gaps.2.iter().copied() {
+            join_fall(&mut found, f);
         }
         let e2 = Vec2::new(eye.x, eye.z);
         found.sort_by(|p, q| {
