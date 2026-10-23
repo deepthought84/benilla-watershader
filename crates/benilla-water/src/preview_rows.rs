@@ -447,28 +447,40 @@ fn drive_under_lanes(
     };
     // Round 3, the veil (`ffx_glow.wgsl`'s `fs_combine_veil`): above the water, with `mist` or
     // `falls`, the combine lays the mist over everything the frame shows near the mirror plane and
-    // the falls' spray over their feet, from the depth. `z` and `w` tell the water its own mist and
-    // its pools' spray stand down while the veil draws them.
+    // the falls' spray over their feet, from the depth. The mist lies on the mirror plane, so it
+    // needs one elected (its strength, `reflect(1)`); the spray needs only a fall among the four
+    // nearest rows it copies (`preview.falls`, strength in lane 7 of each). `z` and `w` tell the
+    // water its own mist and its pools' spray stand down while the veil draws them.
     let reflect = |i: usize| data.as_ref().map_or(0.0, |d| d.0[i]);
-    let veil_on = style.is_stylised()
-        && !in_water
-        && (lever::on(lever::MIST) || lever::on(lever::FALLS))
-        && reflect(1) > 0.0;
+    let pv_falls = at(PV_FALLS);
+    let mist_on = lever::on(lever::MIST) && reflect(1) > 0.0;
+    let falls_on = lever::on(lever::FALLS) && (0..4).any(|i| lanes.0[pv_falls + 8 * i + 7] > 0.0);
+    let veil_on = style.is_stylised() && !in_water && (mist_on || falls_on);
+    // `$WOW_PREVIEW_FALLS_LOG=1`: the veil's arming, logged when it changes.
+    static VEIL_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *VEIL_LOG.get_or_init(|| lever::number("FALLS_LOG", 0.0, 0.0, 1.0) > 0.5) {
+        static VEIL_SEEN: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        let text = format!(
+            "veil {veil_on}: mirror plane {:.1} strength {:.2}, in water {in_water}, mist {mist_on}, \
+             falls {falls_on}",
+            reflect(0),
+            reflect(1)
+        );
+        if let Ok(mut seen) = VEIL_SEEN.lock() {
+            if *seen != text {
+                info!("preview {text}");
+                *seen = text;
+            }
+        }
+    }
+    let flag = |b: bool| if b { 1.0 } else { 0.0 };
     row(
         14,
         [
             cycle(clock.secs() / 256.0) * 256.0,
             tier,
-            if veil_on && lever::on(lever::MIST) {
-                1.0
-            } else {
-                0.0
-            },
-            if veil_on && lever::on(lever::FALLS) {
-                1.0
-            } else {
-                0.0
-            },
+            flag(veil_on && mist_on),
+            flag(veil_on && falls_on),
         ],
     );
     let base = at(PV_UNDER);
@@ -480,23 +492,14 @@ fn drive_under_lanes(
         // The mirror plane's Y, the rain and the storm; the fog's end, the mist and the falls on;
         // the visible sun; the foam light, sky then sun.
         vrow(0, [1.0, reflect(0), pv(PV_WEATHER), pv(PV_WIND + 3)]);
-        vrow(
-            1,
-            [
-                dry.fog_end,
-                if lever::on(lever::MIST) { 1.0 } else { 0.0 },
-                if lever::on(lever::FALLS) { 1.0 } else { 0.0 },
-                0.0,
-            ],
-        );
+        vrow(1, [dry.fog_end, flag(mist_on), flag(falls_on), 0.0]);
         vrow(2, [reflect(4), reflect(5), reflect(6), reflect(7)]);
         let (e_sky_foam, e_sun_foam) = (body(8), body(9));
         vrow(3, [e_sky_foam[0], e_sky_foam[1], e_sky_foam[2], 0.0]);
         vrow(4, [e_sun_foam[0], e_sun_foam[1], e_sun_foam[2], 0.0]);
         // The four nearest falls' rows as `preview.falls` holds them: the foot line's ends (XZ),
         // then the pool's surface, the drop and the strength.
-        let falls = at(PV_FALLS);
-        v[32..64].copy_from_slice(&lanes.0[falls..falls + 32]);
+        v[32..64].copy_from_slice(&lanes.0[pv_falls..pv_falls + 32]);
     }
     if let Some(mut ffx) = ffx {
         ffx.lanes[..64].copy_from_slice(&u);
@@ -1025,7 +1028,12 @@ fn drive_fall_lanes(
 pub(super) fn register(app: &mut App) {
     app.add_systems(
         PostUpdate,
-        (drive_wake_lanes, drive_under_lanes, drive_fall_lanes)
+        (
+            drive_wake_lanes,
+            drive_fall_lanes,
+            // The veil copies the falls' rows this frame's scan wrote.
+            drive_under_lanes.after(drive_fall_lanes),
+        )
             .before(super::reflect::drive_reflection),
     );
 }
