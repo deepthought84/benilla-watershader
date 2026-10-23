@@ -6178,6 +6178,16 @@ const RF_PLUNGE_REACH_YD: f32 = 14.0;
 const RF_DROP_REF_YD: f32 = 6.0;
 /// Yards of ring coordinate per radian round a foot line's end.
 const RF_RING_ARC_YD: f32 = 4.5;
+/// The outflow: how much further than the pool its rafts drift into open water (against the pool's
+/// reach before a bank cuts it: what lands on the bank still drains into the pool), and the share of
+/// the surface they cover at most (patches, not a band).
+const RF_DRIFT_REACH: f32 = 1.3;
+const RF_DRIFT_COVER: f32 = 0.32;
+/// The outflow rafts' read: its tile, yards (the rafts about a quarter of it).
+const RF_DRIFT_YD: f32 = 11.0;
+/// Downstream, where the authored current carries water away from the foot, the outflow reaches
+/// this much further again at full speed.
+const RF_DRIFT_DOWN: f32 = 0.8;
 /// The boil domes' height and the plunge chop's: the unit field's, yards.
 const RF_BOIL_YD: f32 = 0.05;
 const RF_PLUNGE_CHOP_YD: f32 = 0.05;
@@ -6193,6 +6203,12 @@ const RF_MIST_LEVEL: f32 = 0.45;
 /// blue in shade, cream in sun.
 const RF_FOAM_SHADE: vec3<f32> = vec3<f32>(0.78, 0.81, 0.87);
 const RF_FOAM_LIT: vec3<f32> = vec3<f32>(1.0, 1.0, 0.98);
+/// A plunge's foam in its creases, deeper than the shaded underside: the boil's lumps read.
+const RF_FOAM_CREASE: vec3<f32> = vec3<f32>(0.56, 0.6, 0.7);
+/// River and pool foam's light, linear luma: above the knee it rolls off below the ceiling, so foam
+/// over water already near white (a sunlit dam's reflection) keeps its lumps instead of clipping.
+const RF_FOAM_KNEE: f32 = 0.6;
+const RF_FOAM_CEIL: f32 = 0.86;
 /// The held tint's range ([`rf_hold`]).
 const RF_TINT_MAX: f32 = 1.25;
 /// A sheet's thickness for its glassy tongue's transmittance, yards.
@@ -6317,17 +6333,23 @@ struct RfFall {
     along: f32,
     dalong: vec2<f32>,
     pool_drop: f32,
+    // The outflow's weight here, out to `RF_DRIFT_REACH` times the unbanked pool's reach (further
+    // downstream).
+    drift: f32,
     // The sheet above a foot: its weight here, yards below its lip, the fall's drop.
     sheet: f32,
     fallen: f32,
     sheet_drop: f32,
 };
 
-/// The nearest falls' rows (`preview.falls`, from the classification's foot lines) at `p`: the
-/// heaviest pool and the heaviest sheet. A row's `w` is its strength, 0 for an unused row, and the
-/// CPU eases it in and out as a fall joins or leaves the set.
-fn rf_fall_at(p: vec3<f32>) -> RfFall {
-    var f = RfFall(0.0, 1.0e4, vec2<f32>(0.0, 1.0), 0.0, vec2<f32>(1.0, 0.0), 0.0, 0.0, 0.0, 0.0);
+/// The nearest falls' rows (`preview.falls`, from the classification's foot lines) at `p`, with the
+/// current `flow` there: the heaviest pool and the heaviest sheet. A row's `w` is its strength, 0
+/// for an unused row, and the CPU eases it in and out as a fall joins or leaves the set.
+fn rf_fall_at(p: vec3<f32>, flow: vec2<f32>) -> RfFall {
+    let fl = length(flow);
+    let f_hat = select(vec2<f32>(0.0), flow / max(fl, 1e-4), fl > 1e-3) * smoothstep(0.15, 0.8, fl);
+    var f = RfFall(0.0, 1.0e4, vec2<f32>(0.0, 1.0), 0.0, vec2<f32>(1.0, 0.0), 0.0, 0.0, 0.0, 0.0, 0.0);
+    var best = 0.0;
     for (var i = 0u; i < RF_FALLS_MAX; i = i + 1u) {
         let foot = water_reflect.preview.falls[2u * i];
         let at = water_reflect.preview.falls[2u * i + 1u];
@@ -6348,10 +6370,21 @@ fn rf_fall_at(p: vec3<f32>) -> RfFall {
         // comes down on the bank in front of it).
         let reach = RF_PLUNGE_REACH_YD * size * select(1.0, at.z, at.z > 0.0);
         let dy = p.y - at.x;
-        let pool = at.w * (1.0 - smoothstep(0.6 * reach, reach, r))
-            * (1.0 - smoothstep(0.4, 1.2, abs(dy)));
-        if (pool > f.pool) {
+        let level = at.w * (1.0 - smoothstep(0.4, 1.2, abs(dy)));
+        // Past the line's ends the pool stops within a short taper, so no foam runs on along a
+        // bank beside the curtain.
+        let past = max(max(-proj, proj - len), 0.0);
+        let pool = level * (1.0 - smoothstep(0.6 * reach, reach, r))
+            * (1.0 - smoothstep(0.3 * reach, 0.6 * reach, past));
+        let out_r = RF_DRIFT_REACH * RF_PLUNGE_REACH_YD * size
+            * (1.0 + RF_DRIFT_DOWN * saturate(dot(dir, f_hat)));
+        let drift = level * (1.0 - smoothstep(0.45 * out_r, out_r, r));
+        // The heaviest pool, else the heaviest outflow.
+        let key = 2.0 * pool + drift;
+        if (key > best) {
+            best = key;
             f.pool = pool;
+            f.drift = drift;
             f.r = r;
             f.dir = dir;
             // Round an end the coordinate turns with the angle from the line's normal, so it is
@@ -6415,7 +6448,7 @@ fn rf_site(i: RfIn) -> RfSite {
     let by_kind = rapids * smoothstep(RF_FLOW_MIN, 1.5, s.speed);
     s.turb = saturate(0.40 * by_speed + 0.35 * by_froude + 0.35 * by_grade + 0.2 * by_kind)
         * (1.0 - s.steep);
-    s.fall = rf_fall_at(i.world_pos);
+    s.fall = rf_fall_at(i.world_pos, i.flow);
     return s;
 }
 
@@ -6759,7 +6792,10 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     let ddx = i.dp_dx.xz;
     let ddy = i.dp_dy.xz;
     let size = clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.6, 1.6);
-    let e = f.pool * clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.35, 1.0);
+    let by_drop = clamp(sqrt(f.pool_drop / RF_DROP_REF_YD), 0.35, 1.0);
+    let e = f.pool * by_drop;
+    // The outflow's own strength, past the pool's reach.
+    let e_out = f.drift * by_drop;
     let r = f.r / size;
     let agit = e * exp(-r / 4.2);
     // A parcel leaves the foot line and slows as it spreads, v = 1.25·size / (1 + 0.13 r): its age
@@ -6779,7 +6815,7 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
         let lam = 2.6 * pow(0.56, fk) * size;
         let kw = TAU / lam;
         let turns = max(round(sqrt(RF_G * kw) * RF_PERIOD_S / TAU), 1.0);
-        let amp = 0.060 * pow(0.58, fk) * size / (1.0 + 0.30 * r) * e;
+        let amp = 0.060 * pow(0.58, fk) * size / (1.0 + 0.30 * r) * max(e, 0.4 * e_out);
         let md = 0.25 + 0.75 * saturate(0.5 + 0.3 * raft.n);
         let phase = fract(f.r / lam - turns * water_reflect.preview.clocks.x + 0.29 * fk + 0.25 * raft.n);
         let fade = saturate(2.2 - px * 7.0 / lam);
@@ -6848,6 +6884,25 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     let lace = (1.0 - smoothstep(lwid - laa, lwid + laa, ldist)) * smoothstep(0.45, 1.0, lwid / laa)
         * lk * lpatch;
     foam = max(foam, lace * (0.5 + 0.4 * smoothstep(-0.5, 0.5, fine.n)));
+    // The outflow: rafts drifting on past the boil into open water, thinning with age, so a foot
+    // hidden behind rocks still shows in the pool. A world read carried out on the parcels' speed
+    // and the current keeps them their size however far they drift (the ring coordinate would
+    // stretch them along the arc).
+    if (e_out > 0.0) {
+        let ud = f.dir * (1.25 * size / (1.0 + 0.13 * r)) + 0.5 * i.flow;
+        let jd = rf_scale(1.0 / RF_DRIFT_YD);
+        let dn = rf_mix2(
+            rf_noise(rf_uv(xz - ud * (ph.p0 * FLOW_PERIOD_S), jd, o) + vec2<f32>(0.19, 0.77), jd, ddx, ddy),
+            rf_noise(rf_uv(xz - ud * (ph.p1 * FLOW_PERIOD_S), jd, o) + vec2<f32>(0.63, 0.41), jd, ddx, ddy),
+            ph.w0,
+        );
+        let dlev = rf_level(RF_DRIFT_COVER * e_out * (0.3 + 0.7 * exp(-age / 14.0)));
+        let daa = max(length(dn.g) * px, 0.05);
+        let dpf = dn.n + 0.3 * fine.n * fine_keep;
+        let dblob = smoothstep(dlev - daa, dlev + daa, dpf);
+        let dheart = smoothstep(dlev + 0.3 + 2.0 * daa, dlev + 1.4, dpf);
+        foam = max(foam, dblob * mix(0.9, 0.5, dheart) * (1.0 - 0.5 * holes));
+    }
 #endif
     // Boils shove the foam aside: clear holes ringed with white.
     let hole = smoothstep(0.9, 1.4, boil.n) * bzone;
@@ -6855,6 +6910,9 @@ fn rf_plunge(f: RfFall, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPar
     foam = max(foam * (1.0 - 0.93 * hole), brim * 0.85);
     part.cover = saturate(foam) * RF_POOL_LEVEL;
     part.shade = rf_foam_shade(raft.g, blob * (1.0 - heart), i.to_view, sun);
+    // The boil's creases between its domes in shade, so a sunlit boil reads as churning lumps and
+    // not one white blob.
+    part.shade = part.shade * mix(1.0, mix(0.25, 1.0, smoothstep(-0.6, 0.8, boil.n + 0.35 * raft.n)), dense);
     // Round 3: the aerated water close round the foot and broken up with the boil, not a slab of
     // milky water along the whole pool (it lifted Elwynn's brown pool into a beige band).
     part.aer = smoothstep(5.0, 0.6, r) * e * 0.7 * (0.5 + 0.5 * smoothstep(-0.6, 0.8, boil.n));
@@ -7024,7 +7082,7 @@ fn rivers_falls(i: RfIn) -> RiverFalls {
     }
     let s = rf_site(i);
     let moving = s.speed > RF_FLOW_MIN && s.steep < 0.999;
-    if (!moving && s.fall.pool <= 0.0 && s.steep <= 0.0) {
+    if (!moving && s.fall.drift <= 0.0 && s.steep <= 0.0) {
         return o;
     }
     let org = rf_origin();
@@ -7035,7 +7093,7 @@ fn rivers_falls(i: RfIn) -> RiverFalls {
         river = rf_river(s, i, org, px, sun);
     }
     var pool = rf_part0();
-    if (s.fall.pool > 0.0 && pv_on(PV_FALLS)) {
+    if (s.fall.drift > 0.0 && pv_on(PV_FALLS)) {
         pool = rf_plunge(s.fall, i, org, px, sun);
     }
     var sheet = RfSheet(0.0, i.flat_n, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0);
@@ -7057,7 +7115,8 @@ fn rivers_falls(i: RfIn) -> RiverFalls {
         (river.shade * c_r + pool.shade * c_p + sheet.shade * c_s) / max(csum, 1e-4),
         csum > 1e-4,
     );
-    o.tint = mix(RF_FOAM_SHADE, RF_FOAM_LIT, shade);
+    let crease = select(0.0, c_p / max(csum, 1e-4), csum > 1e-4);
+    o.tint = mix(mix(RF_FOAM_SHADE, RF_FOAM_CREASE, crease), RF_FOAM_LIT, shade);
     o.sheet = sheet.w;
     o.sheet_n = sheet.n;
     o.aer = saturate(max(max(river.aer * keep, pool.aer), sheet.aer * sheet.w));
@@ -7162,6 +7221,15 @@ fn rf_foam_over(foam: f32, late: RfLate) -> vec4<f32> {
     // River foam is white, not the shore's cream (round 2): the cream albedo is divided back out.
     let white = water_dec(RF_FOAM_WHITE) / water_dec(SC_FOAM_CREAM);
     return vec4<f32>(mix(vec3<f32>(1.0), late.tint * white, late.cover / max(cover, 1e-4)), cover);
+}
+
+/// Foam's light `c` (linear) rolled off above [`RF_FOAM_KNEE`] toward [`RF_FOAM_CEIL`], by the
+/// river's share `k` of the cover.
+fn rf_foam_clip(c: vec3<f32>, k: f32) -> vec3<f32> {
+    let l = dot(c, LUMA_709);
+    let room = RF_FOAM_CEIL - RF_FOAM_KNEE;
+    let l2 = RF_FOAM_KNEE + room * (1.0 - exp(-max(l - RF_FOAM_KNEE, 0.0) / room));
+    return mix(c, c * (min(l2, l) / max(l, 1e-4)), k);
 }
 
 /// River and pool foam's albedo, gamma: a cool white.
@@ -8914,7 +8982,14 @@ fn stylised_water(
     // share ([`rf_foam_over`]); then the plunge's mist and the weather's ([`nwg_mist`]).
     let rf_over = rf_foam_over(foam, rf_late);
     if (rf_over.w > 0.0) {
-        let foam_l = fog_diffuse(sc.foam_albedo * pv_foam_tone(light.foam) * rf_over.rgb, fog.f, fog.g);
+        let foam_l = fog_diffuse(
+            rf_foam_clip(
+                sc.foam_albedo * pv_foam_tone(light.foam) * rf_over.rgb,
+                saturate(rf_late.cover / rf_over.w),
+            ),
+            fog.f,
+            fog.g,
+        );
         layer = layer_over(foam_l, rf_over.w, layer);
     }
     if (rf_late.mist > 0.0) {
