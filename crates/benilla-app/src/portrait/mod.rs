@@ -159,7 +159,8 @@ const _: () = assert!(
 const _: () = assert!(
     UI_MODEL_CAM_LAYER_BASE + UI_MODEL_CAM_LAYERS - 1
         < benilla_world::liquid::UNMIRRORED_RENDER_LAYER
-        && benilla_world::liquid::UNMIRRORED_RENDER_LAYER < benilla_world::liquid::WATER_RENDER_LAYER
+        && benilla_world::liquid::UNMIRRORED_RENDER_LAYER
+            < benilla_world::liquid::WATER_RENDER_LAYER
         && panes::PANE_LAYER_BASE > benilla_world::liquid::WATER_RENDER_LAYER,
     "the booth ladder must stay clear of the liquid render layers"
 );
