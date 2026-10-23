@@ -1371,23 +1371,23 @@ fn fs_combine_wave_improved(in: FullscreenVertexOutput) -> @location(0) vec4<f32
 // (exponential in height over `VEIL_LAYER_YD`, its density by the storm, the rain, a low sun and a
 // near fog end as the water's own `nwg_mist` sets it, closed form along the ray to the depth), and
 // each of the four nearest falls' spray, a plume rising from its foot line, billowing upward on the
-// clock, marched in eight steps through its box. The water drew the mist on its own pixels only, so
+// clock, marched through the line's own box. The water drew the mist on its own pixels only, so
 // posts, hulls and the far shore stood crisp in milky water; the falls' spray could not rise above
 // the waterline at all.
 
 const VEIL_LAYER_YD: f32 = 2.5;
 const VEIL_SIGMA: f32 = 0.011;
 const VEIL_MAX: f32 = 0.75;
-const VEIL_SPRAY_K: f32 = 0.1;
-const VEIL_SPRAY_MAX: f32 = 0.5;
-
-/// The distance from `p` to the segment `a`-`b` (XZ).
-fn veil_seg(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-    let ab = b - a;
-    let l2 = max(dot(ab, ab), 1e-6);
-    let t = clamp(dot(p - a, ab) / l2, 0.0, 1.0);
-    return vec2<f32>(distance(p, a + ab * t), t * sqrt(l2));
-}
+/// The spray: its extinction per yard of plume, and how much of the frame it hides at most, in its
+/// dense base and over the curtain above it (the curtain's streaks stay crisp through it).
+const VEIL_SPRAY_K: f32 = 0.9;
+const VEIL_SPRAY_MAX: f32 = 0.66;
+const VEIL_SPRAY_TOP: f32 = 0.24;
+const VEIL_SPRAY_STEPS: i32 = 10;
+/// A plume's spread off its foot line and its rise, yards: by the drop, capped in yards, so a
+/// cascade's spray hugs its foot instead of fogging the whole fall.
+const VEIL_SPRAY_REACH: vec2<f32> = vec2<f32>(0.8, 3.2);
+const VEIL_SPRAY_RISE: vec2<f32> = vec2<f32>(1.0, 5.0);
 
 /// The veil over the scene colour `sg` (gamma) along the ray `rd` from the eye to what the frame
 /// shows `t_d` yards out, gamma.
@@ -1425,46 +1425,83 @@ fn veil_apply(sg: vec3<f32>, rd: vec3<f32>, t_d: f32) -> vec3<f32> {
         }
     }
     if (v.b.z > 0.5) {
-        let foam = (v.e_sky.rgb + v.e_sun.rgb) * 0.86;
-        let mist_c = mix(vec3<f32>(dot(foam, WU_LUMA)), foam, 0.3)
-            + sun_c * (0.25 * pow(saturate(dot(rd, sun_l)), 4.0) * saturate(v.sun.w));
+        // The spray's light: the sky's and the sun's on foam (in the hue of the light on the
+        // terrain), the sun's scattered forward (Henyey-Greenstein, g 0.5, 1 on average), so the
+        // mist takes the scene's warm or cool light and glows backlit; held to grey it read as smoke.
+        let cosv = dot(rd, sun_l);
+        let hg = 0.75 / pow(1.25 - cosv, 1.5);
+        let mist_c = (v.e_sky.rgb * 0.75
+            + v.e_sun.rgb * (0.5 + 0.35 * min(hg, 4.0) * saturate(v.sun.w))) * 0.9;
         for (var i = 0u; i < 4u; i = i + 1u) {
             let foot = v.falls[2u * i];
             let at = v.falls[2u * i + 1u];
             if (at.w <= 0.0) {
                 continue;
             }
-            let size = clamp(sqrt(at.y / 6.0), 0.6, 1.6);
-            let reach = 1.0 + 0.05 * min(at.y, 100.0);
-            let rise = 0.8 + 0.14 * min(at.y, 100.0);
-            // The plume's box, and the ray's span through it; the density is windowed to nothing
-            // well inside it, so no box edge shows.
-            let lo = vec3<f32>(min(foot.x, foot.z) - 4.0 * reach, at.x - 0.3, min(foot.y, foot.w) - 4.0 * reach);
-            let hi = vec3<f32>(max(foot.x, foot.z) + 4.0 * reach, at.x + 4.0 * rise, max(foot.y, foot.w) + 4.0 * reach);
-            let inv = vec3<f32>(1.0) / select(rd, vec3<f32>(1e-6), abs(rd) < vec3<f32>(1e-6));
-            let t0 = (lo - eye) * inv;
-            let t1 = (hi - eye) * inv;
+            // The line's frame: along it from `a`, across it, up from the pool.
+            let ab = foot.zw - foot.xy;
+            let len = length(ab);
+            let ua = select(vec2<f32>(1.0, 0.0), ab / max(len, 1e-4), len > 1e-3);
+            let un = vec2<f32>(-ua.y, ua.x);
+            // A short foot line (a trickle) throws a narrow, faint plume.
+            let wide = smoothstep(0.5, 8.0, len);
+            let drop = min(at.y, 100.0);
+            let reach = clamp(0.8 + 0.03 * drop, VEIL_SPRAY_REACH.x, VEIL_SPRAY_REACH.y)
+                * mix(0.55, 1.0, wide);
+            let rise = clamp(1.0 + 0.05 * drop, VEIL_SPRAY_RISE.x, VEIL_SPRAY_RISE.y)
+                * mix(0.7, 1.0, wide);
+            let strength = at.w * mix(0.35, 1.0, wide);
+            // The ray in that frame, and its span through the plume's box: across to where the
+            // widened plume is windowed out, past the ends a short taper, up to the window's top.
+            let rel = eye.xz - foot.xy;
+            let o = vec3<f32>(dot(rel, ua), eye.y - at.x, dot(rel, un));
+            let dl = vec3<f32>(dot(rd.xz, ua), rd.y, dot(rd.xz, un));
+            let hw = 3.0 * 1.7 * reach;
+            let lo = vec3<f32>(-1.6 * reach, -0.3, -hw);
+            let hi = vec3<f32>(len + 1.6 * reach, 3.4 * rise, hw);
+            let inv = vec3<f32>(1.0) / select(dl, vec3<f32>(1e-6), abs(dl) < vec3<f32>(1e-6));
+            let t0 = (lo - o) * inv;
+            let t1 = (hi - o) * inv;
             let tn = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), max(min(t0.z, t1.z), 0.0));
             let tf = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), min(max(t0.z, t1.z), t_d));
             if (tf <= tn) {
                 continue;
             }
-            let dt = (tf - tn) / 8.0;
+            let dt = (tf - tn) / f32(VEIL_SPRAY_STEPS);
             var od = 0.0;
-            for (var k = 0; k < 8; k = k + 1) {
-                let p = eye + rd * (tn + (f32(k) + 0.5) * dt);
-                let y = p.y - at.x;
+            var oy = 0.0;
+            for (var k = 0; k < VEIL_SPRAY_STEPS; k = k + 1) {
+                let ts = tn + (f32(k) + 0.5) * dt;
+                let q = o + dl * ts;
+                let y = q.y;
                 if (y < -0.1) {
                     continue;
                 }
-                let sd = veil_seg(p.xz, foot.xy, foot.zw);
-                let n = wu_vnoise(vec2<f32>(sd.y * 0.45, (y - u.clock.x * 1.4) * 0.35))
-                    * 0.7 + wu_vnoise(vec2<f32>(sd.y * 1.1 + 7.0, (y - u.clock.x * 2.3) * 0.9)) * 0.3;
-                let win = (1.0 - smoothstep(2.0, 3.6, sd.x / reach)) * (1.0 - smoothstep(2.0, 3.6, y / rise));
-                od = od + exp(-sd.x / reach - y / rise) * win * (0.35 + 1.3 * n) * dt;
+                let yr = y / rise;
+                // Widening as it rises; past the line's ends it stops within a short taper.
+                let side = abs(q.z) / (reach * (1.0 + 0.35 * min(yr, 2.0)));
+                let past = max(max(-q.x, q.x - len), 0.0) / (0.6 * reach);
+                let along = clamp(q.x, 0.0, len);
+                // Billows: lumps rolling upward on the clock, chunky low down and thinning higher.
+                let n = 0.65 * wu_vnoise(vec2<f32>(along * 0.5 + q.z * 0.25, (y - u.clock.x * 1.1) * 0.55))
+                    + 0.35 * wu_vnoise(vec2<f32>(along * 1.3 + 7.0 + q.z * 0.5, (y - u.clock.x * 1.9) * 1.3));
+                let lump = smoothstep(0.2, 0.7, n + 0.3 - 0.3 * min(yr / 2.5, 1.0));
+                let win = (1.0 - smoothstep(2.2, 3.0, side)) * (1.0 - smoothstep(2.6, 3.4, yr))
+                    * (1.0 - smoothstep(1.5, 2.6, past));
+                // Soft against what the frame shows inside the box, so no edge cuts round it.
+                let soft = smoothstep(0.0, 1.5, t_d - ts);
+                let d = exp(-0.8 * side * side - yr - past * past) * lump * win * soft * dt;
+                od = od + d;
+                oy = oy + d * yr;
             }
-            let cover = (1.0 - exp(-VEIL_SPRAY_K * size * at.w * od)) * VEIL_SPRAY_MAX;
-            lin = mix(lin, mist_c, cover);
+            if (od <= 0.0) {
+                continue;
+            }
+            // Dense and bright at the base; over the curtain it hides little.
+            let high = smoothstep(0.8, 2.2, oy / od);
+            let cap = mix(VEIL_SPRAY_MAX, VEIL_SPRAY_TOP, high);
+            let cover = (1.0 - exp(-VEIL_SPRAY_K * strength * od)) * cap;
+            lin = mix(lin, mist_c * mix(1.0, 0.85, high), cover);
         }
     }
     return wu_enc(lin);
