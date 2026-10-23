@@ -6130,7 +6130,7 @@ fn sc_layer(a: WaterLayer, sc: ShoreContact, f_surf: f32, refl: vec3<f32>, spec:
 // the map's own slope channels (R/G, see [`foam_noise`]). Reads are taken against an origin the eye
 // carries in 64-yd steps ([`rf_uv`]), so a lattice coordinate stays small far from the map's
 // centre. Rotated lattices are read on fixed bearings and blended by the current's bearing
-// ([`rf_streak_field`], [`rf_standing`]), never turned per pixel: a rotation that varies across the
+// ([`rf_streak_lines`], [`rf_standing`]), never turned per pixel: a rotation that varies across the
 // surface shears world coordinates into swirls. Time enters through the river clock
 // (`preview.clocks.x`, [`RF_PERIOD_S`]) as whole turns per period, so nothing jumps when it wraps.
 
@@ -6487,16 +6487,11 @@ fn rf_foam_shade(g: vec2<f32>, edge_band: f32, to_view: vec3<f32>, sun: vec3<f32
 }
 
 /// One fixed bearing's streak field: the map stretched [`RF_STREAK_STRETCH`] times along bearing
-/// `bin` (of four over half a turn), read at the two phases' points `q0` and `q1`.
-fn rf_streak_bin(
-    q0: vec2<f32>,
-    q1: vec2<f32>,
-    bin: f32,
-    o: vec2<f32>,
-    ddx: vec2<f32>,
-    ddy: vec2<f32>,
-    w0: f32,
-) -> RfNoise {
+/// `bin` (of four over half a turn), read once at the world point `q`. Round 4: a line is a seam
+/// where the current gathers foam, and it stays put; its beads and breaks carry the motion along
+/// it (round 3's two phases crossfaded two unrelated fields, so the lines swam sideways and
+/// re-formed every 0.8 s).
+fn rf_streak_bin(q: vec2<f32>, bin: f32, o: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> RfNoise {
     let a = bin * (RF_PI / 4.0);
     let along = vec2<f32>(cos(a), sin(a));
     let across = vec2<f32>(-along.y, along.x);
@@ -6504,32 +6499,23 @@ fn rf_streak_bin(
         across / (4.0 * RF_STREAK_YD),
         along / (4.0 * RF_STREAK_YD * RF_STREAK_STRETCH),
     );
-    let off = vec2<f32>(0.13, 0.57) * bin;
-    let n0 = rf_noise(rf_uv(q0, jac, o) + off, jac, ddx, ddy);
-    let n1 = rf_noise(rf_uv(q1, jac, o) + off + vec2<f32>(0.37, 0.61), jac, ddx, ddy);
-    return rf_mix2(n0, n1, w0);
+    return rf_noise(rf_uv(q, jac, o) + vec2<f32>(0.13, 0.57) * bin, jac, ddx, ddy);
 }
 
-/// The streak field along the current `e1`: the two fixed bearings either side of its bearing,
+/// The streak lines along the current `e1`: the two fixed bearings either side of its bearing,
 /// blended by how near each is. Streaks are lines, so the bearing is taken over half a turn.
-fn rf_streak_field(
-    q0: vec2<f32>,
-    q1: vec2<f32>,
+fn rf_streak_lines(
+    xz: vec2<f32>,
     e1: vec2<f32>,
     o: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
-    w0: f32,
 ) -> RfNoise {
     let f = fract(atan2(e1.y, e1.x) / RF_PI) * 4.0;
     let b0 = floor(f);
     let t = f - b0;
     let b1 = select(b0 + 1.0, 0.0, b0 >= 3.0);
-    return rf_mix2(
-        rf_streak_bin(q0, q1, b0, o, ddx, ddy, w0),
-        rf_streak_bin(q0, q1, b1, o, ddx, ddy, w0),
-        1.0 - t,
-    );
+    return rf_mix2(rf_streak_bin(xz, b0, o, ddx, ddy), rf_streak_bin(xz, b1, o, ddx, ddy), 1.0 - t);
 }
 
 /// The standing waves of supercritical water as a slope: the wave whose phase speed √(g/k) equals
@@ -6594,11 +6580,19 @@ fn rf_obstacle(p: vec3<f32>, e1: vec2<f32>) -> f32 {
     return hit;
 }
 
-/// The rafts' own clock: a quarter of the river clock, so a set of rafts lives 4 s (round 3 tried 8 s:
-/// in a fast rapid the linear advection sheared a set out of shape within a second).
-const RF_RAFT_TURNS: f32 = 4.0;
+/// The rafts' own clock: a third of the river clock, so a set of rafts lives 5.3 s (round 3's 8 s
+/// sheared because the per-pixel phase's warp folded most of a fast rapid's rafts at that length;
+/// round 4 carries each set rigidly, and a longer life slows how fast a raft grows and goes).
+const RF_RAFT_TURNS: f32 = 3.0;
+/// The rafts' carry at most, yards a second: faster water carries them no faster, so across a rapid
+/// running faster than this the carry is uniform and cannot shear a raft.
+const RF_RAFT_CARRY: f32 = 2.5;
 /// The bubble lace a raft is drawn through, lookups a yard: finer than the shore's.
 const RF_LACE_SCALE: f32 = 1.5;
+/// Each raft is born within its set's first `RF_RAFT_BIRTH` of a life, by a field carried with it,
+/// and lives `RF_RAFT_SPAN` of it, so every raft of a set is gone before the set's frame restarts.
+const RF_RAFT_BIRTH: f32 = 0.2;
+const RF_RAFT_SPAN: f32 = 0.75;
 
 /// One set of rafts.
 struct RfRaft {
@@ -6608,13 +6602,22 @@ struct RfRaft {
     band: f32,
 };
 
+/// The rafts' bubble lace, and the field each raft is born by.
+struct RfLace {
+    v: f32,
+    fw: f32,
+    // The warp tap's height as a unit field, about 5 yd across, riding the raft.
+    stag: f32,
+};
+
 /// [`foam_noise`] without its drifts: the rafts' lace rides the raft, so a raft's edge (the
 /// lace's cut) holds its shape while it is carried instead of boiling as the shore's pattern
-/// drifts under it.
-fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
+/// drifts under it. The warp tap's height is the raft's birth field, at no extra read.
+fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> RfLace {
     let rot = vec2<f32>(0.8305, 0.5570);
     let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
-    let warp = textureSampleGrad(ripples, ripples_samp, p * 0.031, ddx * 0.031, ddy * 0.031).rg * 2.0 - 1.0;
+    let wt = textureSampleGrad(ripples, ripples_samp, p * 0.031, ddx * 0.031, ddy * 0.031);
+    let warp = wt.rg * 2.0 - 1.0;
     let a_dx = ddx * 0.83;
     let a_dy = ddy * 0.83;
     let a = textureSampleGrad(ripples, ripples_samp, p * 0.83 + warp * 0.35, a_dx, a_dy);
@@ -6623,49 +6626,61 @@ fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> FoamNoise {
     let b = textureSampleGrad(ripples, ripples_samp, (r * p) * 1.97 + warp * 0.20, b_dx, b_dy);
     let ga = (a.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
     let gb = (b.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
-    var out: FoamNoise;
-    out.v = a.b * 0.55 + b.b * 0.45;
-    out.fw = (abs(dot(ga, a_dx)) + abs(dot(ga, a_dy))) * 0.55 + (abs(dot(gb, b_dx)) + abs(dot(gb, b_dy))) * 0.45;
-    return out;
+    let fw = (abs(dot(ga, a_dx)) + abs(dot(ga, a_dy))) * 0.55 + (abs(dot(gb, b_dx)) + abs(dot(gb, b_dy))) * 0.45;
+    return RfLace(a.b * 0.55 + b.b * 0.45, fw, (wt.b - 0.5) / RF_B_SD);
 }
 
-/// One set of whitewater rafts at `xz` (round 2), on the rafts' clock offset by `off` turns: the
-/// raft field carried by the current about the set's mid-life (so the shear has least to stretch
-/// where the rafts are fullest), a fresh offset each life, its cut falling as the set is born and
-/// rising as it dissolves (a raft grows from specks, drifts, opens into lace and goes, rather than
-/// morphing), and drawn through the bubble lace ([`sc_bubble_mask`]).
+/// [`sc_bubble_mask`] for a raft: its lace's interior is thicker (three quarters of the edge's white,
+/// not three fifths), so a carried raft's inside stays white over the water moving under it
+/// instead of flickering across the white of the frame.
+fn rf_lace_mask(c: f32, pat: f32, fw: f32) -> f32 {
+    let th = 1.0 - c;
+    let e = max(1.5 * fw, 0.04);
+    let edge = smoothstep(th - e, th + e, pat);
+    let inner = smoothstep(th, th + 0.35, pat);
+    let far = smoothstep(0.25, 0.6, fw);
+    return mix(edge * (0.76 + 0.24 * inner), c, far) * smoothstep(0.0, 0.04, c);
+}
+
+/// One set `k` (0 or 1, half a life apart) of whitewater rafts at `xz` (round 4). The set's frame
+/// is carried rigidly, one phase for every pixel, about the set's mid-life: round 3's per-pixel
+/// phase was read in the world, a fixed warp the rafts slid through, folding them wherever the
+/// lumps' slope along the current passed 1/(10 yd · 0.12). Each raft is born on its own, by a field
+/// carried with it, and its life scales the cover the cut keeps, never its opacity: a raft grows
+/// from its peaks and shrinks back into them, white throughout, instead of a grey wash crossing
+/// white with the whole set at once. Drawn through the bubble lace ([`rf_lace_mask`]).
 fn rf_raft(
     xz: vec2<f32>,
     flow: vec2<f32>,
-    off: f32,
+    k: f32,
     cov: f32,
     o: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
     px: f32,
 ) -> RfRaft {
-    let t = water_reflect.preview.clocks.x * RF_RAFT_TURNS + off;
+    let t = water_reflect.preview.clocks.x * RF_RAFT_TURNS + 0.5 * k;
     let p = fract(t);
     let cyc = floor(t) - RF_RAFT_TURNS * floor(floor(t) / RF_RAFT_TURNS);
-    let h = fract(vec2<f32>(0.618034, 0.754877) * (cyc + 1.0) + vec2<f32>(0.13, 0.41) * floor(off + 0.25));
-    // Round 3: carried at most 10 yd over a life, so a rapid's shear cannot churn a raft's outline.
+    let h = fract(vec2<f32>(0.618034, 0.754877) * (cyc + 1.0) + vec2<f32>(0.13, 0.41) * k);
     let life_s = RF_PERIOD_S / RF_RAFT_TURNS;
-    let carry = flow * min(1.0, 10.0 / max(length(flow) * life_s, 1e-3));
+    let carry = flow * min(1.0, RF_RAFT_CARRY / max(length(flow), 1e-3));
     let q = xz - carry * ((p - 0.5) * life_s);
     let j = rf_scale(1.0 / (4.0 * RF_RAFT_YD));
     let n = rf_noise(rf_uv(q, j, o) + h, j, ddx, ddy);
-    // Round 3: the cut holds for the whole life, so a raft keeps its outline while it drifts; the
-    // set comes and goes by its opacity and by its lace opening into holes as it ages.
-    let life = smoothstep(0.0, 0.18, p) * (1.0 - smoothstep(0.62, 1.0, p));
-    let c = cov * 0.75;
-    let lev = rf_level(max(c, 0.002));
-    let body = smoothstep(lev - 0.3, lev + 1.0, n.n) * smoothstep(0.0, 0.02, c);
     let pat = rf_lace_noise((q + h * 37.0) * RF_LACE_SCALE, ddx * RF_LACE_SCALE, ddy * RF_LACE_SCALE);
+    let born = RF_RAFT_BIRTH * saturate(0.5 + 0.5 * pat.stag);
+    let u = saturate((p - born) / RF_RAFT_SPAN);
+    let grow = smoothstep(0.0, 0.32, u) * (1.0 - smoothstep(0.58, 1.0, u));
+    let c = cov * 0.75 * grow;
+    let lev = rf_level(max(c, 0.002));
+    let body = smoothstep(lev - 0.15, lev + 0.45, n.n) * smoothstep(0.0, 0.004, c);
     let pv = saturate((pat.v - 0.5) * 3.5 + 0.5);
-    let open = mix(0.84, 0.5, smoothstep(0.45, 1.0, p));
-    var foam = sc_bubble_mask(min(body * 1.1, open), pv, pat.fw * 3.5);
+    // The lace opens as the raft ages, but its unresolved mean stays white.
+    let open = mix(0.86, 0.74, smoothstep(0.55, 1.0, u));
+    var foam = rf_lace_mask(min(body * 1.1, open), pv, pat.fw * 3.5);
     // Unresolved, lace is mostly water: its mean, not a veil over the mirror.
-    foam = mix(foam, c * 0.5, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px)) * life;
+    foam = mix(foam, c * 0.5, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px));
     return RfRaft(foam, n.g, body * (1.0 - body) * 4.0);
 }
 
@@ -6717,39 +6732,48 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     // Round 3: the whole of it under a quarter of the surface, the shallow contacts included (they
     // whitened STV's upper reach, which is shallow throughout, past round 2's cap).
     let cov = min(max(min(0.45 * turb * turb, 0.24), max(0.5 * tail, 0.4 * contact)), 0.26);
-    let r0 = rf_raft(xz, i.flow, 0.0 + 0.12 * lump.n, cov, o, ddx, ddy, px);
-    let r1 = rf_raft(xz, i.flow, 0.5 + 0.12 * lump.n, cov, o, ddx, ddy, px);
+    let r0 = rf_raft(xz, i.flow, 0.0, cov, o, ddx, ddy, px);
+    let r1 = rf_raft(xz, i.flow, 1.0, cov, o, ddx, ddy, px);
     var white = max(r0.foam, r1.foam) * RF_WHITE_LEVEL * smoothstep(0.0, 0.05, cov);
     let r_g = select(r1.g, r0.g, r0.foam >= r1.foam);
     let r_band = max(r0.band, r1.band);
 
     var streak = 0.0;
 #ifndef WATER_TIER_LOW
-    let sl = rf_streak_field(q0, q1, s.e1, o, ddx, ddy, ph.w0);
     let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
     // Foam is carried on running water, not on a lake's slow drift.
     let carried = saturate(0.04 + 0.45 * s.turb + 0.40 * shear + 0.6 * tail)
         * smoothstep(0.8, 2.6, s.speed);
-    // A line survives where the rafts' field clears the level its load sets, so lines break up and
-    // run out of the whitewater they come from.
-    let lev_c = rf_level(carried);
-    let brk = smoothstep(lev_c - 0.35, lev_c + 0.35, raft.n + 0.8);
-    // Yards to the field's zero line, its first-order distance |n| / |∇n|.
-    let dist = abs(sl.n) / max(length(sl.g), 0.5);
-    let wl = RF_STREAK_W_YD * (0.35 + 0.65 * brk) * (0.6 + 0.8 * carried);
-    let aa = max(0.6 * px, 0.01);
-    let line_v = (1.0 - smoothstep(wl - aa, wl + aa, dist)) * smoothstep(0.0, 0.3, brk)
-        * (0.55 + 0.45 * brk);
-    // Lines only where foam is carried in some load, so a calm run stays clear, and strings of
-    // bubbles rather than paint: the bubble lace cuts each line (round 2).
-    let bead_p = sc_pattern(xz, i.flow, ddx, ddy, 2.6);
-    let bead = sc_bubble_mask(0.55 + 0.3 * carried, bead_p.v, bead_p.fw);
-    // Round 3: lines only where the load is real, so the reach is not netted with loops.
-    // ...and in patches along the reach (the lumps' high third), so the zero lines read as a few
-    // streaks along the current and not as a net of loops over all of it.
-    streak = mix(line_v * bead, carried * 0.12, smoothstep(0.6 * wl, 2.0 * wl, px))
-        * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * (1.0 - saturate(turb * 1.3))
-        * smoothstep(0.38, 0.75, carried) * smoothstep(0.1, 0.8, lump.n + 0.6 * tail);
+    // Round 3: lines only where the load is real, so the reach is not netted with loops, and in
+    // patches along the reach (the lumps' high third), so the zero lines read as a few streaks
+    // along the current and not as a net of loops over all of it; none in the whitewater's core.
+    // Round 4: where none can show, the lines' reads are skipped.
+    let gate = (1.0 - saturate(turb * 1.3)) * smoothstep(0.38, 0.75, carried)
+        * smoothstep(0.1, 0.8, lump.n + 0.6 * tail);
+    if (gate > 0.0) {
+        let sl = rf_streak_lines(xz, s.e1, o, ddx, ddy);
+        // A line survives where the rafts' field clears the level its load sets, so lines break up
+        // and run out of the whitewater they come from.
+        let lev_c = rf_level(carried);
+        let brk = smoothstep(lev_c - 0.35, lev_c + 0.35, raft.n + 0.8);
+        // Yards to the field's zero line, its first-order distance |n| / |∇n|, and the pixel's
+        // footprint across the line (round 4: not its larger axis, which blurred a line running
+        // away from the eye to its mean).
+        let gl = length(sl.g);
+        let nrm = select(vec2<f32>(0.0, 1.0), sl.g / max(gl, 1e-4), gl > 1e-4);
+        let fp = max(max(abs(dot(ddx, nrm)), abs(dot(ddy, nrm))), 1e-4);
+        let dist = abs(sl.n) / max(gl, 0.5);
+        let wl = RF_STREAK_W_YD * (0.35 + 0.65 * brk) * (0.6 + 0.8 * carried);
+        let aa = max(0.6 * fp, 0.01);
+        let line_v = (1.0 - smoothstep(wl - aa, wl + aa, dist)) * smoothstep(0.0, 0.3, brk)
+            * (0.55 + 0.45 * brk);
+        // Strings of bubbles rather than paint: the bubble lace cuts each line (round 2), and its
+        // beads run down the line with the current.
+        let bead_p = sc_pattern(xz, i.flow, ddx, ddy, 2.6);
+        let bead = sc_bubble_mask(0.55 + 0.3 * carried, bead_p.v, bead_p.fw);
+        streak = mix(line_v * bead, carried * 0.12, smoothstep(0.6 * wl, 2.0 * wl, fp))
+            * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * gate;
+    }
 #endif
 
     let env = smoothstep(0.8, 1.4, s.froude) * smoothstep(1.2, 3.5, s.speed)
