@@ -517,205 +517,489 @@ fn drive_under_lanes(
 /// The falls the rows hold, and how far from the eye one may be, yards.
 const FALLS_MAX: usize = 8;
 const FALLS_REACH: f32 = 400.0;
+/// A fall is in view within the frame's half width and this margin, radians, of the view's bearing
+/// (the spray reaching past the frame's edge), or this near, yards.
+const FALL_VIEW_MARGIN: f32 = 0.25;
+const FALL_VIEW_NEAR: f32 = 20.0;
 /// A fall model's part: at least this tall, yards, and standing in water whose surface it crosses
 /// at least this far above its bottom (or its bottom within the second of the surface).
 const FALL_MIN_HEIGHT: f32 = 2.5;
 const FALL_FOOT_SLACK: f32 = 2.0;
-/// Parts nearer than this, yards, are one fall, while the joined line stays under
-/// `FALL_LINE_MAX`, which no single part may exceed either.
-const FALL_JOIN: f32 = 3.0;
+/// Foot points nearer than this, yards, at one pool are one fall, and a run of them splits where
+/// it leaves a wider gap; no line is longer than `FALL_LINE_MAX`.
+const FALL_JOIN: f32 = 4.0;
 const FALL_LINE_MAX: f32 = 60.0;
 /// The gap rule's reach from the eye, yards, how far out past a surface's end it looks for the
-/// lower one, yards, and how often (seconds) or after how far a move (yards) it rescans.
+/// lower one, yards, and how often (seconds) or after how far a move (yards) it rescans; a part's
+/// foot is rebuilt as often while the loaded water or terrain changes.
 const FALL_GAP_REACH: f32 = 140.0;
 const FALL_GAP_OUT: [f32; 3] = [2.0, 6.0, 12.0];
 const FALL_GAP_RESCAN: (f32, f32) = (4.0, 20.0);
+/// A face is steep when its normal's vertical part is at most this share of the normal (more than
+/// about 45° from level), and a part is a curtain when its steep faces are at least
+/// `FALL_STEEP_SHARE` of its area.
+const FALL_STEEP_NY: f32 = 0.7;
+const FALL_STEEP_SHARE: f32 = 0.5;
+/// A pool above a curtain's lowest one (a ledge it feeds, or the basin it leaves) is a foot too only
+/// with at least this share of the curtain above the lowest pool also above it: a lip, a dam's
+/// reservoir, has next to none.
+const FALL_ABOVE_SHARE: f32 = 0.2;
+/// Per part: the steep faces sampled for its pools, the pools kept, the waterline's spacing, yards,
+/// and the foot points kept per pool.
+const FALL_POOL_SAMPLES: usize = 128;
+const FALL_POOLS: usize = 2;
+const FALL_STEP: f32 = 0.5;
+const FALL_POINTS: usize = 128;
+/// A curtain that comes down on the bank, its waterline inside ground standing at most
+/// `FALL_BANK_RISE` yards over the pool, has its foot at the water in front of it, within
+/// `FALL_BANK_REACH` yards along the face's normal (at most `FALL_BANK_TRIES` crossings tried per
+/// pool); such a foot spreads `FALL_BANK_SPREAD` as far as one in the pool (`$WOW_PREVIEW_FALLS_BANK`).
+const FALL_BANK_RISE: f32 = 4.0;
+const FALL_BANK_REACH: f32 = 6.0;
+const FALL_BANK_TRIES: usize = 48;
+const FALL_BANK_SPREAD: f32 = 0.6;
+/// How often, seconds, a part that found no foot looks again while the loaded world holds (it
+/// looks again a few seconds after the world changes).
+const FALL_RETRY: f32 = 16.0;
+/// The parts whose feet one scan may build: a new stretch of falls (Elwynn's 44 parts) spreads
+/// over a few scans instead of one long frame.
+const FALL_REBUILDS: usize = 8;
+/// A run of foot points longer than `FALL_BEND_MIN` yards splits in two where its thirds turn by
+/// more than this, radians, so a foot curving round a rock is a few lines, not one chord.
+const FALL_BEND: f32 = 0.45;
+const FALL_BEND_MIN: f32 = 9.0;
 
-/// Join `fall` to a fall in `found` it overlaps or nearly does while the joined line stays under
-/// [`FALL_LINE_MAX`], or add it.
-fn join_fall(found: &mut Vec<Fall>, fall: Fall) {
-    let near = |f: &Fall| {
-        let seg = |p: Vec2| {
-            let ab = f.b - f.a;
-            let t = ((p - f.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-            (f.a + ab * t).distance(p)
-        };
-        seg(fall.a).min(seg(fall.b)) < FALL_JOIN && (f.foot_y - fall.foot_y).abs() < 1.0
-    };
-    let joined = |f: &Fall| {
-        [f.a, f.b, fall.a, fall.b]
-            .iter()
-            .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
-                (l.min(*p), h.max(*p))
-            })
-    };
-    if let Some(f) = found
-        .iter_mut()
-        .find(|f| near(f) && (joined(f).1 - joined(f).0).max_element() <= FALL_LINE_MAX)
-    {
-        let (pl, ph) = joined(f);
-        let mz = (pl + ph) * 0.5;
-        (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
-            (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))
-        } else {
-            (Vec2::new(mz.x, pl.y), Vec2::new(mz.x, ph.y))
-        };
-        f.drop = f.drop.max(fall.drop);
-    } else {
-        found.push(fall);
-    }
+/// One point of a foot: where a curtain meets its pool (Bevy XZ), the pool's surface (Bevy Y), the
+/// drop over it, and how far its pool spreads against one where a curtain enters the water (1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FootPt {
+    p: Vec2,
+    y: f32,
+    drop: f32,
+    spread: f32,
 }
 
-/// A thick fall part's foot (round 3): its box `lo`-`hi` (Bevy) sampled on an 8×8 grid at the pool,
-/// a cell wet where `surface_y` finds the pool there and the ground (`ground_y`) lies under it; the
-/// line through the wet cells that have a dry neighbour, along their spread (at most
-/// [`FALL_LINE_MAX`]), at their mean surface. `None` with no such cells (no rock under the part, or
-/// no pool), so the caller keeps its own rule.
-fn thick_foot(
-    lo: Vec3,
-    hi: Vec3,
-    surface_y: &impl Fn(f32, f32) -> Option<f32>,
+/// What [`mesh_foot`] found besides the points: the curtain's bounds, and the counts
+/// `$WOW_PREVIEW_FALLS_LOG` reports.
+#[derive(Default)]
+struct FootStats {
+    steep: f32,
+    top: f32,
+    bottom: f32,
+    pools: Vec<f32>,
+    cut: usize,
+    wet: usize,
+    bank: usize,
+    dry: usize,
+    off: usize,
+    rise: (f32, f32),
+    /// The steep faces' bounds, when the part is a curtain.
+    curtain: Option<(Vec3, Vec3)>,
+}
+
+/// A curtain's foot from its own triangles (Bevy world space): where its steep faces cross the pool
+/// below them. A pool is the water (`surface_y(x, z, y)`, Bevy Y: the lowest surface over x, z that
+/// answers at y) under the curtain's faces that its bottom reaches within [`FALL_FOOT_SLACK`], with
+/// at least [`FALL_MIN_HEIGHT`] of curtain above it, the lowest such and those with
+/// [`FALL_ABOVE_SHARE`] of the curtain above it; a curtain that ends over its pool is cut at its
+/// bottom edge. The waterline, every [`FALL_STEP`] yards, is a foot where the pool lies there over
+/// its bed (`ground_y`, the terrain; no answer counts as water); where it runs inside the bank, no
+/// more than [`FALL_BANK_RISE`] under the ground, the foot is the pool in front of it, within
+/// [`FALL_BANK_REACH`] along the face's normal, spreading `bank` as far. At most [`FALL_POOLS`] pools
+/// and [`FALL_POINTS`] points per pool.
+fn mesh_foot(
+    tris: &[[Vec3; 3]],
+    surface_y: &impl Fn(f32, f32, f32) -> Option<f32>,
     ground_y: &impl Fn(f32, f32) -> Option<f32>,
-) -> Option<(Vec2, Vec2, f32)> {
-    const N: usize = 8;
-    let cell = |i: usize, j: usize| {
-        Vec2::new(
-            lo.x + (hi.x - lo.x) * (i as f32 + 0.5) / N as f32,
-            lo.z + (hi.z - lo.z) * (j as f32 + 0.5) / N as f32,
-        )
+    bank: f32,
+    stats: &mut FootStats,
+) -> Vec<FootPt> {
+    // The steep faces: (lowest y, highest y, triangle, area).
+    let mut steep: Vec<(f32, f32, usize, f32)> = Vec::new();
+    let (mut total, mut steep_area) = (0.0f32, 0.0f32);
+    let (mut top, mut bottom) = (f32::NEG_INFINITY, f32::INFINITY);
+    let (mut lo3, mut hi3) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+    for (i, t) in tris.iter().enumerate() {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        let a = n.length();
+        if !a.is_finite() || a < 1e-4 {
+            continue;
+        }
+        total += a;
+        if n.y.abs() <= FALL_STEEP_NY * a {
+            let lo = t[0].y.min(t[1].y).min(t[2].y);
+            let hi = t[0].y.max(t[1].y).max(t[2].y);
+            steep_area += a;
+            top = top.max(hi);
+            bottom = bottom.min(lo);
+            lo3 = lo3.min(t[0].min(t[1]).min(t[2]));
+            hi3 = hi3.max(t[0].max(t[1]).max(t[2]));
+            steep.push((lo, hi, i, a));
+        }
+    }
+    stats.steep = steep_area / total.max(1e-6);
+    (stats.top, stats.bottom) = (top, bottom);
+    if steep.is_empty() || steep_area < FALL_STEEP_SHARE * total || top - bottom < FALL_MIN_HEIGHT {
+        return Vec::new();
+    }
+    stats.curtain = Some((lo3, hi3));
+    // The steep area above `s`, each face's share by its height.
+    let above = |s: f32| -> f32 {
+        steep
+            .iter()
+            .map(|&(lo, hi, _, a)| a * ((hi - s) / (hi - lo).max(1e-3)).clamp(0.0, 1.0))
+            .sum()
     };
-    let mut wet = [[None::<f32>; N]; N];
-    for (i, col) in wet.iter_mut().enumerate() {
-        for (j, w) in col.iter_mut().enumerate() {
-            let p = cell(i, j);
-            *w = surface_y(p.x, p.y).filter(|&y| ground_y(p.x, p.y).is_none_or(|g| g < y - 0.25));
+    // The pools under the steep faces.
+    let stride = steep.len().div_ceil(FALL_POOL_SAMPLES).max(1);
+    let mut pools: Vec<f32> = Vec::new();
+    for &(_, _, i, _) in steep.iter().step_by(stride) {
+        let t = &tris[i];
+        let c = (t[0] + t[1] + t[2]) / 3.0;
+        let Some(s) = surface_y(c.x, c.z, c.y) else {
+            continue;
+        };
+        if bottom <= s + FALL_FOOT_SLACK
+            && top - s >= FALL_MIN_HEIGHT
+            && !pools.iter().any(|&p| (p - s).abs() < 0.5)
+        {
+            pools.push(s);
         }
     }
-    // The pool is the lowest water under the part; a reservoir above it (a dam's top) is not.
-    let low = wet
-        .iter()
-        .flatten()
-        .flatten()
-        .fold(f32::INFINITY, |a, &y| a.min(y));
-    for w in wet.iter_mut().flatten() {
-        if w.is_some_and(|y| y > low + 1.5) {
-            *w = None;
-        }
-    }
-    let mut pts: Vec<(Vec2, f32)> = Vec::new();
-    for i in 0..N {
-        for j in 0..N {
-            let Some(y) = wet[i][j] else {
+    pools.sort_by(f32::total_cmp);
+    let base = pools.first().map_or(0.0, |&s| above(s));
+    pools.retain(|&s| above(s) >= FALL_ABOVE_SHARE * base);
+    pools.truncate(FALL_POOLS);
+    stats.pools.clone_from(&pools);
+    stats.rise = (f32::INFINITY, f32::NEG_INFINITY);
+    let mut out = Vec::new();
+    for h in pools {
+        let cut = if bottom < h { h } else { bottom + 0.3 };
+        // The waterline: each steep face's segment across the cut, every half yard, once per
+        // half-yard cell, with the face's horizontal normal.
+        let mut seen: bevy::platform::collections::HashSet<(i32, i32)> = Default::default();
+        let mut line: Vec<(Vec2, Vec2)> = Vec::new();
+        for &(lo, hi, i, _) in &steep {
+            if lo > cut || hi < cut {
                 continue;
-            };
-            let dry = |di: i32, dj: i32| {
-                let (a, b) = (i as i32 + di, j as i32 + dj);
-                (0..N as i32).contains(&a)
-                    && (0..N as i32).contains(&b)
-                    && wet[a as usize][b as usize].is_none()
-            };
-            if dry(1, 0) || dry(-1, 0) || dry(0, 1) || dry(0, -1) {
-                pts.push((cell(i, j), y));
+            }
+            let t = &tris[i];
+            let mut ends: [Vec2; 2] = [Vec2::ZERO; 2];
+            let mut k = 0;
+            for (p, q) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let (dp, dq) = (p.y - cut, q.y - cut);
+                if (dp < 0.0) == (dq < 0.0) || k == 2 {
+                    continue;
+                }
+                let x = p + (q - p) * (dp / (dp - dq));
+                ends[k] = Vec2::new(x.x, x.z);
+                k += 1;
+            }
+            if k == 0 {
+                continue;
+            }
+            let n3 = (t[1] - t[0]).cross(t[2] - t[0]);
+            let n = Vec2::new(n3.x, n3.z).normalize_or_zero();
+            let (a, b) = (ends[0], ends[k - 1]);
+            let steps = ((a.distance(b) / FALL_STEP).ceil() as usize).clamp(1, 256);
+            for j in 0..=steps {
+                let x = a.lerp(b, j as f32 / steps as f32);
+                if seen.insert((
+                    (x.x / FALL_STEP).floor() as i32,
+                    (x.y / FALL_STEP).floor() as i32,
+                )) {
+                    line.push((x, n));
+                }
+            }
+        }
+        stats.cut += line.len();
+        let wet = |q: Vec2| {
+            ground_y(q.x, q.y).is_none_or(|g| g < h - 0.25)
+                && surface_y(q.x, q.y, h + 1.0).is_some_and(|s| (s - h).abs() < 0.75)
+        };
+        let drop = (top - h).min(150.0);
+        let stride = line.len().div_ceil(FALL_POINTS).max(1);
+        let mut banked = Vec::new();
+        for &(p, n) in line.iter().step_by(stride) {
+            match ground_y(p.x, p.y) {
+                Some(g) if g >= h - 0.25 => {
+                    stats.rise = (stats.rise.0.min(g - h), stats.rise.1.max(g - h));
+                    if g - h <= FALL_BANK_RISE {
+                        banked.push((p, n));
+                    } else {
+                        stats.dry += 1;
+                    }
+                }
+                _ if wet(p) => {
+                    stats.wet += 1;
+                    out.push(FootPt {
+                        p,
+                        y: h,
+                        drop,
+                        spread: 1.0,
+                    });
+                }
+                _ => stats.off += 1,
+            }
+        }
+        // On the bank: the nearest water along the face's normal, either way.
+        let stride = banked.len().div_ceil(FALL_BANK_TRIES).max(1);
+        for &(p, n) in banked.iter().step_by(stride) {
+            let found = (1..=(FALL_BANK_REACH / FALL_STEP) as usize)
+                .flat_map(|k| [1.0, -1.0].map(|sgn| p + n * (sgn * k as f32 * FALL_STEP)))
+                .find(|&q| wet(q));
+            match found {
+                Some(q) => {
+                    stats.bank += 1;
+                    out.push(FootPt {
+                        p: q,
+                        y: h,
+                        drop,
+                        spread: bank,
+                    });
+                }
+                None => stats.dry += 1,
             }
         }
     }
+    out
+}
+
+/// The root of `i`'s set in a union-find forest, halving the path on the way.
+fn root(parent: &mut [usize], mut i: usize) -> usize {
+    while parent[i] != i {
+        parent[i] = parent[parent[i]];
+        i = parent[i];
+    }
+    i
+}
+
+/// Per curtain (its steep faces' bounds, Bevy), the top of the cascade it belongs to: curtains whose
+/// footprints come within [`FALL_JOIN`] of each other and whose heights meet within
+/// [`FALL_FOOT_SLACK`] are one cascade (Elwynn's tiers, one stream stepping down ledges), whose
+/// spray at the foot is that of the whole fall.
+fn cascade_tops(curtains: &[(Vec3, Vec3)]) -> Vec<f32> {
+    let n = curtains.len();
+    let mut group: Vec<usize> = (0..n).collect();
+    let meet = |(alo, ahi): (Vec3, Vec3), (blo, bhi): (Vec3, Vec3)| {
+        alo.x <= bhi.x + FALL_JOIN
+            && blo.x <= ahi.x + FALL_JOIN
+            && alo.z <= bhi.z + FALL_JOIN
+            && blo.z <= ahi.z + FALL_JOIN
+            && alo.y <= bhi.y + FALL_FOOT_SLACK
+            && blo.y <= ahi.y + FALL_FOOT_SLACK
+    };
+    for i in 0..n {
+        for j in i + 1..n {
+            if meet(curtains[i], curtains[j]) {
+                let (a, b) = (root(&mut group, i), root(&mut group, j));
+                if a != b {
+                    group[a.max(b)] = a.min(b);
+                }
+            }
+        }
+    }
+    let mut top = vec![f32::NEG_INFINITY; n];
+    for (i, c) in curtains.iter().enumerate() {
+        let r = root(&mut group, i);
+        top[r] = top[r].max(c.1.y);
+    }
+    (0..n).map(|i| top[root(&mut group, i)]).collect()
+}
+
+/// The foot lines through `pts`: points within [`FALL_JOIN`] of one another at one pool (within a
+/// yard) are one fall, whatever part or rule found them, fitted by [`fit_run`]. Each pool's points
+/// are first thinned to one per half-yard cell, in a fixed order, so the lines do not depend on
+/// the order the parts were found in.
+fn foot_lines(mut pts: Vec<FootPt>) -> Vec<Fall> {
+    pts.sort_by(|a, b| {
+        a.y.total_cmp(&b.y)
+            .then(a.p.x.total_cmp(&b.p.x))
+            .then(a.p.y.total_cmp(&b.p.y))
+    });
+    let key = |f: &FootPt| {
+        (
+            (f.p.x * 2.0).floor() as i32,
+            (f.p.y * 2.0).floor() as i32,
+            f.y.round() as i32,
+        )
+    };
+    let mut seen: bevy::platform::collections::HashSet<(i32, i32, i32)> = Default::default();
+    pts.retain(|f| seen.insert(key(f)));
+    let n = pts.len();
+    let cell = |p: Vec2| {
+        (
+            (p.x / FALL_JOIN).floor() as i32,
+            (p.y / FALL_JOIN).floor() as i32,
+        )
+    };
+    let mut grid: bevy::platform::collections::HashMap<(i32, i32), Vec<usize>> = Default::default();
+    for (i, f) in pts.iter().enumerate() {
+        grid.entry(cell(f.p)).or_default().push(i);
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    for i in 0..n {
+        let (cx, cz) = cell(pts[i].p);
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let Some(near) = grid.get(&(cx + dx, cz + dz)) else {
+                    continue;
+                };
+                for &j in near {
+                    if j > i
+                        && pts[i].p.distance(pts[j].p) < FALL_JOIN
+                        && (pts[i].y - pts[j].y).abs() < 1.0
+                    {
+                        let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                        if a != b {
+                            parent[a.max(b)] = a.min(b);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut group_of: Vec<Option<usize>> = vec![None; n];
+    let mut groups: Vec<Vec<FootPt>> = Vec::new();
+    for (i, &f) in pts.iter().enumerate() {
+        let r = root(&mut parent, i);
+        let g = *group_of[r].get_or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
+        groups[g].push(f);
+    }
+    let mut out = Vec::new();
+    for mut g in groups {
+        fit_run(&mut g, &mut out, 0);
+    }
+    out
+}
+
+/// Lines along one fall's foot points, appended to `out`: along the points' principal axis, at
+/// their mean offset across it and padded half a yard, split where they leave a gap wider than
+/// [`FALL_JOIN`], into even pieces no longer than [`FALL_LINE_MAX`], and in two (each refitted)
+/// where they bend by more than [`FALL_BEND`]. A run under 1.5 yd long, padding included, is no
+/// line. Each line takes its run's mean pool and spread and its greatest drop.
+fn fit_run(pts: &mut [FootPt], out: &mut Vec<Fall>, depth: u32) {
     if pts.len() < 2 {
-        return None;
+        return;
     }
     let n = pts.len() as f32;
-    let m = pts.iter().fold(Vec2::ZERO, |acc, (p, _)| acc + *p) / n;
-    let foot_y = pts.iter().map(|(_, y)| *y).sum::<f32>() / n;
+    let m = pts.iter().map(|f| f.p).sum::<Vec2>() / n;
     let (mut sxx, mut sxz, mut szz) = (0.0f32, 0.0f32, 0.0f32);
-    for (p, _) in &pts {
-        let d = *p - m;
+    for f in pts.iter() {
+        let d = f.p - m;
         sxx += d.x * d.x;
         sxz += d.x * d.y;
         szz += d.y * d.y;
     }
-    // The principal axis of the boundary cells.
     let ang = 0.5 * (2.0 * sxz).atan2(sxx - szz);
     let u = Vec2::new(ang.cos(), ang.sin());
-    let (mut t0, mut t1) = (f32::INFINITY, f32::NEG_INFINITY);
-    for (p, _) in &pts {
-        let t = (*p - m).dot(u);
-        t0 = t0.min(t);
-        t1 = t1.max(t);
-    }
-    let pad = 0.5 * ((hi.x - lo.x).max(hi.z - lo.z) / N as f32);
-    let (t0, t1) = (t0 - pad, t1 + pad);
-    let (t0, t1) = if t1 - t0 > FALL_LINE_MAX {
-        let c = 0.5 * (t0 + t1);
-        (c - 0.5 * FALL_LINE_MAX, c + 0.5 * FALL_LINE_MAX)
-    } else {
-        (t0, t1)
-    };
-    Some((m + u * t0, m + u * t1, foot_y))
-}
-
-/// The longest run of `f`'s foot line, sampled every yard, where the ground (`ground_y`, Bevy Y; no
-/// answer counts as water) lies at least a quarter yard under the pool's surface, padded half a
-/// yard; `None` under 1.5 yd.
-fn trim_fall(f: &Fall, ground_y: &impl Fn(f32, f32) -> Option<f32>) -> Option<Fall> {
-    let len = f.a.distance(f.b);
-    let n = (len.ceil() as usize).clamp(1, 120);
-    let wet = |i: usize| {
-        let p = f.a.lerp(f.b, i as f32 / n as f32);
-        ground_y(p.x, p.y).is_none_or(|g| g < f.foot_y - 0.25)
-    };
-    let (mut best, mut run_start) = (None::<(usize, usize)>, None::<usize>);
-    for i in 0..=n + 1 {
-        let w = i <= n && wet(i);
-        match (w, run_start) {
-            (true, None) => run_start = Some(i),
-            (false, Some(s0)) => {
-                let e = i - 1;
-                if best.is_none_or(|(b0, b1)| e - s0 > b1 - b0) {
-                    best = Some((s0, e));
-                }
-                run_start = None;
-            }
-            _ => {}
+    let nrm = u.perp();
+    let t = |f: &FootPt| (f.p - m).dot(u);
+    pts.sort_by(|a, b| t(a).total_cmp(&t(b)));
+    let mut start = 0;
+    for i in 1..=pts.len() {
+        if i < pts.len() && t(&pts[i]) - t(&pts[i - 1]) <= FALL_JOIN {
+            continue;
         }
+        let run = &mut pts[start..i];
+        start = i;
+        let (t0, t1) = (t(&run[0]), t(&run[run.len() - 1]));
+        let len = t1 - t0;
+        if len + 1.0 < 1.5 {
+            continue;
+        }
+        if depth < 6 && run.len() >= 4 && len > FALL_LINE_MAX {
+            let k = (len / FALL_LINE_MAX).ceil();
+            let mut s = 0;
+            for j in 1..=k as usize {
+                let end = t0 + len * j as f32 / k;
+                let e = if j == k as usize {
+                    run.len()
+                } else {
+                    s + run[s..].partition_point(|f| t(f) <= end)
+                };
+                fit_run(&mut run[s..e], out, depth + 1);
+                s = e;
+            }
+            continue;
+        }
+        if depth < 6 && run.len() >= 6 && len > FALL_BEND_MIN {
+            let third = |k: usize| {
+                let (s, e) = (run.len() * k / 3, run.len() * (k + 1) / 3);
+                run[s..e].iter().map(|f| f.p).sum::<Vec2>() / (e - s) as f32
+            };
+            let (p0, p1, p2) = (third(0), third(1), third(2));
+            let turn = (p1 - p0)
+                .normalize_or_zero()
+                .dot((p2 - p1).normalize_or_zero());
+            if turn < FALL_BEND.cos() {
+                let (l, r) = run.split_at_mut(run.len() / 2);
+                fit_run(l, out, depth + 1);
+                fit_run(r, out, depth + 1);
+                continue;
+            }
+        }
+        let k = run.len() as f32;
+        let c = run.iter().map(|f| (f.p - m).dot(nrm)).sum::<f32>() / k;
+        out.push(Fall {
+            a: m + u * (t0 - 0.5) + nrm * c,
+            b: m + u * (t1 + 0.5) + nrm * c,
+            foot_y: run.iter().map(|f| f.y).sum::<f32>() / k,
+            drop: run.iter().fold(0.0f32, |d, f| d.max(f.drop)),
+            spread: run.iter().map(|f| f.spread).sum::<f32>() / k,
+        });
     }
-    let (s0, e) = best?;
-    let step = len / n as f32;
-    if (e - s0) as f32 * step < 1.5 && len >= 1.5 {
-        return None;
-    }
-    let u = (f.b - f.a) / len.max(1e-4);
-    let t0 = (s0 as f32 * step - 0.5).max(0.0);
-    let t1 = (e as f32 * step + 0.5).min(len);
-    Some(Fall {
-        a: f.a + u * t0,
-        b: f.a + u * t1,
-        ..*f
-    })
 }
 
-/// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop.
+/// One fall, in Bevy world space: its foot line's ends (XZ), the pool's surface, the drop, and how
+/// far its pool and spray spread against a fall's into open water (1).
 #[derive(Clone, Copy)]
 struct Fall {
     a: Vec2,
     b: Vec2,
     foot_y: f32,
     drop: f32,
+    spread: f32,
 }
 
-/// The falls' foot lines (`preview.falls`): the loaded model parts that draw a scrolling texture
-/// (a texture transform moving mostly along V), stand at least [`FALL_MIN_HEIGHT`] tall and come
-/// down into water, each a line along its longer horizontal side at the water's surface. Rescanned
-/// twice a second; the nearest [`FALLS_MAX`] within [`FALLS_REACH`] are kept.
+/// A fall part's foot points as [`mesh_foot`] last found them, with the pose and the loaded world
+/// (water surfaces, terrain tiles) they were found for and when.
+struct PartFoot {
+    pose: bevy::math::Affine3A,
+    world: (usize, usize),
+    built: f32,
+    curtain: Option<(Vec3, Vec3)>,
+    pts: Vec<FootPt>,
+}
+
+/// A model part the falls scan reads: its pose, bound, material (for its texture's scroll) and
+/// resident triangles.
+type FallPart = (
+    Entity,
+    &'static GlobalTransform,
+    &'static Aabb,
+    &'static MeshMaterial3d<WowModelMaterial>,
+    Option<&'static benilla_world::interact::PickMesh>,
+);
+
+/// The falls' foot lines (`preview.falls`): among the loaded model parts that draw a scrolling
+/// texture (a texture transform moving mostly along V) and stand at least [`FALL_MIN_HEIGHT`]
+/// tall, where each curtain's own steep triangles ([`mesh_foot`]) cross the water below them,
+/// found once per part and kept while its pose and the loaded world hold (built again a few
+/// seconds after the world changes, or every [`FALL_RETRY`] while it finds none), each foot's
+/// drop its cascade's
+/// ([`cascade_tops`]), and the gap rule's edges; every point fitted into lines by [`foot_lines`].
+/// Rescanned twice a second; of those within [`FALLS_REACH`],
+/// the [`FALLS_MAX`] nearest are kept, those in view first.
 #[allow(clippy::too_many_arguments)]
 fn drive_fall_lanes(
     time: Res<Time>,
     style: Res<WaterStyle>,
-    cam: Query<&GlobalTransform, With<WorldCamera>>,
-    parts: Query<(
-        &GlobalTransform,
-        &Aabb,
-        &MeshMaterial3d<WowModelMaterial>,
-        &ViewVisibility,
-    )>,
+    cam: Query<(&GlobalTransform, Option<&Projection>), With<WorldCamera>>,
+    parts: Query<FallPart>,
     uv: Option<Res<benilla_world::doodad_anim::UvAnimMaterials>>,
     water: Query<&WaterChunkInfo>,
     index: Res<WaterIndex>,
@@ -725,7 +1009,8 @@ fn drive_fall_lanes(
     ),
     mut last: Local<f32>,
     mut found: Local<Vec<Fall>>,
-    mut gaps: Local<(Vec3, f32, Vec<Fall>)>,
+    mut feet: Local<EntityHashMap<PartFoot>>,
+    mut gaps: Local<(Vec3, f32, Vec<FootPt>)>,
     mut lanes: ResMut<PreviewLanes>,
 ) {
     let base = at(PV_FALLS);
@@ -733,7 +1018,14 @@ fn drive_fall_lanes(
         lanes.0[base..base + 64].fill(0.0);
         return;
     }
-    let Ok(eye) = cam.single().map(|t| t.translation()) else {
+    let Ok((eye, fwd, half)) = cam.single().map(|(t, p)| {
+        // The frame's horizontal half angle.
+        let half = match p {
+            Some(Projection::Perspective(p)) => ((p.fov * 0.5).tan() * p.aspect_ratio).atan(),
+            _ => 0.65,
+        };
+        (t.translation(), t.forward(), half)
+    }) else {
         return;
     };
     let now = time.elapsed_secs();
@@ -744,37 +1036,62 @@ fn drive_fall_lanes(
         };
         benilla_world::terrain_stream::terrain_height_under(st, adt, Vec3::new(x, 0.0, z))
     };
+    // The lowest water surface (Bevy Y) over a Bevy XZ point that answers at Bevy height `y`.
+    let surface_y = |x: f32, z: f32, y: f32| {
+        let w = bevy_to_wow(Vec3::new(x, y, z));
+        benilla_world::liquid::water_surface_at(
+            index
+                .over(w[0], w[1])
+                .iter()
+                .filter_map(|&e| water.get(e).ok()),
+            [w[0], w[1], w[2]],
+            LiquidClaim::Unknown,
+        )
+        .map(|s| wow_to_bevy([w[0], w[1], s]).y)
+    };
     if (now - *last).abs() >= 0.5 {
         *last = now;
-        found.clear();
         // `$WOW_PREVIEW_FALLS_LOG=1` (round 3): every scrolling part near the eye, its box and its
-        // scroll, logged whenever their number changes, to see why a visible fall finds no line.
+        // scroll, logged whenever their number changes, and each fall part's foot as it is built.
         static FALLS_LOG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let log_parts = *FALLS_LOG.get_or_init(|| lever::number("FALLS_LOG", 0.0, 0.0, 1.0) > 0.5);
+        static FALLS_BANK: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+        let bank =
+            *FALLS_BANK.get_or_init(|| lever::number("FALLS_BANK", FALL_BANK_SPREAD, 0.0, 1.0));
         let mut logged: Vec<String> = Vec::new();
+        let world = (
+            water.iter().count(),
+            ground.1.as_deref().map_or(0, |a| a.len()),
+        );
+        let mut pts: Vec<FootPt> = Vec::new();
+        let mut seen: bevy::ecs::entity::EntityHashSet = Default::default();
+        let mut curtains: Vec<Entity> = Vec::new();
+        let mut rebuilt = 0;
+        let clock = std::time::Instant::now();
         if let Some(uv) = uv {
-            for (t, aabb, mat, _seen) in &parts {
+            for (entity, t, aabb, mat, pick) in &parts {
                 let Some(entry) = uv.0.get(&mat.0.id()) else {
                     continue;
                 };
                 let Some([du, dv]) = entry.scroll() else {
                     continue;
                 };
-                if log_parts {
-                    let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+                let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
+                let near_log = log_parts && {
+                    let p = t.transform_point(c);
+                    Vec2::new(p.x - eye.x, p.z - eye.z).length() < 150.0
+                };
+                if near_log {
                     let p = t.transform_point(c);
                     let ext = (t.affine().matrix3.abs() * h) * 2.0;
-                    if Vec2::new(p.x - eye.x, p.z - eye.z).length() < 150.0 {
-                        logged.push(format!(
-                            "({:.1},{:.1},{:.1}) size {:.1}x{:.1}x{:.1} scroll {du:.3},{dv:.3}",
-                            p.x, p.y, p.z, ext.x, ext.y, ext.z
-                        ));
-                    }
+                    logged.push(format!(
+                        "({:.1},{:.1},{:.1}) size {:.1}x{:.1}x{:.1} scroll {du:.3},{dv:.3}",
+                        p.x, p.y, p.z, ext.x, ext.y, ext.z
+                    ));
                 }
                 if dv.abs() < 1e-3 || dv.abs() < 1.5 * du.abs() {
                     continue;
                 }
-                let (c, h) = (Vec3::from(aabb.center), Vec3::from(aabb.half_extents));
                 let mut lo = Vec3::INFINITY;
                 let mut hi = Vec3::NEG_INFINITY;
                 for i in 0..8 {
@@ -788,118 +1105,118 @@ fn drive_fall_lanes(
                     hi = hi.max(p);
                 }
                 let mid = (lo + hi) * 0.5;
-                if Vec2::new(mid.x - eye.x, mid.z - eye.z).length() > FALLS_REACH {
-                    continue;
-                }
-                // A curtain: tall, thin across, and no wider than a fall is.
-                let (long, short) = (
-                    (hi.x - lo.x).max(hi.z - lo.z),
-                    (hi.x - lo.x).min(hi.z - lo.z),
-                );
-                // Round 3: a very tall curtain (a dam's spillway, half again as tall as it is long)
-                // may be longer than a fall line; its line is cut to one about its middle below,
-                // and trimmed to the pool with every other.
-                let towering = hi.y - lo.y >= 1.5 * long && long <= 2.5 * FALL_LINE_MAX;
                 if hi.y - lo.y < FALL_MIN_HEIGHT
-                    || short > (0.5 * (hi.y - lo.y)).max(4.0)
-                    || (long > FALL_LINE_MAX && !towering)
+                    || Vec2::new(mid.x - eye.x, mid.z - eye.z).length() > FALLS_REACH
                 {
                     continue;
                 }
-                // The water at the part's bottom at (x, z): the lowest surface there, Bevy Y.
-                let surface_y = |x: f32, z: f32| {
-                    let w = bevy_to_wow(Vec3::new(x, lo.y, z));
-                    let over = index.over(w[0], w[1]);
-                    benilla_world::liquid::water_surface_at(
-                        over.iter().filter_map(|&e| water.get(e).ok()),
-                        [w[0], w[1], w[2] + FALL_FOOT_SLACK],
-                        LiquidClaim::Unknown,
-                    )
-                    .map(|s| wow_to_bevy([w[0], w[1], s]).y)
-                    .filter(|&y| lo.y <= y + FALL_FOOT_SLACK && hi.y >= y + FALL_MIN_HEIGHT)
-                };
-                // Round 3, a thick part (a cascade or a spillway, a box deep both ways, which is
-                // every fall model at Elwynn and the Stonewrought Dam): its foot is where the pool
-                // meets the rock under it. Its footprint, sampled on a grid at the pool, wet where
-                // the pool lies over its bed; the line fitted to the wet cells beside dry ones,
-                // along their spread. A thin curtain, or a part standing wholly in water, keeps
-                // the line along its longer side at its middle. (Round 2's "longer side" put a
-                // spillway's line along its flow, out in the pool.)
-                let thick = short > (0.15 * (hi.y - lo.y)).max(6.0);
-                let grid = if thick {
-                    thick_foot(lo, hi, &surface_y, &ground_y)
-                } else {
-                    None
-                };
-                let (a, b, foot_y) = match grid {
-                    Some(g) => g,
-                    None => {
-                        let along_x = hi.x - lo.x >= hi.z - lo.z;
-                        let side = if along_x { mid.z } else { mid.x };
-                        let Some(foot_y) = surface_y(mid.x, mid.z) else {
-                            continue;
-                        };
-                        // The line along the part's longer side at its foot.
-                        let (l0, l1) = if along_x { (lo.x, hi.x) } else { (lo.z, hi.z) };
-                        let (l0, l1) = if l1 - l0 > FALL_LINE_MAX {
-                            let m = 0.5 * (l0 + l1);
-                            (m - 0.5 * FALL_LINE_MAX, m + 0.5 * FALL_LINE_MAX)
-                        } else {
-                            (l0, l1)
-                        };
-                        let pt = |t: f32| {
-                            if along_x {
-                                Vec2::new(t, side)
-                            } else {
-                                Vec2::new(side, t)
-                            }
-                        };
-                        (pt(l0), pt(l1), foot_y)
-                    }
-                };
-                {
-                    let fall = Fall {
-                        a,
-                        b,
-                        foot_y,
-                        drop: hi.y - foot_y,
-                    };
-                    // Join a part to a fall it overlaps or nearly does.
-                    let near = |f: &Fall| {
-                        let seg = |p: Vec2| {
-                            let ab = f.b - f.a;
-                            let t =
-                                ((p - f.a).dot(ab) / ab.length_squared().max(1e-6)).clamp(0.0, 1.0);
-                            (f.a + ab * t).distance(p)
-                        };
-                        seg(fall.a).min(seg(fall.b)) < FALL_JOIN
-                            && (f.foot_y - fall.foot_y).abs() < 1.0
-                    };
-                    let joined = |f: &Fall| {
-                        [f.a, f.b, fall.a, fall.b]
-                            .iter()
-                            .fold((Vec2::INFINITY, Vec2::NEG_INFINITY), |(l, h), p| {
-                                (l.min(*p), h.max(*p))
-                            })
-                    };
-                    let fits = |f: &Fall| {
-                        let (pl, ph) = joined(f);
-                        (ph - pl).max_element() <= FALL_LINE_MAX
-                    };
-                    if let Some(f) = found.iter_mut().find(|f| near(f) && fits(f)) {
-                        let (pl, ph) = joined(f);
-                        let mz = (pl + ph) * 0.5;
-                        (f.a, f.b) = if ph.x - pl.x >= ph.y - pl.y {
-                            (Vec2::new(pl.x, mz.y), Vec2::new(ph.x, mz.y))
-                        } else {
-                            (Vec2::new(mz.x, pl.y), Vec2::new(mz.x, ph.y))
-                        };
-                        f.drop = f.drop.max(fall.drop);
-                    } else {
-                        found.push(fall);
-                    }
+                // A card turns to the camera: not a curtain.
+                if pick.is_some_and(|m| m.0.billboard.is_some()) {
+                    continue;
                 }
+                seen.insert(entity);
+                let pose = t.affine();
+                let stale = feet.get(&entity).is_none_or(|f| {
+                    f.pose != pose
+                        || (now - f.built >= FALL_GAP_RESCAN.0 && f.world != world)
+                        || (now - f.built >= FALL_RETRY && f.pts.is_empty())
+                });
+                // At most `FALL_REBUILDS` parts a scan; the rest keep what they had until the next.
+                if stale && rebuilt < FALL_REBUILDS {
+                    rebuilt += 1;
+                    // The curtain's triangles in the world, as the picker reads them; a part
+                    // without resident geometry stands in as a sheet along its box's longer side.
+                    let tris: Vec<[Vec3; 3]> = match pick {
+                        Some(m) => {
+                            let geo = &m.0;
+                            let wp: Vec<Vec3> = geo
+                                .positions
+                                .iter()
+                                .map(|p| t.transform_point(wow_to_bevy(*p)))
+                                .collect();
+                            geo.indices
+                                .as_chunks::<3>()
+                                .0
+                                .iter()
+                                .filter_map(|i| {
+                                    Some([
+                                        *wp.get(i[0] as usize)?,
+                                        *wp.get(i[1] as usize)?,
+                                        *wp.get(i[2] as usize)?,
+                                    ])
+                                })
+                                .collect()
+                        }
+                        None => {
+                            let (a, b) = if hi.x - lo.x >= hi.z - lo.z {
+                                (Vec3::new(lo.x, 0.0, mid.z), Vec3::new(hi.x, 0.0, mid.z))
+                            } else {
+                                (Vec3::new(mid.x, 0.0, lo.z), Vec3::new(mid.x, 0.0, hi.z))
+                            };
+                            let (y0, y1) = (Vec3::Y * lo.y, Vec3::Y * hi.y);
+                            vec![[a + y0, b + y0, b + y1], [a + y0, b + y1, a + y1]]
+                        }
+                    };
+                    let mut stats = FootStats::default();
+                    let foot = mesh_foot(&tris, &surface_y, &ground_y, bank, &mut stats);
+                    let changed = feet.get(&entity).is_none_or(|f| f.pts.len() != foot.len());
+                    if near_log && changed {
+                        info!(
+                            "preview falls: part {entity} at ({:.1},{:.1},{:.1}): {} tris, steep \
+                             {:.2}, y {:.1} to {:.1}, pools {:?}, waterline {}: in the pool {}, \
+                             on the bank {} (ground {:.1} to {:.1} over the pool), dry {}, no \
+                             pool {}; kept {}",
+                            mid.x,
+                            mid.y,
+                            mid.z,
+                            tris.len(),
+                            stats.steep,
+                            stats.bottom,
+                            stats.top,
+                            stats.pools,
+                            stats.cut,
+                            stats.wet,
+                            stats.bank,
+                            stats.rise.0,
+                            stats.rise.1,
+                            stats.dry,
+                            stats.off,
+                            foot.len()
+                        );
+                    }
+                    feet.insert(
+                        entity,
+                        PartFoot {
+                            pose,
+                            world,
+                            built: now,
+                            curtain: stats.curtain,
+                            pts: foot,
+                        },
+                    );
+                }
+                curtains.push(entity);
             }
+        }
+        feet.retain(|e, _| seen.contains(e));
+        if log_parts && rebuilt > 0 {
+            info!(
+                "preview falls: {rebuilt} parts' feet built in {:.2} ms",
+                clock.elapsed().as_secs_f64() * 1e3
+            );
+        }
+        // Each foot's drop is its cascade's.
+        let found_feet: Vec<&PartFoot> = curtains
+            .iter()
+            .filter_map(|e| feet.get(e))
+            .filter(|f| f.curtain.is_some())
+            .collect();
+        let bounds: Vec<(Vec3, Vec3)> = found_feet.iter().filter_map(|f| f.curtain).collect();
+        for (f, top) in found_feet.iter().zip(cascade_tops(&bounds)) {
+            pts.extend(f.pts.iter().map(|p| FootPt {
+                drop: p.drop.max((top - p.y).min(150.0)),
+                ..*p
+            }));
         }
         if log_parts {
             static LOGGED: std::sync::atomic::AtomicUsize =
@@ -914,8 +1231,9 @@ fn drive_fall_lanes(
         }
         // The classification's gap rule (RIV-4): where a water surface ends and another lies at
         // least `FALL_MIN_HEIGHT` below a few yards further out, water falls over that edge; its
-        // foot line runs along the edge on the lower surface. Rescanned every few seconds or
-        // after a move, over the wet cells within `FALL_GAP_REACH` of the eye.
+        // foot runs along the edge on the lower surface, a point a yard, where the lower pool
+        // lies over its bed. Rescanned every few seconds or after a move, over the wet cells
+        // within `FALL_GAP_REACH` of the eye.
         if now - gaps.1 >= FALL_GAP_RESCAN.0 || gaps.0.distance(eye) >= FALL_GAP_RESCAN.1 {
             gaps.0 = eye;
             gaps.1 = now;
@@ -928,7 +1246,7 @@ fn drive_fall_lanes(
                     LiquidClaim::Unknown,
                 )
             };
-            let mut edges: Vec<Fall> = Vec::new();
+            let mut edges: Vec<FootPt> = Vec::new();
             let r = FALL_GAP_REACH;
             for e in index.over_box([ew[0] - r, ew[1] - r], [ew[0] + r, ew[1] + r]) {
                 let Ok(chunk) = water.get(e) else {
@@ -972,56 +1290,67 @@ fn drive_fall_lanes(
                             }
                             let ba = wow_to_bevy([a[0] + d.x * out, a[1] + d.y * out, low]);
                             let bb = wow_to_bevy([b[0] + d.x * out, b[1] + d.y * out, low]);
-                            edges.push(Fall {
-                                a: Vec2::new(ba.x, ba.z),
-                                b: Vec2::new(bb.x, bb.z),
-                                foot_y: ba.y,
-                                drop,
-                            });
+                            let steps = (ba.distance(bb).ceil() as usize).clamp(1, 16);
+                            for i in 0..=steps {
+                                let q = ba.lerp(bb, i as f32 / steps as f32);
+                                if ground_y(q.x, q.z).is_none_or(|g| g < q.y - 0.25) {
+                                    edges.push(FootPt {
+                                        p: Vec2::new(q.x, q.z),
+                                        y: q.y,
+                                        drop,
+                                        spread: 1.0,
+                                    });
+                                }
+                            }
                             break;
                         }
                     }
                 });
             }
-            for f in edges {
-                join_fall(&mut gaps.2, f);
-            }
+            gaps.2 = edges;
         }
-        for f in gaps.2.iter().copied() {
-            join_fall(&mut found, f);
-        }
-        // Round 3: each line keeps its longest run where the pool has water over its bed; a line
-        // crossing ground that stands above the pool (a bank, a cliff's foot) loses that span.
-        let trimmed: Vec<Fall> = found
-            .iter()
-            .filter_map(|f| trim_fall(f, &ground_y))
-            .collect();
-        *found = trimmed;
+        pts.extend_from_slice(&gaps.2);
+        *found = foot_lines(pts);
+        let all = found.len();
+        // The falls in view first (an end or the middle within the frame's half width and
+        // `FALL_VIEW_MARGIN` of the view's bearing, or within `FALL_VIEW_NEAR`), then the rest,
+        // each nearest first: the veil draws the spray of the first four only.
         let e2 = Vec2::new(eye.x, eye.z);
+        let f2 = Vec2::new(fwd.x, fwd.z).normalize_or_zero();
+        let cone = (half + FALL_VIEW_MARGIN).min(1.4).cos();
+        let seen_at = |p: Vec2| {
+            let d = p - e2;
+            d.length() < FALL_VIEW_NEAR || d.normalize_or_zero().dot(f2) > cone
+        };
+        let key = |f: &Fall| {
+            let shown = seen_at(f.a) || seen_at(f.b) || seen_at((f.a + f.b) * 0.5);
+            (!shown, (f.a + f.b).distance(e2 * 2.0))
+        };
         found.sort_by(|p, q| {
-            let d = |f: &Fall| (f.a + f.b).distance(e2 * 2.0);
-            d(p).total_cmp(&d(q))
+            let (kp, kq) = (key(p), key(q));
+            kp.0.cmp(&kq.0).then(kp.1.total_cmp(&kq.1))
         });
         found.truncate(FALLS_MAX);
-        // Logged when the count changes, with the nearest line.
-        static SEEN: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(usize::MAX);
-        if SEEN.swap(found.len(), std::sync::atomic::Ordering::Relaxed) != found.len() {
-            info!(
-                "preview falls: {} foot lines{}",
-                found.len(),
-                found.iter().fold(String::new(), |acc, f| format!(
-                    "{acc}; {:.1},{:.1} to {:.1},{:.1} at y {:.1}, drop {:.1}",
-                    f.a.x, f.a.y, f.b.x, f.b.y, f.foot_y, f.drop
-                ))
-            );
+        // Logged when the lines change, in the rows' order.
+        let text = found.iter().fold(String::new(), |acc, f| {
+            format!(
+                "{acc}; {:.1},{:.1} to {:.1},{:.1} at y {:.1}, drop {:.1}, spread {:.2}",
+                f.a.x, f.a.y, f.b.x, f.b.y, f.foot_y, f.drop, f.spread
+            )
+        });
+        static SEEN: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        if let Ok(mut seen) = SEEN.lock() {
+            if *seen != text {
+                info!("preview falls: {} foot lines of {all}{text}", found.len());
+                *seen = text;
+            }
         }
     }
     let rows = &mut lanes.0[base..base + 64];
     rows.fill(0.0);
     for (i, f) in found.iter().enumerate() {
         rows[8 * i..8 * i + 4].copy_from_slice(&[f.a.x, f.a.y, f.b.x, f.b.y]);
-        rows[8 * i + 4..8 * i + 8].copy_from_slice(&[f.foot_y, f.drop, 0.0, 1.0]);
+        rows[8 * i + 4..8 * i + 8].copy_from_slice(&[f.foot_y, f.drop, f.spread, 1.0]);
     }
 }
 
@@ -1036,4 +1365,283 @@ pub(super) fn register(app: &mut App) {
         )
             .before(super::reflect::drive_reflection),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A sheet from `a` to `b` (its bottom edge, Bevy) rising `rise` (Bevy Y) and leaning `lean`
+    /// (XZ) to its top edge, in one-yard cells of two triangles.
+    fn sheet(a: Vec3, b: Vec3, rise: f32, lean: Vec2) -> Vec<[Vec3; 3]> {
+        let n = (a.distance(b).ceil() as usize).max(1);
+        let m = (rise.ceil() as usize).max(1);
+        let up = Vec3::new(lean.x, rise, lean.y);
+        let at = |i: usize, j: usize| a.lerp(b, i as f32 / n as f32) + up * (j as f32 / m as f32);
+        (0..n)
+            .flat_map(|i| (0..m).map(move |j| (i, j)))
+            .flat_map(|(i, j)| {
+                [
+                    [at(i, j), at(i + 1, j), at(i + 1, j + 1)],
+                    [at(i, j), at(i + 1, j + 1), at(i, j + 1)],
+                ]
+            })
+            .collect()
+    }
+
+    fn pool(y: f32) -> impl Fn(f32, f32, f32) -> Option<f32> {
+        move |_, _, _| Some(y)
+    }
+
+    fn open(_: f32, _: f32) -> Option<f32> {
+        Some(-10.0)
+    }
+
+    fn lines(tris: &[[Vec3; 3]], surface: &impl Fn(f32, f32, f32) -> Option<f32>) -> Vec<Fall> {
+        foot_lines(mesh_foot(
+            tris,
+            surface,
+            &open,
+            0.6,
+            &mut FootStats::default(),
+        ))
+    }
+
+    /// A vertical curtain into a flat pool: one line along it at the pool.
+    #[test]
+    fn a_curtain_meets_its_pool_along_its_waterline() {
+        let tris = sheet(
+            Vec3::new(-10.0, -3.0, 5.0),
+            Vec3::new(10.0, -3.0, 5.0),
+            23.0,
+            Vec2::ZERO,
+        );
+        let got = lines(&tris, &pool(0.0));
+        assert_eq!(got.len(), 1);
+        let f = got[0];
+        assert!((f.a.y - 5.0).abs() < 0.1 && (f.b.y - 5.0).abs() < 0.1);
+        assert!((f.a.x.min(f.b.x) + 10.5).abs() < 0.6 && (f.a.x.max(f.b.x) - 10.5).abs() < 0.6);
+        assert_eq!(f.foot_y, 0.0);
+        assert!((f.drop - 20.0).abs() < 0.01);
+    }
+
+    /// A 60° chute: its line runs across it where it enters the water, not along its flow.
+    #[test]
+    fn a_chute_meets_its_pool_across_its_flow() {
+        let run = 24.0 / 60f32.to_radians().tan();
+        // The bottom edge at y -4, the top edge 24 yd up and `run` back toward -z.
+        let tris = sheet(
+            Vec3::new(-5.0, -4.0, run),
+            Vec3::new(5.0, -4.0, run),
+            24.0,
+            Vec2::new(0.0, -run),
+        );
+        let got = lines(&tris, &pool(0.0));
+        assert_eq!(got.len(), 1);
+        let f = got[0];
+        let z = run * 20.0 / 24.0;
+        assert!(
+            (f.a.y - z).abs() < 0.3 && (f.b.y - z).abs() < 0.3,
+            "{:?} {:?}",
+            f.a,
+            f.b
+        );
+        assert!((f.a.x - f.b.x).abs() > 9.0);
+    }
+
+    /// A waterline inside ground well over the pool (a ledge) is no foot.
+    #[test]
+    fn a_waterline_in_high_ground_is_dropped() {
+        let tris = sheet(
+            Vec3::new(-10.0, -3.0, 5.0),
+            Vec3::new(10.0, -3.0, 5.0),
+            23.0,
+            Vec2::ZERO,
+        );
+        let ledge = |_: f32, _: f32| Some(6.0);
+        let mut stats = FootStats::default();
+        assert!(mesh_foot(&tris, &pool(0.0), &ledge, 0.6, &mut stats).is_empty());
+        assert!(stats.dry > 0);
+    }
+
+    /// A curtain coming down on a low bank has its foot at the water's edge in front of it,
+    /// spreading less.
+    #[test]
+    fn a_curtain_on_the_bank_has_its_foot_at_the_water() {
+        let tris = sheet(
+            Vec3::new(-10.0, -3.0, 5.0),
+            Vec3::new(10.0, -3.0, 5.0),
+            23.0,
+            Vec2::ZERO,
+        );
+        // The bank stands a yard over the pool up to z = 7, the pool's bed beyond.
+        let bank = |_: f32, z: f32| Some(if z < 7.0 { 1.0 } else { -4.0 });
+        let got = foot_lines(mesh_foot(
+            &tris,
+            &pool(0.0),
+            &bank,
+            0.6,
+            &mut FootStats::default(),
+        ));
+        assert_eq!(got.len(), 1);
+        let f = got[0];
+        assert!(
+            (f.a.y - 7.0).abs() < 0.6 && (f.b.y - 7.0).abs() < 0.6,
+            "{:?} {:?}",
+            f.a,
+            f.b
+        );
+        assert!((f.spread - 0.6).abs() < 1e-4);
+    }
+
+    /// A curtain ending a yard over its pool is cut at its bottom edge; five yards over, it lands
+    /// in no pool.
+    #[test]
+    fn a_curtain_ending_over_its_pool() {
+        let near = sheet(
+            Vec3::new(-10.0, 1.0, 5.0),
+            Vec3::new(10.0, 1.0, 5.0),
+            19.0,
+            Vec2::ZERO,
+        );
+        let got = lines(&near, &pool(0.0));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].foot_y, 0.0);
+        let high = sheet(
+            Vec3::new(-10.0, 5.0, 5.0),
+            Vec3::new(10.0, 5.0, 5.0),
+            15.0,
+            Vec2::ZERO,
+        );
+        assert!(lines(&high, &pool(0.0)).is_empty());
+    }
+
+    /// A spillway leaving its reservoir: the reservoir under its top is a lip, not a foot.
+    #[test]
+    fn a_reservoir_under_the_top_is_no_foot() {
+        let run = 19.0;
+        let tris = sheet(
+            Vec3::new(-5.0, -3.0, run),
+            Vec3::new(5.0, -3.0, run),
+            33.0,
+            Vec2::new(0.0, -run),
+        );
+        let surface = |_: f32, z: f32, _: f32| Some(if z < 2.0 { 25.0 } else { 0.0 });
+        let got = lines(&tris, &surface);
+        assert!(!got.is_empty());
+        assert!(got.iter().all(|f| f.foot_y == 0.0));
+    }
+
+    /// The two layers of a part, a third of a yard apart, are one fall.
+    #[test]
+    fn layers_join_into_one_line() {
+        let mut tris = sheet(
+            Vec3::new(-10.0, -3.0, 5.0),
+            Vec3::new(10.0, -3.0, 5.0),
+            23.0,
+            Vec2::ZERO,
+        );
+        tris.extend(sheet(
+            Vec3::new(-10.0, -3.0, 5.3),
+            Vec3::new(10.0, -3.0, 5.3),
+            23.0,
+            Vec2::ZERO,
+        ));
+        assert_eq!(lines(&tris, &pool(0.0)).len(), 1);
+    }
+
+    /// A 130-yd waterline is cut into even lines no longer than the cap, covering it.
+    #[test]
+    fn a_long_waterline_splits() {
+        let tris = sheet(
+            Vec3::new(0.0, -3.0, 0.0),
+            Vec3::new(130.0, -3.0, 0.0),
+            23.0,
+            Vec2::ZERO,
+        );
+        let got = lines(&tris, &pool(0.0));
+        assert!(got.len() >= 3, "{}", got.len());
+        assert!(got.iter().all(|f| f.a.distance(f.b) <= FALL_LINE_MAX + 1.0));
+        let cover: f32 = got.iter().map(|f| f.a.distance(f.b)).sum();
+        assert!(cover > 125.0, "{cover}");
+    }
+
+    /// A foot turning a corner is two lines along its arms, not one chord across it.
+    #[test]
+    fn a_bent_foot_is_two_lines() {
+        let pts: Vec<FootPt> = (0..=40)
+            .map(|i| {
+                let s = i as f32 * 0.5;
+                FootPt {
+                    p: Vec2::new(s, 0.0),
+                    y: 0.0,
+                    drop: 10.0,
+                    spread: 1.0,
+                }
+            })
+            .chain((1..=40).map(|i| FootPt {
+                p: Vec2::new(20.0, i as f32 * 0.5),
+                y: 0.0,
+                drop: 10.0,
+                spread: 1.0,
+            }))
+            .collect();
+        let got = foot_lines(pts.clone());
+        assert!(got.len() >= 2, "{}", got.len());
+        for f in &got {
+            let mid = (f.a + f.b) * 0.5;
+            let near = pts
+                .iter()
+                .map(|q| q.p.distance(mid))
+                .fold(f32::MAX, f32::min);
+            assert!(
+                near < 2.0,
+                "a line's middle {mid} lies {near} yd off the foot"
+            );
+        }
+    }
+
+    /// Stacked tiers are one cascade with the top tier's height; a curtain off to the side is not.
+    #[test]
+    fn stacked_tiers_are_one_cascade() {
+        let low = (Vec3::new(0.0, -5.0, 0.0), Vec3::new(10.0, 20.0, 2.0));
+        let high = (Vec3::new(1.0, 18.0, -3.0), Vec3::new(9.0, 60.0, 1.0));
+        let apart = (Vec3::new(40.0, -5.0, 0.0), Vec3::new(50.0, 30.0, 2.0));
+        assert_eq!(cascade_tops(&[low, high, apart]), vec![60.0, 60.0, 30.0]);
+    }
+
+    /// Points at two pools, or further apart than the join, are separate falls; the order they
+    /// come in does not change the lines.
+    #[test]
+    fn falls_part_by_pool_and_gap_and_ignore_order() {
+        let row = |x0: f32, y: f32| {
+            (0..20).map(move |i| FootPt {
+                p: Vec2::new(x0 + i as f32 * 0.5, 0.0),
+                y,
+                drop: 5.0,
+                spread: 1.0,
+            })
+        };
+        let pts: Vec<FootPt> = row(0.0, 0.0)
+            .chain(row(20.0, 0.0))
+            .chain(row(0.0, 4.0))
+            .collect();
+        let a = foot_lines(pts.clone());
+        assert_eq!(a.len(), 3);
+        let mut rev = pts;
+        rev.reverse();
+        let b = foot_lines(rev);
+        let key = |v: &[Fall]| {
+            let mut k: Vec<[i32; 5]> = v
+                .iter()
+                .map(|f| {
+                    let (l, h) = (f.a.min(f.b), f.a.max(f.b));
+                    [l.x, l.y, h.x, h.y, f.foot_y].map(|x| (x * 100.0).round() as i32)
+                })
+                .collect();
+            k.sort();
+            k
+        };
+        assert_eq!(key(&a), key(&b));
+    }
 }

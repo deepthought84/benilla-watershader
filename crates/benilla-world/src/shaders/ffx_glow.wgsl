@@ -1323,8 +1323,9 @@ struct VeilLanes {
     spare0: vec4<f32>,
     spare1: vec4<f32>,
     spare2: vec4<f32>,
-    // The four nearest falls: the foot line's ends (XZ), then the pool's surface, the drop, spare and
-    // the strength (`preview.falls`).
+    // The four nearest falls: the foot line's ends (XZ), then the pool's surface, the drop, the
+    // pool's spread (not the spray's: a curtain on the bank throws as much) and the strength
+    // (`preview.falls`).
     falls: array<vec4<f32>, 8>,
 };
 

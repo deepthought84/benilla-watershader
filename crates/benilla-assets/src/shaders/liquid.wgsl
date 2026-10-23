@@ -6344,7 +6344,9 @@ fn rf_fall_at(p: vec3<f32>) -> RfFall {
         let r = length(d);
         let dir = select(nrm, d / max(r, 1e-4), r > 1e-3);
         let size = clamp(sqrt(at.y / RF_DROP_REF_YD), 0.6, 1.6);
-        let reach = RF_PLUNGE_REACH_YD * size;
+        // `z`: how far the pool spreads against a fall's into open water (less where the curtain
+        // comes down on the bank in front of it).
+        let reach = RF_PLUNGE_REACH_YD * size * select(1.0, at.z, at.z > 0.0);
         let dy = p.y - at.x;
         let pool = at.w * (1.0 - smoothstep(0.6 * reach, reach, r))
             * (1.0 - smoothstep(0.4, 1.2, abs(dy)));
