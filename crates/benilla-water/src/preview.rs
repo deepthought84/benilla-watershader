@@ -77,12 +77,14 @@ fn drive_preview(
     let at = |lane: usize| lane - PREVIEW_LANES.start;
     let mut row = |lane: usize, v: [f32; 4]| lanes.0[at(lane)..at(lane) + 4].copy_from_slice(&v);
     let mask = lever::mask();
-    // The sub-levers, read once: the rough cone's share and a forced sea state (-1: derived).
-    static SUB: std::sync::OnceLock<(f32, f32)> = std::sync::OnceLock::new();
-    let (cone, sea_forced) = *SUB.get_or_init(|| {
+    // The sub-levers, read once: the rough cone's share, a forced sea state (-1: derived) and the
+    // rivers' slow tier's gain.
+    static SUB: std::sync::OnceLock<(f32, f32, f32)> = std::sync::OnceLock::new();
+    let (cone, sea_forced, river_slow) = *SUB.get_or_init(|| {
         (
             lever::number("ROUGH_CONE", 0.2, 0.0, 2.0),
             lever::number("SEA", -1.0, 0.0, 1.0),
+            lever::number("RIVER_SLOW", 1.0, 0.0, 1.0),
         )
     });
     // The gains (caustics, lights, sparkles, river foam), the river mist's, and a forced rain and
@@ -102,7 +104,8 @@ fn drive_preview(
         )
     });
     let cone = if lever::on(lever::ROUGH) { cone } else { 0.0 };
-    row(PV_MASK, [mask as f32, cone, 0.0, 0.0]);
+    // The slow tier's lane holds 1 − gain, so an unwritten (zero) lane runs it.
+    row(PV_MASK, [mask as f32, cone, 1.0 - river_slow, 0.0]);
     row(PV_GAINS, gains);
     row(
         PV_CLOCKS,

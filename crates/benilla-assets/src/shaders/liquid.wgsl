@@ -286,7 +286,7 @@ struct UnderLanes {
 // liquid pipeline, since the buffer has this shape for all of them; read under `WATER_PREVIEW`.
 struct WaterPreview {
     // x the feature bits (`benilla_assets::preview`, exact in an f32), y the rough reflection's
-    // cone share, z the sea state's override (0: derived from the wind), w spare.
+    // cone share, z 1 − the rivers' slow tier's gain (so an unwritten lane runs it), w spare.
     mask: vec4<f32>,
     // x caustics, y lights, z sparkles, w river foam.
     gains: vec4<f32>,
@@ -1101,6 +1101,12 @@ fn pv_glint_reach() -> f32 {
 }
 
 /// The rough reflections' share of the physical lobe, 0 with `rough` off.
+/// The rivers' slow tier's gain, `WOW_PREVIEW_RIVER_SLOW`: the lane holds 1 − gain, so a binary
+/// that does not write it (zero) runs the tier.
+fn pv_river_slow() -> f32 {
+    return saturate(1.0 - water_reflect.preview.mask.z);
+}
+
 fn pv_rough_gain() -> f32 {
     return select(0.0, max(water_reflect.preview.mask.y, 0.0), pv_on(PV_ROUGH));
 }
@@ -6196,6 +6202,13 @@ const RF_CHURN_YD: f32 = 1.6;
 /// How white each foam gets at most: foam is never the brightest continuous line in the frame.
 const RF_WHITE_LEVEL: f32 = 0.8;
 const RF_STREAK_LEVEL: f32 = 0.34;
+/// Round 4, slow water: what runs under the whitewater's gates still carries a few flecks and faint
+/// lines. The speeds the tier fades in over and hands over to the whitewater's look over, yards a
+/// second; the flecks' cover at most and their white; the lines' white.
+const RF_SLOW_V: vec4<f32> = vec4<f32>(0.15, 0.35, 1.6, 2.6);
+const RF_SPECK_COV: f32 = 0.05;
+const RF_SPECK_LEVEL: f32 = 0.55;
+const RF_SLOW_STREAK_LEVEL: f32 = 0.16;
 const RF_POOL_LEVEL: f32 = 0.92;
 const RF_SHEET_LEVEL: f32 = 0.92;
 const RF_MIST_LEVEL: f32 = 0.45;
@@ -6731,16 +6744,25 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
 #endif
     // Round 3: the whole of it under a quarter of the surface, the shallow contacts included (they
     // whitened STV's upper reach, which is shallow throughout, past round 2's cap).
-    let cov = min(max(min(0.45 * turb * turb, 0.24), max(0.5 * tail, 0.4 * contact)), 0.26);
+    let cov_fast = min(max(min(0.45 * turb * turb, 0.24), max(0.5 * tail, 0.4 * contact)), 0.26);
+    // Round 4, slow water (under every whitewater gate): the same two sets cut low, a few flecks
+    // drifting at the water's own speed, gathered in the lumps and along the banks' shear lines.
+    let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
+    let slow = smoothstep(RF_SLOW_V.x, RF_SLOW_V.y, s.speed)
+        * (1.0 - smoothstep(RF_SLOW_V.z, RF_SLOW_V.w, s.speed)) * pv_river_slow();
+    let cov_slow = RF_SPECK_COV * slow * mix(0.2, 1.0, smoothstep(-0.4, 1.2, lump.n + 0.8 * shear));
+    let cov = max(cov_fast, cov_slow);
     let r0 = rf_raft(xz, i.flow, 0.0, cov, o, ddx, ddy, px);
     let r1 = rf_raft(xz, i.flow, 1.0, cov, o, ddx, ddy, px);
-    var white = max(r0.foam, r1.foam) * RF_WHITE_LEVEL * smoothstep(0.0, 0.05, cov);
+    // Flecks are dimmer than rafts, and their low cover is not faded out as thin whitewater's is.
+    let speck = slow * (1.0 - smoothstep(0.03, 0.08, cov_fast));
+    var white = max(r0.foam, r1.foam) * mix(RF_WHITE_LEVEL, RF_SPECK_LEVEL, speck)
+        * smoothstep(0.0, mix(0.05, 0.012, speck), cov);
     let r_g = select(r1.g, r0.g, r0.foam >= r1.foam);
     let r_band = max(r0.band, r1.band);
 
     var streak = 0.0;
 #ifndef WATER_TIER_LOW
-    let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
     // Foam is carried on running water, not on a lake's slow drift.
     let carried = saturate(0.04 + 0.45 * s.turb + 0.40 * shear + 0.6 * tail)
         * smoothstep(0.8, 2.6, s.speed);
@@ -6750,7 +6772,11 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     // Round 4: where none can show, the lines' reads are skipped.
     let gate = (1.0 - saturate(turb * 1.3)) * smoothstep(0.38, 0.75, carried)
         * smoothstep(0.1, 0.8, lump.n + 0.6 * tail);
-    if (gate > 0.0) {
+    // Slow water's faint lines: only along the banks' shear lines, in the lumps' patches (open slow
+    // water netted with the field's zero lines read as scribbles).
+    let load_s = slow * shear * smoothstep(0.2, 0.9, lump.n + 0.3)
+        * (1.0 - smoothstep(0.12, 0.3, px));
+    if (gate + load_s > 0.0) {
         let sl = rf_streak_lines(xz, s.e1, o, ddx, ddy);
         // A line survives where the rafts' field clears the level its load sets, so lines break up
         // and run out of the whitewater they come from.
@@ -6773,6 +6799,14 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
         let bead = sc_bubble_mask(0.55 + 0.3 * carried, bead_p.v, bead_p.fw);
         streak = mix(line_v * bead, carried * 0.12, smoothstep(0.6 * wl, 2.0 * wl, fp))
             * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * gate;
+        // The slow lines: thin, at least a pixel and a half across, strings of beads drifting with
+        // the water.
+        let wl_s = max(0.8 * RF_STREAK_W_YD, 0.75 * fp);
+        // Broken into runs where the chop field (carried at the current) is high, so the runs'
+        // ends drift down the seams.
+        let line_s = (1.0 - smoothstep(wl_s - aa, wl_s + aa, dist)) * smoothstep(0.1, 0.6, raft.n);
+        let bead_s = sc_bubble_mask(0.5 + 0.25 * load_s, bead_p.v, bead_p.fw);
+        streak = max(streak, line_s * bead_s * RF_SLOW_STREAK_LEVEL * load_s);
     }
 #endif
 

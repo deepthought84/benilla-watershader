@@ -214,7 +214,7 @@ pub const PREVIEW_LANES: std::ops::Range<usize> = LOOK_LANES.end..LOOK_LANES.end
 /// The preview block's rows.
 pub const PREVIEW_ROWS: usize = 77;
 /// `mask`: x the feature bits (`benilla_assets::preview`), y the rough reflection's cone share,
-/// z the sea state's override (0 derives it), w spare.
+/// z 1 − the rivers' slow tier's gain (`WOW_PREVIEW_RIVER_SLOW`; zero runs it), w spare.
 pub const PV_MASK: usize = PREVIEW_LANES.start;
 /// `gains`: x caustics, y lights, z sparkles, w river foam.
 pub const PV_GAINS: usize = PV_MASK + 4;
