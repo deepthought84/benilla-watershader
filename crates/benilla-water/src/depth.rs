@@ -41,5 +41,9 @@ fn bindable_view_depth(
 
 pub(super) fn register(app: &mut App) {
     // Every frame, but it is a query over one camera and a comparison; the write happens once.
-    app.add_systems(Update, bindable_view_depth);
+    // After the frame's script calls, whose `waterStyle` callback writes the style.
+    app.add_systems(
+        Update,
+        bindable_view_depth.after(benilla_world::schedule::WorldStage::Present),
+    );
 }

@@ -301,7 +301,7 @@ impl WaterShadow {
 /// the frames that popped any, so the render world copies each set once; the extracted copy
 /// persists there between frames that pop none.
 #[derive(Resource, Clone, Default, ExtractResource)]
-struct ShadowFrame {
+pub(crate) struct ShadowFrame {
     /// The torus is built: the render world's copy runs only while it is.
     armed: bool,
     generation: u64,
@@ -401,7 +401,7 @@ fn track_adt_tiles(
 
 /// Follow the camera, pop this frame's blocks once the torus has been resident a frame, and
 /// publish the window for the look rows.
-fn drive_water_shadow(
+pub(crate) fn drive_water_shadow(
     mut shadow: ResMut<WaterShadow>,
     mut frame: ResMut<ShadowFrame>,
     mut window: ResMut<WaterShadowWindow>,

@@ -1449,10 +1449,14 @@ pub(super) fn register(app: &mut App) {
             drive_fall_lanes,
             // The veil copies the falls' rows this frame's scan wrote.
             // The caustic net's clock and drift are the preview rows' of this frame.
-            drive_under_lanes
-                .after(drive_fall_lanes)
-                .after(super::preview::drive_preview),
+            drive_under_lanes,
         )
+            // One writer of the preview's lanes at a time, after the mask and clocks; the caustic
+            // net reads this frame's water shadow and lands after the wave field's rows.
+            .chain()
+            .after(super::preview::drive_preview)
+            .after(super::mcsh::drive_water_shadow)
+            .after(super::ripple_sim::drive_ripple_sim)
             .before(super::reflect::drive_reflection),
     );
 }

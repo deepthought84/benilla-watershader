@@ -295,9 +295,13 @@ impl Plugin for LiquidPlugin {
                     // the frame the CVar lands and on the first frame after startup, which is what
                     // carries a persisted `waterStyle` from `config.toml` onto materials built
                     // before it was read.
-                    surface::apply_water_style.run_if(
-                        resource_changed::<WaterStyle>.or(resource_changed::<WaterPipelineCaps>),
-                    ),
+                    // After the frame's script calls, whose `waterStyle` callback writes it.
+                    surface::apply_water_style
+                        .after(crate::schedule::WorldStage::Present)
+                        .run_if(
+                            resource_changed::<WaterStyle>
+                                .or(resource_changed::<WaterPipelineCaps>),
+                        ),
                     // The ripple map's anisotropy: a change re-uploads the map and rebuilds every
                     // liquid bind group, so it runs on a tier change and once the map exists.
                     surface::apply_ripple_aniso

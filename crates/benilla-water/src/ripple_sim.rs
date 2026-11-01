@@ -370,7 +370,7 @@ impl RippleSim {
 /// door, and for the same underlying reason. The `Arc` is what makes the per-frame extract a
 /// pointer copy rather than 147 KB.
 #[derive(Resource, Clone, Default, ExtractResource)]
-struct RippleFrame {
+pub(crate) struct RippleFrame {
     id: AssetId<Image>,
     pixels: Option<Arc<Vec<u8>>>,
 }
@@ -472,7 +472,7 @@ fn setup_ripple_sim(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 /// Inert on the reference lane, where `water_fx`'s decals are the wake and this would be a second
 /// one: the strength lane goes to zero and the field is left alone.
 #[allow(clippy::too_many_arguments)]
-fn drive_ripple_sim(
+pub(crate) fn drive_ripple_sim(
     style: Res<WaterStyle>,
     time: Res<Time>,
     mut sim: ResMut<RippleSim>,

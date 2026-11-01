@@ -922,8 +922,12 @@ pub(crate) mod schedule_tests {
     /// and pose writers are `Transform` on disjoint lanes. The water's surface summary
     /// (`floor_share::summarise_surfaces`) reads the liquid surfaces' `Mesh3d` against the zfill
     /// and straddle twin writers, which set it only on their twins, and Bevy's mesh change marker,
-    /// which only flags it changed. `WOW_AMBIGUITY_DUMP=1` prints every pair after `Update`'s.
-    const POST_UPDATE_CEILING: usize = 388;
+    /// which only flags it changed. The Improved Water preview's wake rows read the swimmers'
+    /// `Transform` against the conform and rig writers, its falls' rows the props' materials
+    /// against the straddle twins, and the sun's glint visibility the camera's `GlobalTransform`
+    /// against the nameplate, raid-mark and model-particle placers: each a frame late at worst.
+    /// `WOW_AMBIGUITY_DUMP=1` prints every pair after `Update`'s.
+    const POST_UPDATE_CEILING: usize = 393;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
@@ -977,15 +981,18 @@ pub(crate) mod schedule_tests {
     ///   against `ui_panes::feed_character_panes`, which lends the call host, whose quest verbs
     ///   write that window's cell and panel latches and never a status;
     /// - the water's style switch, ripple anisotropy, bindable view depth, layer stamp, world-view
-    ///   marker and probe gizmos against `apply_net_updates` and `finish_colliders` over the
-    ///   world, as `drift::setup_drift`: they touch only water and cameras (the ripple map's
-    ///   sampler and the liquid materials, which neither creates); the gizmos read `DebugState` a
-    ///   frame late at worst.
+    ///   marker and probe gizmos against `apply_net_updates`, `finish_colliders`, the lanes' drain
+    ///   and the input records' dispatch over the world, as `drift::setup_drift`: they touch only
+    ///   water and cameras (the ripple map's sampler and the liquid materials, which neither
+    ///   creates); the gizmos read `DebugState` a frame late at worst;
+    /// - the Improved Water preview's dry sky and haze (`lighting::resolve::update_dry_sky`,
+    ///   `ffx_glow::sync_haze`, `ffx_glow::sync_gain`) against `publish_viewer` and the glue
+    ///   booth's FFX sync: they read the viewer and the glue's gain a frame late at worst.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_475;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_481;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {

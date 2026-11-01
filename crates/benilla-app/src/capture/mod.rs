@@ -1694,8 +1694,8 @@ fn drive_capture(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
-    use bevy::prelude::*;
 
     /// A capture run's systems initialize in the client's own world, so a parameter that overlaps
     /// the VM turn's call host fails here and not at the first capture's schedule build.
@@ -1894,7 +1894,6 @@ mod tests {
     /// takes the defaults.
     #[test]
     fn a_golden_water_scene_carries_its_own_settle_and_age() {
-        use super::*;
         use crate::local_state::test_env::{EnvGuard, ENV_LOCK};
         let _l = ENV_LOCK
             .lock()
@@ -2115,12 +2114,12 @@ mod tests {
     #[test]
     fn burst_shots_are_numbered_beside_the_output() {
         assert_eq!(
-            super::burst_path("/data/scratch/golden/water-canal.png", 0),
+            burst_path("/data/scratch/golden/water-canal.png", 0),
             "/data/scratch/golden/water-canal-000.png"
         );
-        assert_eq!(super::burst_path("shot.png", 7), "shot-007.png");
+        assert_eq!(burst_path("shot.png", 7), "shot-007.png");
         assert_eq!(
-            super::burst_path("target/visual/a.b.png", 12),
+            burst_path("target/visual/a.b.png", 12),
             "target/visual/a.b-012.png"
         );
     }
