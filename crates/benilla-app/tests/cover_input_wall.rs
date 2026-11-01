@@ -62,6 +62,10 @@ const VERDICTS: &[(&str, Verdict)] = &[
         Open("an OUTPUT (grab/visible), not a channel — the cover has nothing to take from it"),
     ),
     (
+        "WinitSettings",
+        Open("an OUTPUT (the event loop's update mode, set by a capture probe), not a channel"),
+    ),
+    (
         "RawWinitWindowEvent",
         Open(
             "read only to learn what the layout names each key (`bindings/layout.rs`), which acts \
