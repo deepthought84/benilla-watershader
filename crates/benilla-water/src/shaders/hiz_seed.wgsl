@@ -2,13 +2,19 @@
 //
 // One invocation per pyramid texel of mip 0. It loads the view-depth texels its footprint covers
 // and writes the NEAREST and the FARTHEST of them into mip 0 of the two pyramids (`liquid::hiz`
-// has why both, and why the nearest is a `max`: Bevy is reverse-Z). The same loads also give the
-// full-resolution linear depth the water reads behind each of its pixels: each view pixel belongs
-// to exactly one pyramid texel, and that texel's invocation writes it.
+// has why both, and why the nearest is a `max`: Bevy is reverse-Z). The same dispatch also writes
+// the full-resolution linear depth the water reads behind each of its pixels, inside the water's
+// rectangle: each workgroup takes 8 × 8 blocks of the rectangle, one pixel an invocation, the
+// dispatch's workgroup count of blocks apart.
+//
+// **Perf: in 8 × 8 blocks, not by owner.** Written by each pyramid texel's invocation for the view
+// pixels it owns, a wave's stores scattered over a 13 × 14 patch in nine masked stores; the
+// stores were most of the seed's 1.07 ms at 3200 × 1800 (STV, an RX 6500 XT). A block a workgroup
+// lands on the image's tiling: 0.71 ms (a row-order walk, 1.02).
 //
 // **All integer.** The pyramid is the previous power of two of the view on each axis, so a texel's
-// footprint is a ratio below 2 and spans at most three view texels per axis. The footprint and the
-// ownership are exact integer expressions, mirrored and tested on the CPU in `liquid::hiz`.
+// footprint is a ratio below 2 and spans at most three view texels per axis. The footprint is an
+// exact integer expression, mirrored and tested on the CPU in `liquid::hiz`.
 //
 // **Linear depth.** Bevy's perspective is `perspective_infinite_reverse_rh`: `d = near / z_view`,
 // so `z_view = near / d`, in yards along the view axis. `d == 0` is the cleared far plane (sky, or
@@ -48,11 +54,6 @@ fn footprint_hi(d: u32, src: u32, dst: u32) -> u32 {
     return min(((d + 1u) * src + dst - 1u) / dst, src) - 1u;
 }
 
-// The pyramid texel view texel `x`'s centre falls in, per axis: its one owner.
-fn owner(x: u32, src: u32, dst: u32) -> u32 {
-    return ((2u * x + 1u) * dst) / (2u * src);
-}
-
 // One view pixel's depth as (nearest, farthest): its value, or the max and min over its samples.
 fn load_depth(px: vec2<u32>) -> vec2<f32> {
 #ifdef SEED_MS
@@ -70,21 +71,32 @@ fn load_depth(px: vec2<u32>) -> vec2<f32> {
 #endif
 }
 
-// Write the linear depth of `px` if pyramid texel `t` owns it and it lies inside the water's rect.
-// Under MSAA `d` is the pixel's nearest sample, so a sub-pixel edge reads as the thing in front.
-fn put_linear(px: vec2<u32>, t: vec2<u32>, d: f32) {
-    if (owner(px.x, p.src_size.x, p.dst_size.x) != t.x || owner(px.y, p.src_size.y, p.dst_size.y) != t.y) {
-        return;
-    }
-    if (any(px < p.lin_min) || any(px >= p.lin_max)) {
-        return;
-    }
+// Write the linear depth of `px`. Under MSAA `d` is the pixel's nearest sample, so a sub-pixel edge
+// reads as the thing in front.
+fn put_linear(px: vec2<u32>, d: f32) {
     let z = select(0.0, p.near / d, d > 0.0 && (p.write_hiz & ORTHOGRAPHIC) == 0u);
     textureStore(lin_depth, vec2<i32>(px), vec4<f32>(z, 0.0, 0.0, 0.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
-fn cs_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn cs_seed(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+    @builtin(workgroup_id) wg: vec3<u32>,
+    @builtin(local_invocation_index) li: u32,
+    @builtin(num_workgroups) nwg: vec3<u32>,
+) {
+    // The linear depth: the rectangle's 8 × 8 blocks, this workgroup's every `stride`-th.
+    let span = p.lin_max - p.lin_min;
+    let blocks = (span + vec2<u32>(7u)) / 8u;
+    let count = blocks.x * blocks.y;
+    let stride = nwg.x * nwg.y;
+    let inner = vec2<u32>(li % 8u, li / 8u);
+    for (var j = wg.y * nwg.x + wg.x; j < count; j = j + stride) {
+        let px = p.lin_min + vec2<u32>(j % blocks.x, j / blocks.x) * 8u + inner;
+        if (all(px < p.lin_max)) {
+            put_linear(px, load_depth(px).x);
+        }
+    }
     let t = p.tile_origin + gid.xy;
     if (any(t >= p.dst_size)) {
         return;
@@ -118,15 +130,6 @@ fn cs_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
         let m = load_depth(vec2<u32>(x2, y2));
         near = max(max(max(a.x, b.x), max(c.x, e.x)), max(max(f.x, g.x), max(max(h.x, k.x), m.x)));
         far = min(min(min(a.y, b.y), min(c.y, e.y)), min(min(f.y, g.y), min(min(h.y, k.y), m.y)));
-        put_linear(vec2<u32>(lo.x, lo.y), t, a.x);
-        put_linear(vec2<u32>(x1, lo.y), t, b.x);
-        put_linear(vec2<u32>(x2, lo.y), t, c.x);
-        put_linear(vec2<u32>(lo.x, y1), t, e.x);
-        put_linear(vec2<u32>(x1, y1), t, f.x);
-        put_linear(vec2<u32>(x2, y1), t, g.x);
-        put_linear(vec2<u32>(lo.x, y2), t, h.x);
-        put_linear(vec2<u32>(x1, y2), t, k.x);
-        put_linear(vec2<u32>(x2, y2), t, m.x);
     } else {
         // A view and pyramid whose sizes disagree by more than the power-of-two rule allows (the
         // node's size guard keeps this unreachable): still every covered texel, just slower.
@@ -135,7 +138,6 @@ fn cs_seed(@builtin(global_invocation_id) gid: vec3<u32>) {
                 let v = load_depth(vec2<u32>(x, y));
                 near = max(near, v.x);
                 far = min(far, v.y);
-                put_linear(vec2<u32>(x, y), t, v.x);
             }
         }
     }

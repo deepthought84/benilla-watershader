@@ -313,9 +313,11 @@ struct HizSeedParams {
     pyramid: bool,
 }
 
-/// The pyramid texels whose invocations write the linear depth of the view pixels `min..max`
-/// (exclusive), per axis: the first one and how many. [`owner`] never decreases along an axis, so
-/// the owners of the rectangle's first and last pixel bound every owner inside it.
+/// The pyramid texels over the view pixels `min..max` (exclusive), per axis: the first one and how
+/// many, the seed's dispatch when no reader walks the pyramid. [`owner`] never decreases along an
+/// axis, so the owners of the rectangle's first and last pixel bound every owner inside it. The
+/// seed writes the rectangle's linear depth in 8 × 8 blocks spread over whatever it dispatches, so
+/// the range sizes that work to the rectangle and nothing else rests on it.
 fn rect_tiles(min: UVec2, max: UVec2, src: UVec2, dst: UVec2) -> (UVec2, UVec2) {
     let first = UVec2::new(owner(min.x, src.x, dst.x), owner(min.y, src.y, dst.y));
     let last = UVec2::new(
@@ -325,7 +327,7 @@ fn rect_tiles(min: UVec2, max: UVec2, src: UVec2, dst: UVec2) -> (UVec2, UVec2) 
     (first, last - first + UVec2::ONE)
 }
 
-/// The pyramid texel view texel `x`'s centre falls in, per axis: `hiz_seed.wgsl`'s `owner`.
+/// The pyramid texel view texel `x`'s centre falls in, per axis.
 fn owner(x: u32, src: u32, dst: u32) -> u32 {
     ((2 * x + 1) * dst) / (2 * src)
 }
@@ -598,7 +600,9 @@ fn init_hiz_pipelines(
         ..default()
     });
     let mut pipes = HizPipelines {
-        seed_shader: asset_server.load("embedded://benilla_water/shaders/hiz_seed.wgsl"),
+        seed_shader: asset_server.load(benilla_assets::dev_shaders::shader_path(
+            "embedded://benilla_water/shaders/hiz_seed.wgsl",
+        )),
         seed_layout,
         seed_ms_layout,
         seeds: Vec::new(),
@@ -915,9 +919,8 @@ mod tests {
         (8..=4096u32).map(|src| (src, pyramid_size(UVec2::splat(src)).x))
     }
 
-    /// Each view pixel has exactly one owner, and lies in its owner's footprint: so the seed's
-    /// invocation for that texel loads it and is the one that writes its linear depth. Ownership
-    /// is a function, so no pixel is written twice; lying in the footprint means none is missed.
+    /// Each view pixel has exactly one owner, and lies in its owner's footprint: so the footprints
+    /// cover the view, and every pixel's depth reaches mip 0 of both pyramids.
     #[test]
     fn every_view_pixel_has_one_owner_inside_its_footprint() {
         for (src, dst) in sizes() {
@@ -947,9 +950,9 @@ mod tests {
         }
     }
 
-    /// A seed over the rectangle's tiles alone still writes every pixel of it: each pixel's owner
-    /// lies inside the dispatched range, and the range ends on the owners of its first and last
-    /// pixel. Every rectangle of the small views, a stride of them on the large ones.
+    /// The rectangle's tiles hold every pixel of it: each pixel's owner lies inside the range, and
+    /// the range ends on the owners of its first and last pixel. Every rectangle of the small
+    /// views, a stride of them on the large ones.
     #[test]
     fn the_rect_dispatch_owns_every_rect_pixel() {
         let check = |src: u32, a: u32, b: u32| {
@@ -1059,7 +1062,6 @@ mod tests {
         for expr in [
             "(d * src) / dst",
             "min(((d + 1) * src + dst - 1) / dst, src) - 1",
-            "((2 * x + 1) * dst) / (2 * src)",
         ] {
             assert!(bare.contains(expr), "hiz_seed.wgsl lost `{expr}`");
             // Once in its mirror function and once in this list.
