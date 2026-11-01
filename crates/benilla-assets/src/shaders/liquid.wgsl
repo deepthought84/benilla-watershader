@@ -1100,13 +1100,13 @@ fn pv_glint_reach() -> f32 {
     return select(water_reflect.sun.w, r, r > 0.0);
 }
 
-/// The rough reflections' share of the physical lobe, 0 with `rough` off.
 /// The rivers' slow tier's gain, `WOW_PREVIEW_RIVER_SLOW`: the lane holds 1 − gain, so a binary
 /// that does not write it (zero) runs the tier.
 fn pv_river_slow() -> f32 {
     return saturate(1.0 - water_reflect.preview.mask.z);
 }
 
+/// The rough reflections' share of the physical lobe, 0 with `rough` off.
 fn pv_rough_gain() -> f32 {
     return select(0.0, max(water_reflect.preview.mask.y, 0.0), pv_on(PV_ROUGH));
 }
@@ -6168,6 +6168,8 @@ const RF_SHEET_V: f32 = 7.0;
 const RF_LUMP_YD: f32 = 9.0;
 /// The whitewater rafts' size, yards.
 const RF_RAFT_YD: f32 = 1.4;
+/// The mean of the lumps' modulation of the drive, squared: `(0.6 + 0.45 n)²` over a unit field.
+const RF_LUMP_SQ: f32 = 0.56;
 /// The streaks' spacing across the current, yards, and how much longer than wide they are.
 const RF_STREAK_YD: f32 = 0.8;
 const RF_STREAK_STRETCH: f32 = 9.0;
@@ -6202,13 +6204,13 @@ const RF_CHURN_YD: f32 = 1.6;
 /// How white each foam gets at most: foam is never the brightest continuous line in the frame.
 const RF_WHITE_LEVEL: f32 = 0.8;
 const RF_STREAK_LEVEL: f32 = 0.34;
-/// Round 4, slow water: what runs under the whitewater's gates still carries a few flecks and faint
-/// lines. The speeds the tier fades in over and hands over to the whitewater's look over, yards a
-/// second; the flecks' cover at most and their white; the lines' white.
-const RF_SLOW_V: vec4<f32> = vec4<f32>(0.15, 0.35, 1.6, 2.6);
-const RF_SPECK_COV: f32 = 0.05;
-const RF_SPECK_LEVEL: f32 = 0.55;
-const RF_SLOW_STREAK_LEVEL: f32 = 0.16;
+/// Round 4, slow water: what runs under the whitewater's gates still carries a few flecks, drawn
+/// out along the current and gathered in trails (slack water under 0.3 yd/s stays clean). The speeds
+/// the tier fades in over and hands over to the whitewater's look over, yards a second; the flecks'
+/// cover at most, where they gather; their white, dimmer than a raft's.
+const RF_SLOW_V: vec4<f32> = vec4<f32>(0.3, 0.55, 1.6, 2.6);
+const RF_SPECK_COV: f32 = 0.12;
+const RF_SPECK_LEVEL: f32 = 0.42;
 const RF_POOL_LEVEL: f32 = 0.92;
 const RF_SHEET_LEVEL: f32 = 0.92;
 const RF_MIST_LEVEL: f32 = 0.45;
@@ -6593,10 +6595,10 @@ fn rf_obstacle(p: vec3<f32>, e1: vec2<f32>) -> f32 {
     return hit;
 }
 
-/// The rafts' own clock: a third of the river clock, so a set of rafts lives 5.3 s (round 3's 8 s
-/// sheared because the per-pixel phase's warp folded most of a fast rapid's rafts at that length;
-/// round 4 carries each set rigidly, and a longer life slows how fast a raft grows and goes).
-const RF_RAFT_TURNS: f32 = 3.0;
+/// The rafts' own clock: half the river clock, so a set of rafts lives 8 s (round 3's 8 s sheared
+/// because the per-pixel phase's warp folded most of a fast rapid's rafts at that length; round 4
+/// carries each set rigidly, so a raft has the time to shrink away slowly).
+const RF_RAFT_TURNS: f32 = 2.0;
 /// The rafts' carry at most, yards a second: faster water carries them no faster, so across a rapid
 /// running faster than this the carry is uniform and cannot shear a raft.
 const RF_RAFT_CARRY: f32 = 2.5;
@@ -6604,15 +6606,32 @@ const RF_RAFT_CARRY: f32 = 2.5;
 const RF_LACE_SCALE: f32 = 1.5;
 /// Each raft is born within its set's first `RF_RAFT_BIRTH` of a life, by a field carried with it,
 /// and lives `RF_RAFT_SPAN` of it, so every raft of a set is gone before the set's frame restarts.
-const RF_RAFT_BIRTH: f32 = 0.2;
-const RF_RAFT_SPAN: f32 = 0.75;
+/// Births spread over most of the turn, so the two sets' rafts come and go at all times and the
+/// rapid's whole cover holds steady: it varies by 3% over a turn, by 18% with births over a fifth.
+const RF_RAFT_BIRTH: f32 = 0.45;
+const RF_RAFT_SPAN: f32 = 0.5;
+/// Rafts and their lace are drawn out along the current, torn foam rather than round patches: the
+/// body's and the lace's lookups a yard across and along the current against a round read. They are
+/// read on `RF_RAFT_BINS` fixed bearings over half a turn, the two either side of the current's
+/// blended: a frame turned with the current pixel by pixel would shear the world coordinates.
+const RF_RAFT_ANISO: vec2<f32> = vec2<f32>(2.1, 0.65);
+const RF_LACE_ANISO: vec2<f32> = vec2<f32>(1.35, 0.52);
+const RF_RAFT_BINS: f32 = 6.0;
+/// How far past its full level the cut sits at a raft's birth and death. A raft's life moves the
+/// cut's level at a steady pace, not its cover: moved by the cover, the level ran away as the cover
+/// ran out and small rafts blinked out within 0.1 s. It grows out of its peaks over the first fifth
+/// of its life, holds, and from mid-life shrinks back into them at 0.55 a second while the last of
+/// it thins away over the final 0.6 s.
+const RF_RAFT_GONE: f32 = 1.0;
 
 /// One set of rafts.
 struct RfRaft {
-    // Coverage through the lace, the body's gradient (world XZ), and its edge band for the shade.
+    // Coverage through the lace, the body's gradient (world XZ), its edge band for the shade, and
+    // how deep in the body's dense core the pixel lies (0 on the torn rim, 1 inside).
     foam: f32,
     g: vec2<f32>,
     band: f32,
+    core: f32,
 };
 
 /// The rafts' bubble lace, and the field each raft is born by.
@@ -6655,18 +6674,63 @@ fn rf_lace_mask(c: f32, pat: f32, fw: f32) -> f32 {
     return mix(edge * (0.76 + 0.24 * inner), c, far) * smoothstep(0.0, 0.04, c);
 }
 
+/// The two fixed bearings either side of the current's `e1`, of [`RF_RAFT_BINS`] over half a turn,
+/// and the first's weight: one read alone over the middle of a bin, two blended across its edges.
+struct RfBins {
+    b0: f32,
+    b1: f32,
+    w0: f32,
+};
+
+fn rf_raft_bins(e1: vec2<f32>) -> RfBins {
+    let f = fract(atan2(e1.y, e1.x) / RF_PI) * RF_RAFT_BINS;
+    let b0 = floor(f);
+    let b1 = select(b0 + 1.0, 0.0, b0 >= RF_RAFT_BINS - 1.0);
+    return RfBins(b0, b1, 1.0 - smoothstep(0.32, 0.68, f - b0));
+}
+
+/// The frame of fixed bearing `bin`: rows across and along it, `k.x` and `k.y` lookups a yard.
+fn rf_bin_frame(bin: f32, k: vec2<f32>) -> mat2x2<f32> {
+    let a = bin * (RF_PI / RF_RAFT_BINS);
+    let along = vec2<f32>(cos(a), sin(a));
+    return rf_rows(vec2<f32>(-along.y, along.x) * k.x, along * k.y);
+}
+
+/// One bearing's raft body and lace at the carried point `q`.
+struct RfRaftRead {
+    n: RfNoise,
+    lace: RfLace,
+};
+
+fn rf_raft_read(
+    q: vec2<f32>,
+    bin: f32,
+    h: vec2<f32>,
+    o: vec2<f32>,
+    ddx: vec2<f32>,
+    ddy: vec2<f32>,
+) -> RfRaftRead {
+    let j = rf_bin_frame(bin, RF_RAFT_ANISO / (4.0 * RF_RAFT_YD));
+    let n = rf_noise(rf_uv(q, j, o) + h + vec2<f32>(0.29, 0.53) * bin, j, ddx, ddy);
+    let l = rf_bin_frame(bin, RF_LACE_ANISO * RF_LACE_SCALE);
+    return RfRaftRead(n, rf_lace_noise(l * (q + h * 37.0), l * ddx, l * ddy));
+}
+
 /// One set `k` (0 or 1, half a life apart) of whitewater rafts at `xz` (round 4). The set's frame
 /// is carried rigidly, one phase for every pixel, about the set's mid-life: round 3's per-pixel
 /// phase was read in the world, a fixed warp the rafts slid through, folding them wherever the
 /// lumps' slope along the current passed 1/(10 yd · 0.12). Each raft is born on its own, by a field
-/// carried with it, and its life scales the cover the cut keeps, never its opacity: a raft grows
-/// from its peaks and shrinks back into them, white throughout, instead of a grey wash crossing
-/// white with the whole set at once. Drawn through the bubble lace ([`rf_lace_mask`]).
+/// carried with it, and its life moves the level the cut keeps, never its opacity: a raft grows
+/// from its peaks and shrinks back into them instead of a grey wash crossing white with the whole
+/// set at once. Drawn out along the current on the fixed bearings `bins`, through the bubble lace
+/// ([`rf_lace_mask`]): a dense core, a torn and thinner rim.
 fn rf_raft(
     xz: vec2<f32>,
     flow: vec2<f32>,
     k: f32,
     cov: f32,
+    ride: f32,
+    bins: RfBins,
     o: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
@@ -6679,22 +6743,47 @@ fn rf_raft(
     let life_s = RF_PERIOD_S / RF_RAFT_TURNS;
     let carry = flow * min(1.0, RF_RAFT_CARRY / max(length(flow), 1e-3));
     let q = xz - carry * ((p - 0.5) * life_s);
-    let j = rf_scale(1.0 / (4.0 * RF_RAFT_YD));
-    let n = rf_noise(rf_uv(q, j, o) + h, j, ddx, ddy);
-    let pat = rf_lace_noise((q + h * 37.0) * RF_LACE_SCALE, ddx * RF_LACE_SCALE, ddy * RF_LACE_SCALE);
+    // The two bearings' reads, blended as [`rf_mix2`] blends, the spread kept; over the middle of a
+    // bin one bearing is read alone (explicit gradients: legal off uniform control flow). One loop
+    // body, so the reads are compiled once.
+    var n = RfNoise(0.0, vec2<f32>(0.0));
+    var pat = RfLace(0.0, 0.0, 0.0);
+    for (var j = 0; j < 2; j = j + 1) {
+        let w = select(1.0 - bins.w0, bins.w0, j == 0);
+        if (w <= 0.0) {
+            continue;
+        }
+        let r = rf_raft_read(q, select(bins.b1, bins.b0, j == 0), h, o, ddx, ddy);
+        n = RfNoise(n.n + r.n.n * w, n.g + r.n.g * w);
+        pat = RfLace(pat.v + (r.lace.v - 0.5) * w, pat.fw + r.lace.fw * w, pat.stag + r.lace.stag * w);
+    }
+    let kw = inverseSqrt(max(bins.w0 * bins.w0 + (1.0 - bins.w0) * (1.0 - bins.w0), 1e-4));
+    n = RfNoise(n.n * kw, n.g * kw);
+    pat = RfLace(0.5 + pat.v * kw, pat.fw * kw, pat.stag * kw);
     let born = RF_RAFT_BIRTH * saturate(0.5 + 0.5 * pat.stag);
     let u = saturate((p - born) / RF_RAFT_SPAN);
-    let grow = smoothstep(0.0, 0.32, u) * (1.0 - smoothstep(0.58, 1.0, u));
-    let c = cov * 0.75 * grow;
-    let lev = rf_level(max(c, 0.002));
-    let body = smoothstep(lev - 0.15, lev + 0.45, n.n) * smoothstep(0.0, 0.004, c);
+    // The lumps' share of the drive (`ride` of the cover), carried with the raft on its birth field.
+    let m = clamp(0.6 + 0.45 * pat.stag, 0.1, 1.6);
+    let cov_k = min(cov * mix(1.0, m * m / RF_LUMP_SQ, ride), 0.3);
+    let lev = rf_level(max(cov_k, 0.002))
+        + RF_RAFT_GONE * max(1.0 - saturate(u / 0.2), saturate((u - 0.5) / 0.45));
+    let gate = smoothstep(0.0, 0.004, cov_k) * smoothstep(0.0, 0.08, u)
+        * (1.0 - smoothstep(0.85, 1.0, u));
+    let body = smoothstep(lev - 0.15, lev + 0.45, n.n) * gate;
+    // The core lies a level deeper: inside it the lace is dense and white, on the rim between it is
+    // torn, thinner and (in [`rf_river`]) cooler, so a raft has a body instead of a decal's flat cream.
+    let core = smoothstep(lev + 0.1, lev + 0.9, n.n);
     let pv = saturate((pat.v - 0.5) * 3.5 + 0.5);
     // The lace opens as the raft ages, but its unresolved mean stays white.
     let open = mix(0.86, 0.74, smoothstep(0.55, 1.0, u));
-    var foam = rf_lace_mask(min(body * 1.1, open), pv, pat.fw * 3.5);
+    // Its outer edge feathers over the body's own ramp, and the lace's thick parts mottle the core.
+    let thick = smoothstep(lev - 0.1, lev + 0.35, n.n) * mix(0.65, 1.0, core)
+        * mix(0.82, 1.0, smoothstep(0.35, 0.85, pv));
+    var foam = rf_lace_mask(min(body * 1.1, mix(0.6, open, core)), pv, pat.fw * 3.5) * thick;
     // Unresolved, lace is mostly water: its mean, not a veil over the mirror.
-    foam = mix(foam, c * 0.5, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px));
-    return RfRaft(foam, n.g, body * (1.0 - body) * 4.0);
+    let share = gate / (1.0 + exp(1.702 * lev));
+    foam = mix(foam, share * 0.5, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px));
+    return RfRaft(foam, n.g, body * (1.0 - body) * 4.0, core * body);
 }
 
 /// Flowing water (RIV-2/3): whitewater rafts, chop and roughness by the site's drive, modulated by
@@ -6743,25 +6832,21 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
         * smoothstep(1.0, 2.5, s.speed);
 #endif
     // Round 3: the whole of it under a quarter of the surface, the shallow contacts included (they
-    // whitened STV's upper reach, which is shallow throughout, past round 2's cap).
-    let cov_fast = min(max(min(0.45 * turb * turb, 0.24), max(0.5 * tail, 0.4 * contact)), 0.26);
-    // Round 4, slow water (under every whitewater gate): the same two sets cut low, a few flecks
-    // drifting at the water's own speed, gathered in the lumps and along the banks' shear lines.
+    // whitened STV's upper reach, which is shallow throughout, past round 2's cap). Round 4 polish:
+    // the drive's share at the lumps' mean; each raft carries its own share of the lumps
+    // ([`rf_raft`]), so it does not shrink and swell as it crosses the still lumps (at the carry, their
+    // slope moved a raft's cut faster than its life did).
+    let drive = min(0.45 * RF_LUMP_SQ * s.turb * s.turb, 0.24);
+    let floor_c = max(0.5 * tail, 0.4 * contact);
+    let cov_fast = min(max(drive, floor_c), 0.26);
     let shear = smoothstep(0.8, 2.5, i.to_shore) * (1.0 - smoothstep(3.0, 7.0, i.to_shore));
     let slow = smoothstep(RF_SLOW_V.x, RF_SLOW_V.y, s.speed)
         * (1.0 - smoothstep(RF_SLOW_V.z, RF_SLOW_V.w, s.speed)) * pv_river_slow();
-    let cov_slow = RF_SPECK_COV * slow * mix(0.2, 1.0, smoothstep(-0.4, 1.2, lump.n + 0.8 * shear));
-    let cov = max(cov_fast, cov_slow);
-    let r0 = rf_raft(xz, i.flow, 0.0, cov, o, ddx, ddy, px);
-    let r1 = rf_raft(xz, i.flow, 1.0, cov, o, ddx, ddy, px);
-    // Flecks are dimmer than rafts, and their low cover is not faded out as thin whitewater's is.
-    let speck = slow * (1.0 - smoothstep(0.03, 0.08, cov_fast));
-    var white = max(r0.foam, r1.foam) * mix(RF_WHITE_LEVEL, RF_SPECK_LEVEL, speck)
-        * smoothstep(0.0, mix(0.05, 0.012, speck), cov);
-    let r_g = select(r1.g, r0.g, r0.foam >= r1.foam);
-    let r_band = max(r0.band, r1.band);
 
-    var streak = 0.0;
+    // The streak lines' seams: the zero lines of a field stretched along the current and still in
+    // the world, where the current gathers what it carries.
+    var sl = RfNoise(0.0, vec2<f32>(0.0));
+    var seam = 1.0;
 #ifndef WATER_TIER_LOW
     // Foam is carried on running water, not on a lake's slow drift.
     let carried = saturate(0.04 + 0.45 * s.turb + 0.40 * shear + 0.6 * tail)
@@ -6772,12 +6857,33 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     // Round 4: where none can show, the lines' reads are skipped.
     let gate = (1.0 - saturate(turb * 1.3)) * smoothstep(0.38, 0.75, carried)
         * smoothstep(0.1, 0.8, lump.n + 0.6 * tail);
-    // Slow water's faint lines: only along the banks' shear lines, in the lumps' patches (open slow
-    // water netted with the field's zero lines read as scribbles).
-    let load_s = slow * shear * smoothstep(0.2, 0.9, lump.n + 0.3)
-        * (1.0 - smoothstep(0.12, 0.3, px));
-    if (gate + load_s > 0.0) {
-        let sl = rf_streak_lines(xz, s.e1, o, ddx, ddy);
+    if (gate + slow > 0.0) {
+        sl = rf_streak_lines(xz, s.e1, o, ddx, ddy);
+        seam = 1.0 - smoothstep(0.2, 0.55, abs(sl.n));
+    }
+#endif
+    // Round 4, slow water (under every whitewater gate): the same two sets cut low, a few flecks
+    // drifting at the water's own speed. They gather on the seams in the lumps' patches and along
+    // the banks' shear lines, so they drift in trails down the current rather than sprinkled over
+    // a pond (on Low, in the patches alone), and thin out with distance, fewer and smaller.
+    let gather = seam * smoothstep(-0.6, 0.8, lump.n + 0.8 * shear);
+    let cov_slow = RF_SPECK_COV * slow * mix(0.04, 1.0, gather) * (1.0 - smoothstep(0.06, 0.25, px));
+    let cov = max(cov_fast, cov_slow);
+    // Flecks are dimmer than rafts, and their low cover is not faded out as thin whitewater's is.
+    let speck = slow * (1.0 - smoothstep(0.03, 0.08, cov_fast));
+    let ride = saturate(drive / max(cov, 1e-4)) * (1.0 - speck);
+    let bins = rf_raft_bins(s.e1);
+    let r0 = rf_raft(xz, i.flow, 0.0, cov, ride, bins, o, ddx, ddy, px);
+    let r1 = rf_raft(xz, i.flow, 1.0, cov, ride, bins, o, ddx, ddy, px);
+    var white = max(r0.foam, r1.foam) * mix(RF_WHITE_LEVEL, RF_SPECK_LEVEL, speck)
+        * smoothstep(0.0, mix(0.05, 0.012, speck), cov);
+    let r_g = select(r1.g, r0.g, r0.foam >= r1.foam);
+    let r_band = max(r0.band, r1.band);
+    let r_core = max(r0.core, r1.core);
+
+    var streak = 0.0;
+#ifndef WATER_TIER_LOW
+    if (gate > 0.0) {
         // A line survives where the rafts' field clears the level its load sets, so lines break up
         // and run out of the whitewater they come from.
         let lev_c = rf_level(carried);
@@ -6799,14 +6905,6 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
         let bead = sc_bubble_mask(0.55 + 0.3 * carried, bead_p.v, bead_p.fw);
         streak = mix(line_v * bead, carried * 0.12, smoothstep(0.6 * wl, 2.0 * wl, fp))
             * RF_STREAK_LEVEL * mix(0.5, 1.0, carried) * gate;
-        // The slow lines: thin, at least a pixel and a half across, strings of beads drifting with
-        // the water.
-        let wl_s = max(0.8 * RF_STREAK_W_YD, 0.75 * fp);
-        // Broken into runs where the chop field (carried at the current) is high, so the runs'
-        // ends drift down the seams.
-        let line_s = (1.0 - smoothstep(wl_s - aa, wl_s + aa, dist)) * smoothstep(0.1, 0.6, raft.n);
-        let bead_s = sc_bubble_mask(0.5 + 0.25 * load_s, bead_p.v, bead_p.fw);
-        streak = max(streak, line_s * bead_s * RF_SLOW_STREAK_LEVEL * load_s);
     }
 #endif
 
@@ -6816,7 +6914,9 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
         part.slope = part.slope + rf_standing(xz, o, s, px) * env;
     }
     part.cover = max(white, streak);
-    part.shade = rf_foam_shade(r_g, r_band, i.to_view, sun);
+    // A raft's torn rim is in its own shade, cooler than its core (round 4 polish).
+    part.shade = rf_foam_shade(r_g, r_band, i.to_view, sun)
+        * select(1.0, mix(0.4, 1.0, r_core), white >= streak);
     // Round 3: the churned water milky only where it is churned hard.
     part.aer = 0.35 * turb * turb;
     return part;
