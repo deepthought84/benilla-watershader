@@ -1848,10 +1848,12 @@ mod tests {
         }
         let plain = key(0.0, 1.0, 0.0);
         assert!(plain.composite() && !plain.has(LiquidKey::VIEW));
-        assert_eq!(
-            plain.frag_defs(),
-            ["WATER_STYLISED", "WATER_SCENE_DEPTH", "WATER_TIER_LOW"]
-        );
+        // The preview (`crate::preview`, on unless `WOW_PREVIEW=0`) rides every stylised pipeline.
+        let mut want = vec!["WATER_STYLISED", "WATER_SCENE_DEPTH", "WATER_TIER_LOW"];
+        if crate::preview::any() {
+            want.push("WATER_PREVIEW");
+        }
+        assert_eq!(plain.frag_defs(), want);
         assert!(
             key(0.0, 0.0, 0.0).frag_defs().is_empty(),
             "the reference lane takes no def"
@@ -2117,12 +2119,22 @@ mod tests {
         }
         // The debug views (`path.w` bit 0) carry `WATER_VIEW`, the region's guard whose names only
         // they declare, and `WATER_DUAL_SOURCE`
-        // the composite's second output. The floor march law's tier branches declare module-scope
+        // the composite's second output. Every def means the preview's too: `WATER_PREVIEW`, its
+        // glow store (`WATER_GLOW_STORE`) and the mirrors' distance chain (`WATER_MIRROR_DIST`). The floor march law's tier branches declare module-scope
         // names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`), the same ones in every branch, so
         // this key's tier declares them all.
         let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 1.0));
         let mut defs = water.frag_defs();
-        defs.push("WATER_DUAL_SOURCE");
+        for def in [
+            "WATER_DUAL_SOURCE",
+            "WATER_PREVIEW",
+            "WATER_GLOW_STORE",
+            "WATER_MIRROR_DIST",
+        ] {
+            if !defs.contains(&def) {
+                defs.push(def);
+            }
+        }
         let text = liquid_under(&defs);
         let seen = identifiers(&text);
         let missing: Vec<&String> = region

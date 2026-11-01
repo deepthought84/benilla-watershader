@@ -68,8 +68,9 @@ fn liquid_wgsl_compiles_for_every_liquid_pipeline() {
     let keys = covered_keys();
     assert_eq!(
         keys.len(),
-        22 + 60,
-        "22 shipped keys and 60 debug variants of the stylised 20"
+        22 + 20,
+        "22 shipped keys and the debug view of each of the stylised 20 (the screen-space \
+         march's variants are gone with it)"
     );
     let mut by_defs: HashMap<Vec<&str>, Vec<LiquidKey>> = HashMap::new();
     for key in keys {

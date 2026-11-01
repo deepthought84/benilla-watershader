@@ -1,6 +1,7 @@
 //! The Improved Water **preview** levers: which of the preview's features run, read once from the
 //! environment and shared by every crate that draws or feeds them (the liquid pipeline's
-//! `WATER_PREVIEW` def, the reflection block's mask row, the CPU inputs).
+//! `WATER_PREVIEW` def, the reflection block's mask row, the CPU inputs). The preview is the
+//! Improved look: every feature runs unless a lever turns it off.
 //!
 //! - `$WOW_PREVIEW` sets the start: unset or `all` every feature, `0`/`off`/`none` none, a comma
 //!   list of names exactly those, a list of `-name` entries every feature but those.
@@ -200,6 +201,6 @@ mod tests {
         assert_eq!(parse(None, one_off), ALL & !ROUGH);
         let one_on = |n: &str| (n == "SURF").then(|| "1".to_string());
         assert_eq!(parse(Some("off"), one_on), SURF);
-        assert!(ALL < 1 << 24, "the mask stays exact in an f32");
+        const { assert!(ALL < 1 << 24, "the mask stays exact in an f32") };
     }
 }

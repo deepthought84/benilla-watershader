@@ -1517,7 +1517,7 @@ mod tests {
             mirror2 < drift && drift < cycle,
             "the clock's offsets, then its cycles, come after the second mirror's row"
         );
-        // The look block: 139 rows after the clock, 16-byte aligned, and the struct's last member.
+        // The look block: 139 rows after the clock, 16-byte aligned, and the last member before the preview's block.
         assert_eq!(LOOK_LANES.start, CLOCK_LANES.end);
         assert_eq!(LOOK_LANES.len(), 556);
         assert_eq!(LOOK_LANES.start % 4, 0, "a vec4 row starts on 16 bytes");
@@ -1532,8 +1532,8 @@ mod tests {
             .collect();
         assert_eq!(
             tail,
-            ["look: WaterLook,"],
-            "the look rows are the struct's last member"
+            ["look: WaterLook,", "preview: WaterPreview,"],
+            "the look rows are the struct's last member but the preview's"
         );
         // Each row's lane, in the order and size of `WaterLook` and `WaterBody`.
         use benilla_world::liquid::{

@@ -426,7 +426,7 @@ mod tests {
             max: UVec2::new(900, 900),
         };
         assert_eq!(WaterSnapshotScope::of(&r, size), scissored);
-        assert_eq(scissored.scissor(), Some((100, 400, 800, 500)));
+        assert_eq!(scissored.scissor(), Some((100, 400, 800, 500)));
         assert_eq!(WaterSnapshotScope::Full.scissor(), None);
     }
 

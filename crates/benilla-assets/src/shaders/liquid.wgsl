@@ -1246,9 +1246,6 @@ const WU_SUN_HALO: f32 = 0.6;
 const WU_SUN_DISC: f32 = 6.0;
 const WU_WINDOW_GLINT: f32 = 6.0;
 const WU_GLINT_ALPHA_MIN: f32 = 0.025;
-/// The internal mirror: the mirrored bed's share over the in-scatter, and its blur in pixels.
-const WU_TIR_BED: f32 = 0.38;
-const WU_TIR_BLUR_PX: f32 = 3.0;
 /// Foam seen from below: the light it passes, against its lit top.
 const WU_FOAM_UNDER: f32 = 0.45;
 /// The aerated water under a trail: how far it pales toward foam.
@@ -1818,21 +1815,6 @@ fn wu_window_glint(n: vec3<f32>, to_view: vec3<f32>, to_sun: vec3<f32>, alpha: f
     h = select(h, -h, h.y < 0.0);
     h = normalize(h + vec3<f32>(0.0, 1e-6, 0.0));
     return wu_ggx_peak1(max(dot(n, h), 0.0), alpha);
-}
-
-/// The point the internal mirror reads: the view ray `rd` reflected off the flat underside, from
-/// the lookup point slid by the resolved ripple (`n_lo`'s tilt times `slide` yards, the mirrors'
-/// rule), carried down to a bed `bed_depth` yards under the surface.
-fn wu_tir_point(
-    world_pos: vec3<f32>,
-    rd: vec3<f32>,
-    n_lo: vec3<f32>,
-    slide: f32,
-    bed_depth: f32,
-) -> vec3<f32> {
-    let r = vec3<f32>(rd.x, -abs(rd.y), rd.z);
-    let p = world_pos + vec3<f32>(n_lo.x, 0.0, n_lo.z) * slide;
-    return p + r * (bed_depth / max(-r.y, 0.08));
 }
 
 /// The underside's radiance, linear and opaque.
@@ -3555,20 +3537,6 @@ fn sample_probe_rough(
     return probe_refog(sum / n, shares);
 }
 
-#ifdef WATER_VIEW
-/// The lobe as a debug view: r its spread up over 0.1 rad, g across over 0.02 rad, b the share of
-/// it a reflected thing `d_hit` yards behind the water shows the eye `d_eye` in front. The id is
-/// past the ids the other preview modules take; the integration assigns the final one.
-const WV_REFL_ROUGH: u32 = 35u;
-
-fn rough_lobe_view(lobe: RoughLobe, d_hit: f32, d_eye: f32) -> vec3<f32> {
-    return vec3<f32>(
-        saturate(lobe.up / 0.1),
-        saturate(lobe.side / 0.02),
-        rough_contact(d_hit, d_eye),
-    );
-}
-#endif
 #endif // WATER_PREVIEW
 
 
@@ -5231,8 +5199,9 @@ fn wake_at(xz: vec2<f32>, surf_y: f32, fp: f32) -> WuWake {
 }
 
 /// The underside's output ([`wu_underside`]): Snell's window over the internal mirror, the mirror
-/// reading the snapshot where the bed under the authored column `column` lies, four taps; foam
-/// floating on it from below; fogged as the world is, at the surface, and opaque.
+/// the in-scatter along the reflected ray (no screen-space reflection: it reads no colour off the
+/// screen, so `n_lo` and `column` are unused); foam floating on it from below; fogged as the world
+/// is, at the surface, and opaque.
 fn underside_out(
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
@@ -5258,36 +5227,6 @@ fn underside_out(
         u.sun_e.rgb,
         u.surface.y,
     );
-    let p = wu_tir_point(world_pos, rd, n_lo, water_reflect.march.y, max(column, 1.5));
-    let ndc = position_world_to_ndc(p);
-    let uv = ndc_to_uv(ndc.xy);
-    let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-    let vp = view.viewport.zw;
-    let fits = all(vec2<i32>(textureDimensions(scene_tex)) == vec2<i32>(vp));
-    // Round 2: the mirrored bed fades well inside the screen's edges, on a long reflected path
-    // (grazing rays stretch it into ghosts), and where the frame shows something other than the
-    // bed at that point (an occluder in front of it).
-    // Round 3: and by the water along the reflected path, eye to surface to bed, so near the
-    // mirror's horizon it sinks into the in-scatter instead of a bright row of far bed and fog.
-    let path = distance(view.world_position.xyz, world_pos) + distance(world_pos, p);
-    var on = select(0.0, smoothstep(0.0, 0.22, edge), ndc.z > 0.0 && fits)
-        * smoothstep(0.07, 0.22, abs(rd.y)) * exp(-max(u.sigma.w, 0.02) * 0.6 * path);
-    if (on > 0.0) {
-        let zs = scene_view_z(vec2<i32>(uv * view.viewport.zw + view.viewport.xy));
-        let zp = -(view.view_from_world * vec4<f32>(p, 1.0)).z;
-        on = on * (1.0 - smoothstep(0.4, 0.65, (zp - zs) / max(zp, 1.0)));
-    }
-    var bed = vec3<f32>(0.0);
-    if (on > 0.0) {
-        let c = uv * vp + view.viewport.xy;
-        let o = WU_TIR_BLUR_PX;
-        let hi = vec2<i32>(vp) - vec2<i32>(1);
-        let g = textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(-o, -o)), vec2<i32>(0), hi), 0).rgb
-            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(o, -o)), vec2<i32>(0), hi), 0).rgb
-            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(-o, o)), vec2<i32>(0), hi), 0).rgb
-            + textureLoad(scene_tex, clamp(vec2<i32>(c + vec2<f32>(o, o)), vec2<i32>(0), hi), 0).rgb;
-        bed = water_dec(g * 0.25);
-    }
     let us = wu_underside(
         n,
         to_view,
@@ -5299,8 +5238,8 @@ fn underside_out(
         to_light,
         sun_reach,
         tir_base,
-        bed,
-        on * WU_TIR_BED,
+        vec3<f32>(0.0),
+        0.0,
     );
     var layer = WaterLayer(fog_diffuse(us.l, fog.f, fog.g), vec3<f32>(0.0));
     if (foam > 0.0) {
@@ -8284,12 +8223,12 @@ fn stylised_water(
         wsum = wsum + w[k];
         cover = cover + wt[k];
     }
+    var probe_read = wsum > 1e-8;
 #ifdef WATER_PREVIEW
     // `window`: from below, the internal mirror replaces the probe.
-    if (wsum > 1e-8 && (eye_above || !(pv_on(PV_WINDOW) && pv_eye_wet()))) {
-#else
-    if (wsum > 1e-8) {
+    probe_read = probe_read && (eye_above || !(pv_on(PV_WINDOW) && pv_eye_wet()));
 #endif
+    if (probe_read) {
         // The cube is read through a FLATTER normal than the water draws with — see
         // `liquid::probe::probe_normal` for the measurement and for why a prefiltered cube is the
         // real answer.
