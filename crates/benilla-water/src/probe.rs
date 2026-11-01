@@ -438,7 +438,7 @@ fn probe_enabled() -> bool {
 
 /// `$WOW_PROBE_SHOW=1` — paint the probe's own sample instead of the water.
 ///
-/// In the `$WOW_SSR_SHOW` / `$WOW_MIRROR_SHOW` family, and needed for the same reason those are:
+/// In the `$WOW_MIRROR_SHOW` family, and needed for the same reason it is:
 /// **a cubemap of the wrong place is still a plausible picture.** A face captured with the wrong
 /// orientation, or a cube that never received its copy, produces water that looks like water and is
 /// reflecting somewhere else entirely. That cannot be caught by looking at the final image, so the

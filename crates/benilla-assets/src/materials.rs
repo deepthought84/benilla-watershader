@@ -395,9 +395,6 @@ impl LiquidKey {
     /// The quality tier's two bits (`path.w` bits 1-2): 0 Low, 1 Medium, 2 High, each pushing
     /// its own `WATER_TIER_*` def ([`Self::TIER_DEFS`]).
     pub const TIER_SHIFT: u16 = 3;
-    /// `WATER_SSR`, the screen-space march as a debug variant: `path.w` bit 3. `path.w` bit 4 (key
-    /// bit 6) is spare.
-    pub const SSR: u16 = 1 << 5;
     /// The highlight excess stored for the glow (`path.w` bit 5): a pipeline of its own, for which
     /// [`Self::frag_defs`] pushes `WATER_GLOW_STORE` while the preview's `glow` runs.
     pub const GLOW: u16 = 1 << 7;
@@ -412,8 +409,10 @@ impl LiquidKey {
     /// The def each tier compiles under, by [`Self::tier`].
     pub const TIER_DEFS: [&'static str; 3] =
         ["WATER_TIER_LOW", "WATER_TIER_MEDIUM", "WATER_TIER_HIGH"];
-    /// The key bits `path.w` may set: bits 2..=9 but the spare bit 6.
-    pub const CAPS_MASK: u16 = 0x3BC;
+    /// The key bits `path.w` may set: bits 2..=9 but the spare bits 5 and 6 (`path.w` bits 3 and 4;
+    /// bit 3 was the screen-space march's, deleted by the owner's ruling: no screen-space
+    /// reflection at all).
+    pub const CAPS_MASK: u16 = 0x39C;
 
     /// The key of a material with these `kind` and `path` lanes. Magma and slime return
     /// [`Self::FULLBRIGHT`] before any other lane is read, so both lanes share their pipeline.
@@ -454,8 +453,7 @@ impl LiquidKey {
     /// The keys a player reaches without a debug switch: the reference lane, magma and slime, and
     /// stylised water at each tier, carrying [`Self::GLOW`] from Medium up when `glow`,
     /// [`Self::DUAL_SOURCE`] when `dual` and [`Self::PAINTED`] when `painted`. The pipeline warm
-    /// pass compiles these; [`Self::VIEW`] and [`Self::SSR`] are debug variants, compiled on first
-    /// use.
+    /// pass compiles these; [`Self::VIEW`] is a debug variant, compiled on first use.
     pub fn shipped(glow: bool, dual: bool, painted: bool) -> impl Iterator<Item = LiquidKey> {
         let stylised = (0..3u16).map(move |tier| {
             let mut k = Self::STYLISED | tier << Self::TIER_SHIFT;
@@ -493,9 +491,6 @@ impl LiquidKey {
         }
         if self.has(Self::VIEW) {
             defs.push("WATER_VIEW");
-        }
-        if self.has(Self::SSR) {
-            defs.push("WATER_SSR");
         }
         // The Improved Water preview (`crate::preview`), on every stylised pipeline while any of
         // its features runs; the features branch on the reflection block's mask row.
@@ -1864,21 +1859,10 @@ mod tests {
         let view = key(0.0, 1.0, 1.0);
         assert!(view.composite() && view.has(LiquidKey::VIEW));
         assert!(view.frag_defs().contains(&"WATER_VIEW"));
-        // The march compiles only into its debug variant.
-        let ssr = key(0.0, 1.0, 8.0);
-        assert!(ssr.composite() && ssr.has(LiquidKey::SSR) && !ssr.has(LiquidKey::VIEW));
-        assert_eq!(
-            ssr.frag_defs(),
-            [
-                "WATER_STYLISED",
-                "WATER_SCENE_DEPTH",
-                "WATER_TIER_LOW",
-                "WATER_SSR"
-            ]
-        );
-        assert!(!plain.frag_defs().contains(&"WATER_SSR"));
+        // The spare bit the screen-space march held (`path.w` bit 3) reads as none.
+        assert_eq!(key(0.0, 1.0, 8.0), plain);
         // Stylised water blends premultiplied with every variant; nothing else does.
-        assert!(plain.premultiplied() && ssr.premultiplied() && view.premultiplied());
+        assert!(plain.premultiplied() && view.premultiplied());
         assert!(
             !key(1.0, 1.0, 0.0).premultiplied() && !key(0.0, 0.0, 0.0).premultiplied(),
             "magma, slime and the reference lane keep the alpha blend"
@@ -1934,7 +1918,7 @@ mod tests {
                 assert_eq!(k.has(K::DUAL_SOURCE), dual, "{k:?}");
                 assert_eq!(k.has(K::PAINTED), painted, "{k:?}");
                 assert!(k.premultiplied(), "{k:?}");
-                assert!(!k.has(K::VIEW) && !k.has(K::SSR));
+                assert!(!k.has(K::VIEW));
             }
             for k in &keys {
                 let kind = Vec4::new(f32::from(k.has(K::FULLBRIGHT)), 0.0, 0.0, 6.0);
@@ -2113,7 +2097,7 @@ mod tests {
         use super::LiquidKey;
         use bevy::math::Vec4;
         let region = stylised_region_names();
-        for name in ["stylised_water", "SceneBehind", "sample_probe", "ssr_trace"] {
+        for name in ["stylised_water", "SceneBehind", "sample_probe"] {
             assert!(region.iter().any(|n| n == name), "the region lost `{name}`");
         }
         let reference = LiquidKey::from_lanes(Vec4::ZERO, Vec4::ZERO);
@@ -2131,12 +2115,12 @@ mod tests {
                 "{key:?} lost the magma grade"
             );
         }
-        // The debug views with the march (`path.w` bits 0 and 3) carry `WATER_VIEW` and
-        // `WATER_SSR`, the region's guards whose names only they declare, and `WATER_DUAL_SOURCE`
+        // The debug views (`path.w` bit 0) carry `WATER_VIEW`, the region's guard whose names only
+        // they declare, and `WATER_DUAL_SOURCE`
         // the composite's second output. The floor march law's tier branches declare module-scope
         // names too (`FLOOR_MARCH_LEVEL`, `FLOOR_MARCH_STEPS`), the same ones in every branch, so
         // this key's tier declares them all.
-        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 9.0));
+        let water = LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, 1.0));
         let mut defs = water.frag_defs();
         defs.push("WATER_DUAL_SOURCE");
         let text = liquid_under(&defs);
@@ -2235,11 +2219,8 @@ mod tests {
         );
         let water = liquid_function("fn stylised_water(");
         assert!(
-            water.contains(
-                "occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);\n        \
-                 occ = floor_refog(occ, world_pos, to_view, flat_n);"
-            ),
-            "the floor's occluder is not re-fogged as it is found"
+            water.contains("floor_tone(occ, water_dec(probe_rgb), probe_k, world_pos, to_view)"),
+            "the floor's occluder does not take its world tone"
         );
         assert!(
             water.contains("* fog.f;"),
@@ -2258,10 +2239,7 @@ mod tests {
                 "let sky_seen = fog_diffuse(sky, fog.f, fog.g);",
                 "the floor's sky",
             ),
-            (
-                "var floor_l = occ.rgb + occ.v * sky_seen;",
-                "the floor's open share",
-            ),
+            ("var floor_l = occ.v * sky_seen;", "the floor's open share"),
             ("mirror_fog(mirror_g, sky, fog)", "the mirror's dome"),
         ] {
             assert!(water.contains(line), "{what} is not fogged at the surface");

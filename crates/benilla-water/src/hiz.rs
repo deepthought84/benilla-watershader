@@ -107,8 +107,7 @@ pub(crate) struct WaterHizLabel;
 pub(crate) struct WaterHizConsumers(pub(crate) u32);
 
 impl WaterHizConsumers {
-    /// The screen-space reflection march, the `WATER_SSR` debug variant.
-    pub(crate) const SSR: u32 = 1 << 0;
+    // Bit 0 was the screen-space reflection march's, deleted (no screen-space reflection at all).
     /// The sky floor's occlusion march (`liquid.wgsl`'s `floor_march`), while water on screen can
     /// show the floor (`floor_share`).
     pub(crate) const FLOOR_OCCLUSION: u32 = 1 << 1;

@@ -36,12 +36,7 @@ fn covered_keys() -> Vec<LiquidKey> {
         .iter()
         .filter(|k| k.composite())
         .flat_map(|k| {
-            [
-                LiquidKey::VIEW,
-                LiquidKey::SSR,
-                LiquidKey::VIEW | LiquidKey::SSR,
-            ]
-            .map(|bits| {
+            [LiquidKey::VIEW].map(|bits| {
                 let (y, w) = k.path_lanes();
                 let caps = (w as u16) | (bits >> LiquidKey::CAPS_SHIFT);
                 LiquidKey::from_lanes(

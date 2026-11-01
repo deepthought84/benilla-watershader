@@ -100,7 +100,7 @@ fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
 }
 
 /// A gamma colour `c` fogged at the share `was` re-fogged at the share `now` in the fog colour `g`
-/// (`fog_rebase`, the probe's and the floor occluder's re-fog): un-fogged, its un-fog held within
+/// (`fog_rebase`, the probe's re-fog): un-fogged, its un-fog held within
 /// 0.25 of the colour or the fog, and faded to the colour as it came where under 0.35 of it
 /// survived the first fog, down to none at 0.2.
 fn fog_rebase(c: V3, was: f32, now: f32, g: V3) -> V3 {
@@ -121,7 +121,7 @@ fn floor_rho_c(d: f32) -> f32 {
     d * d / (d * d + FLOOR_CONTACT_REACH * FLOOR_CONTACT_REACH)
 }
 
-/// The distance [`floor_rho_c`] was taken at, from its value (`floor_refog`).
+/// The distance [`floor_rho_c`] was taken at, from its value (`floor_tone`).
 fn floor_reach(rho: f32) -> f32 {
     FLOOR_CONTACT_REACH * (rho.max(0.0) / (1.0 - rho)).sqrt()
 }

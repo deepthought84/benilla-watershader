@@ -638,7 +638,6 @@ fn debug_panel_ui(
                             ui.checkbox(&mut wa.probe_minimap, "probes on the minimap");
                             ui.checkbox(&mut wa.probe_world, "probes in the world");
                             ui.checkbox(&mut wa.probe_off, "probe off");
-                            ui.checkbox(&mut wa.ssr, "screen-space reflection");
                             // The debug views: a pipeline variant, compiled on first use.
                             use benilla_world::dev_state::WATER_VIEWS;
                             egui::ComboBox::from_label("debug view")

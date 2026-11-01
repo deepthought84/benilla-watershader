@@ -3,9 +3,8 @@
 //!
 //! ## Why a copy, and why our own
 //!
-//! Screen-space reflection needs two things: where the reflected ray lands (depth: the pyramid
-//! [`super::hiz`] builds) and what colour is there. The second cannot be read
-//! from the frame being drawn — the water draws in the transparent phase, where the main colour
+//! The water reads the world behind it: the refracted bed under each fragment. That colour cannot
+//! be read from the frame being drawn — the water draws in the transparent phase, where the main colour
 //! target is bound as an attachment and sampling it is undefined. So a snapshot has to be taken
 //! while it is still readable.
 //!
@@ -20,8 +19,9 @@
 //! So this is the same shape [`super::reflect`] already uses: an image asset the material binds,
 //! rebuilt when the view resizes, filled by a render-graph node. The difference is that the mirror
 //! *renders* the world into its target and this only *blits* the frame into one: a fullscreen
-//! triangle that loads each texel into a 10-bit target, over the water's rectangle alone when no
-//! reader looks outside it ([`WaterSnapshotScope`]).
+//! triangle that loads each texel into a 10-bit target, over the water's rectangle alone
+//! ([`WaterSnapshotScope`]): no reader looks outside it, since nothing reflects a colour read from
+//! the screen (the owner's ruling: no screen-space reflection at all).
 //!
 //! ## Where it sits in the frame
 //!
@@ -58,7 +58,6 @@ use bevy::render::texture::GpuImage;
 use bevy::render::view::ViewTarget;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
-use super::hiz::WaterHizConsumers;
 use super::world_view::{
     serves_world_view, water_on_screen, Visit, WaterScreenRect, WaterWorldView,
 };
@@ -98,8 +97,8 @@ pub(crate) struct WaterSceneColorLabel;
 /// first, so outside a scissored rectangle the texels are black, and the rectangle is enough only
 /// while no reader looks outside it: the composite reads the texel under each water fragment and
 /// the refracted bed one at most `WATER_RECT_MARGIN_PX - 2` pixels off it, both inside the
-/// rectangle's margin; the reflection march and the floor occlusion read the occluder wherever on
-/// screen it is.
+/// rectangle's margin. Nothing reads it farther off: the sky floor's occlusion walks the depth
+/// pyramids alone, its occluder's tone a world source (no screen-space reflection at all).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WaterSnapshotScope {
     /// The water's rectangle, inclusive min, exclusive max, in the target's pixels.
@@ -109,14 +108,8 @@ pub(crate) enum WaterSnapshotScope {
 }
 
 impl WaterSnapshotScope {
-    /// The readers that read the snapshot outside the water's rectangle.
-    const OUTSIDE_READERS: u32 = WaterHizConsumers::SSR | WaterHizConsumers::FLOOR_OCCLUSION;
-
-    /// The scope for this frame's pyramid readers and water rectangle on a `size` target.
-    pub(crate) fn of(consumers: WaterHizConsumers, rect: &WaterScreenRect, size: UVec2) -> Self {
-        if consumers.0 & Self::OUTSIDE_READERS != 0 {
-            return Self::Full;
-        }
+    /// The scope for this frame's water rectangle on a `size` target.
+    pub(crate) fn of(rect: &WaterScreenRect, size: UVec2) -> Self {
         let (min, max) = (rect.min.min(size), rect.max.min(size));
         if min == UVec2::ZERO && max == size {
             Self::Full
@@ -162,8 +155,7 @@ fn drive_scene_color(
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&Camera, With<crate::view::WorldCamera>>,
 ) {
-    // Both stylised lanes read the snapshot: it is what the march samples the reflected colour
-    // from, and the SSR lane is nothing BUT the march.
+    // The stylised lanes read the snapshot: the refracted bed and the composite's texel.
     snap.armed = style.is_stylised();
     let Ok(camera) = cameras.single() else {
         return;
@@ -328,16 +320,12 @@ impl Node for WaterSceneColorNode {
                 &BindGroupEntries::single(main_view),
             )
         });
-        let rect = world
-            .get_resource::<WaterScreenRect>()
-            .copied()
-            .unwrap_or_default();
         let size = UVec2::new(gpu.size.width, gpu.size.height);
-        // No word from the readers is read as an outside reader: the whole target.
+        // No rectangle extracted: the whole target.
         let scope = world
-            .get_resource::<WaterHizConsumers>()
-            .map_or(WaterSnapshotScope::Full, |c| {
-                WaterSnapshotScope::of(*c, &rect, size)
+            .get_resource::<WaterScreenRect>()
+            .map_or(WaterSnapshotScope::Full, |rect| {
+                WaterSnapshotScope::of(rect, size)
             });
         let scissor = scope.scissor();
         if scissor.is_some_and(|(_, _, w, h)| w == 0 || h == 0) {
@@ -430,34 +418,15 @@ mod tests {
     }
 
     #[test]
-    fn the_snapshot_is_scissored_only_while_nothing_reads_outside_the_water() {
+    fn the_snapshot_is_scissored_to_the_water() {
         let size = UVec2::new(1600, 900);
         let r = rect((100, 400), (900, 900));
         let scissored = WaterSnapshotScope::Rect {
             min: UVec2::new(100, 400),
             max: UVec2::new(900, 900),
         };
-        assert_eq!(
-            WaterSnapshotScope::of(WaterHizConsumers(0), &r, size),
-            scissored
-        );
-        // The glint's and the body's visibility read depth, not colour.
-        let depth_only = WaterHizConsumers::SUN_VISIBILITY | WaterHizConsumers::BODY_VISIBILITY;
-        assert_eq!(
-            WaterSnapshotScope::of(WaterHizConsumers(depth_only), &r, size),
-            scissored
-        );
-        for readers in [
-            WaterHizConsumers::SSR,
-            WaterHizConsumers::FLOOR_OCCLUSION,
-            WaterHizConsumers::SSR | WaterHizConsumers::FLOOR_OCCLUSION,
-        ] {
-            assert_eq!(
-                WaterSnapshotScope::of(WaterHizConsumers(readers), &r, size),
-                WaterSnapshotScope::Full
-            );
-        }
-        assert_eq!(scissored.scissor(), Some((100, 400, 800, 500)));
+        assert_eq!(WaterSnapshotScope::of(&r, size), scissored);
+        assert_eq(scissored.scissor(), Some((100, 400, 800, 500)));
         assert_eq!(WaterSnapshotScope::Full.scissor(), None);
     }
 
@@ -466,15 +435,15 @@ mod tests {
         let size = UVec2::new(1600, 900);
         let whole = rect((0, 0), (1600, 900));
         assert_eq!(
-            WaterSnapshotScope::of(WaterHizConsumers(0), &whole, size),
+            WaterSnapshotScope::of(&whole, size),
             WaterSnapshotScope::Full
         );
         // A rectangle extracted for a larger target than the snapshot's is clamped to it.
         let past = rect((1500, 800), (2000, 1200));
-        let scope = WaterSnapshotScope::of(WaterHizConsumers(0), &past, size);
+        let scope = WaterSnapshotScope::of(&past, size);
         assert_eq!(scope.scissor(), Some((1500, 800, 100, 100)));
         let beside = rect((1700, 0), (2000, 900));
-        let scope = WaterSnapshotScope::of(WaterHizConsumers(0), &beside, size);
+        let scope = WaterSnapshotScope::of(&beside, size);
         assert_eq!(scope.scissor().map(|s| (s.2, s.3)), Some((0, 900)));
     }
 
@@ -521,17 +490,13 @@ mod tests {
     }
 
     /// Every snapshot read is one the scope accounts for: the composite's texel and the refracted
-    /// bed's lie inside the rectangle's margin, the floor march's box is read only under
-    /// `FLOOR_OCCLUSION` and the reflection march's only under `SSR`. A new reader either stays
-    /// inside the margin or joins `OUTSIDE_READERS`, or a scissored frame hands it black.
+    /// bed's lie inside the rectangle's margin, and nothing reflects a colour read from the screen.
+    /// A new reader stays inside the margin, or a scissored frame hands it black.
     #[test]
     fn every_snapshot_reader_is_one_the_scope_accounts_for() {
         let liquid = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
-        assert_eq!(
-            snapshot_readers(liquid),
-            ["snapshot_box", "ssr_read", "water_snapshot_px", "water_bed"]
-        );
+        assert_eq!(snapshot_readers(liquid), ["water_snapshot_px", "water_bed"]);
         let compute = include_str!("shaders/water_compute.wgsl");
-        assert_eq!(snapshot_readers(compute), ["snapshot_box"]);
+        assert!(snapshot_readers(compute).is_empty());
     }
 }

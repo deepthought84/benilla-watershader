@@ -44,8 +44,7 @@
 // saw it (`benilla_world::liquid::reflect`), with **alpha as coverage**.
 // The opaque scene in 10 bits, snapshotted before anything transparent drew
 // (`benilla_water::scene_color`): the colour behind the water (`water_snapshot_px`), the
-// refracted bed (`water_bed`), the floor march's occluder (`snapshot_box`) and the reflection's
-// hit (`ssr_read`).
+// refracted bed (`water_bed`). Never a reflected colour: no screen-space reflection at all.
 @group(#{MATERIAL_BIND_GROUP}) @binding(111) var scene_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112) var scene_samp: sampler;
 // Must equal `liquid::probe::PROBE_SLOT_MAX`: it is the length of the slot array in the reflection
@@ -71,7 +70,7 @@ const PROBE_TAPS_MAX: i32 = 3;
 @group(#{MATERIAL_BIND_GROUP}) @binding(117) var hiz_far_tex: texture_2d<f32>;
 // The sky floor's occlusion over the mirror planes (`benilla_water::water_compute`), a quarter of the
 // view's resolution: r the open sky, g and b the body's sky and sun visibility, a 1 where the march
-// reached a verdict; then the occluder's radiance times (1 − r) in linear light, and rho_c in a.
+// reached a verdict; then rho_c in a (rgb unused: the occluder's tone is a world source).
 // The sky floor (`benilla_water::sky_lut`): the dome and its clouds, linear and unlit, a 64² cube
 // whose mip k is blurred to 2^k of its level-0 texel.
 @group(#{MATERIAL_BIND_GROUP}) @binding(119) var sky_lut: texture_cube<f32>;
@@ -408,10 +407,8 @@ struct WaterReflect {
     // never the colour buffer, which may hold something drawn there that the depth does not.
     // `warp.z` = read the colour buffer for the march's sky hits instead of the dome law (off).
     dome: DomeColors,
-    // The march's own switches. `x` = rays may pass BEHIND a tile once they are behind the
-    // thickness slab of its farthest surface (see
-    // [`ssr_trace`]); `y` = the ripple's shift of the ray origin; `z` = the probe's softening; `w`
-    // spare.
+    // The march's own switches. `x` = spare (the deleted screen-space march's pass-behind switch);
+    // `y` = the ripple's shift of the ray origin; `z` = the probe's softening; `w` spare.
     march: vec4<f32>,
     // The second planar mirror: the same four as `params` (plane, strength, distortion,
     // tolerance), zero while it is off.
@@ -663,9 +660,8 @@ const PLANE_FADE: f32 = 2.5;
 /// one 33.33 yd chunk, measured), which the old band trusted **completely** — at a 10.4 deg ray
 /// error.
 ///
-/// Screen-space reflection is exact at any orientation and, measured, is
-/// confident over nearly all of that same stream. So the capture no longer has to cover for it, and
-/// can be honest about where a horizontal mirror stops describing the surface: 5.22 deg now keeps
+/// The probe and the sky floor cover a sloped stream (no screen-space reflection: the owner's
+/// ruling), so the capture no longer has to cover for it, and can be honest about where a horizontal mirror stops describing the surface: 5.22 deg now keeps
 /// about 0.71 of it and the rest comes from the tiers that are right.
 const SLOPE_TRUSTED: f32 = 0.03; // ~1.7 deg
 const SLOPE_LIMIT: f32 = 0.20; // ~11.5 deg
@@ -870,7 +866,8 @@ const WAKE_BODY_DEPTH: f32 = 0.22;
 // **What the linear march left behind, because it was expensive to learn.**
 //
 // This tier used a fixed-cadence march with geometric steps, a bisection and a thickness test, and
-// all of it is gone — `ssr_trace` walks a hierarchy now. Three findings from it are not:
+// all of it is gone, and so is the hierarchical march that replaced it (the owner's ruling: no
+// screen-space reflection). The floor march law keeps the hierarchy; three findings are kept:
 //
 // * **The sky is a HIT, not a miss.** Reflecting off a surface below the eye sends the ray up and
 //   forward, at sky that is on the screen, and the prepass draws no dome so the march read "no
@@ -2200,12 +2197,6 @@ fn wu_post(
 // (`LiquidKey::composite`, the `WATER_STYLISED` def): the reference and magma pipelines never see it,
 // so nothing in it can drop their draws by naming a symbol their defs leave out.
 
-/// A screen-space reflection hit: what was there, and how much to believe it.
-struct SsrHit {
-    rgb: vec3<f32>,
-    conf: f32,
-}
-
 #ifdef WATER_SCENE_DEPTH
 // ---- what is behind the water -------------------------------------------------------------------
 
@@ -2301,8 +2292,8 @@ fn luma709(c: vec3<f32>) -> f32 {
 //
 // The sky floor's occlusion march, byte-identical in `liquid.wgsl` and `water_compute.wgsl` (a
 // `benilla_water` test compares the text between these markers). It reads only `view`, the two
-// depth pyramids, the scene snapshot and `water_dec`, which both files declare alike, and nothing
-// of the screen-space reflection march it is ported from.
+// depth pyramids and `water_dec`, which both files declare alike: depth alone, never a colour from
+// the screen.
 
 /// How thick every surface in the depth buffer is taken to be, in yards: McGuire & Mara's
 /// `zThickness`, the screen-space march's value.
@@ -2389,16 +2380,6 @@ fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32) -> f32 
         return 0.0;
     }
     return c * (1.0 - saturate((law_view_z(ray_q) - law_view_z(frame_q)) / LAW_THICKNESS));
-}
-
-/// The occluder as the frame shows it, over the walked level's cell: four bilinear taps at
-/// ±2^(level − 1) pixels, averaged, gamma.
-fn snapshot_box(uv: vec2<f32>, level: i32) -> vec3<f32> {
-    let o = exp2(f32(level) - 1.0) / vec2<f32>(textureDimensions(scene_tex));
-    return 0.25 * (textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, -o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, -o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, o.y), 0.0).rgb);
 }
 
 /// The march's verdict: the screen cannot say, the ray reached the sky, or it met something.
@@ -2580,12 +2561,12 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
     return FloorMarch(cover, state, p.xy, p.z, distance(origin, at));
 }
 
-/// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
-/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies
-/// ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known` 1 where the march reached a
-/// verdict.
+/// The sky floor's occlusion at one point: `v` how much of the sky is open, `rho_c` how far behind
+/// the water the reflected thing lies ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known`
+/// 1 where the march reached a verdict. No colour: nothing the water reflects is read from the
+/// screen (the owner's ruling, no screen-space reflection at all); the shut share's tone is a world
+/// source, in the composite.
 struct FloorOcc {
-    rgb: vec3<f32>,
     v: f32,
     rho_c: f32,
     known: f32,
@@ -2608,22 +2589,20 @@ fn floor_rho_c(travelled: f32) -> f32 {
 /// The march's verdict as the floor takes it. `rho_c` ([`floor_rho_c`]) is taken at the distance
 /// `D` the verdict was reached: a hit at `D`, an escape or an unknown past it, all say the
 /// reflected thing is at least `D` behind the water, so it is continuous from a contact to the far
-/// field. The occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of
-/// the lookup point on screen. An unknown verdict the frame's end covers is that share occluded
-/// and known, its colour the frame's there, read at full resolution.
-fn floor_from_march(m: FloorMarch, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
+/// field. An unknown verdict the frame's end covers is that share occluded and known.
+fn floor_from_march(m: FloorMarch) -> FloorOcc {
     let rho = floor_rho_c(m.travelled);
     if (m.state == FLOOR_HIT) {
-        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, min_level)), 0.0, rho, 1.0);
+        return FloorOcc(0.0, rho, 1.0);
     }
     if (m.state == FLOOR_ESCAPED) {
-        return FloorOcc(vec3<f32>(0.0), 1.0, rho, 1.0);
+        return FloorOcc(1.0, rho, 1.0);
     }
     if (m.cover > 0.0) {
         let c = m.cover;
-        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, 0)) * c, 1.0 - c, rho, c);
+        return FloorOcc(1.0 - c, rho, c);
     }
-    return FloorOcc(vec3<f32>(0.0), 1.0, rho, 0.0);
+    return FloorOcc(1.0, rho, 0.0);
 }
 // ---- floor march law: end ----
 #endif
@@ -2793,327 +2772,6 @@ fn sample_probe(sl: ProbeSlot, idx: i32, p: vec3<f32>, r: vec3<f32>, steps: i32)
     sum = sum + textureSampleLevel(probe_tex, probe_samp, dir - t2, idx, lod).rgb;
     return probe_refog(sum * 0.2, shares);
 }
-
-#ifdef WATER_SSR
-// ---- the screen-space march: the `WATER_SSR` debug variant (`$WOW_SSR=1`) ----------------------
-//
-// Nothing outside this block names anything in it, so the shipped pipelines compile none of it.
-
-/// How far the march's read is blurred, in main-view texels: four bilinear taps on the diagonals
-/// this far out cover about the 6 texels the planar capture's kernel does ([`sample_mirror`], one
-/// capture texel at [`REFLECT_DOWNSCALE`](benilla_world::liquid) 2, tented over 3x3), so the march's
-/// hard-edged hits read with the planar tier's grain. Only the colour is filtered: the hit is found
-/// on the depth pyramid, which this does not touch.
-const SSR_READ_BLUR: f32 = 2.0;
-
-/// How far from the edge of the frame the march's confidence starts falling, in UV.
-///
-/// **The one artefact every screen-space reflection has**, and the only honest handling of it: the
-/// ray can only find what the camera drew, so a reflection whose source is off-screen has to stop
-/// existing — and it must stop *gradually*, or the boundary is a hard line across the water that
-/// moves whenever the camera does. Where this fades out, the planar capture and the sky mix
-/// underneath it are still there to take over.
-const SSR_EDGE_FADE: f32 = 0.14;
-
-/// Read the scene snapshot where the ray landed, and score how much to believe it: the UV is
-/// clamped inside the frame, which the snapshot does not reach past, and the confidence falls off
-/// toward the frame's border ([`ssr_edge_conf`]). The march's opaque hits read through it; a sky hit
-/// is the dome along the ray by the dome's own law with the same edge confidence, and reads the
-/// snapshot here only under the debug switch `dome.warp.z`. The ripple moves the ray's origin, not
-/// this read (`water_reflect.march.y`).
-fn ssr_read(uv: vec2<f32>) -> SsrHit {
-    var out: SsrHit;
-    let read_uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));
-    // Four bilinear taps on the diagonals — [`sample_mirror`]'s kernel, and deliberately the same
-    // one. No premultiplied divide here: the snapshot is a copy of an opaque frame, so every tap
-    // has something in it and there is no coverage to weight by. See [`SSR_READ_BLUR`].
-    let o = SSR_READ_BLUR / vec2<f32>(textureDimensions(scene_tex));
-    var acc = textureSampleLevel(scene_tex, scene_samp, read_uv + vec2<f32>(-o.x, -o.y), 0.0).rgb;
-    acc += textureSampleLevel(scene_tex, scene_samp, read_uv + vec2<f32>(o.x, -o.y), 0.0).rgb;
-    acc += textureSampleLevel(scene_tex, scene_samp, read_uv + vec2<f32>(-o.x, o.y), 0.0).rgb;
-    acc += textureSampleLevel(scene_tex, scene_samp, read_uv + vec2<f32>(o.x, o.y), 0.0).rgb;
-    out.rgb = acc * 0.25;
-    out.conf = ssr_edge_conf(read_uv);
-    return out;
-}
-
-/// How much a march that ended at `uv` is believed on account of where on the screen that is: full
-/// in the frame, fading to nothing over [`SSR_EDGE_FADE`] at its border, where the tier hands over to
-/// whatever is under it.
-fn ssr_edge_conf(uv: vec2<f32>) -> f32 {
-    let read_uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));
-    let edge = min(
-        min(read_uv.x, 1.0 - read_uv.x),
-        min(read_uv.y, 1.0 - read_uv.y),
-    );
-    return smoothstep(0.0, SSR_EDGE_FADE, edge);
-}
-
-/// How many cells the traversal may visit before giving up — AMD's FidelityFX SSSR sample runs its
-/// `FFX_SSSR_HierarchicalRaymarch` with 128, and this is that figure.
-const HIZ_MAX_STEPS: i32 = 128;
-
-/// How far past a cell wall the ray is placed when it leaves the cell, as a fraction of a
-/// level-zero texel — FFX SSSR's `uv_offset`, and its value.
-///
-/// **In SCREEN units, and that is the fix.** The first version of this traversal parametrised the
-/// ray in world yards and stepped `1e-4` of a yard past each wall. For a ray running toward the
-/// horizon a ten-thousandth of a yard is a vanishing fraction of a texel, so the step often failed
-/// to leave the cell at all and the ray sat on one wall until its budget ran out: at the
-/// Stranglethorn camera 23% of water fragments exhausted it, 58% of the far field, and every one of
-/// them had stalled. Measured in texels the overshoot is the same size everywhere on the screen.
-const HIZ_CROSS: f32 = 0.005;
-
-/// How thick every surface in the depth buffer is taken to be, in yards — McGuire & Mara's
-/// `zThickness` ("Efficient GPU Screen-Space Ray Tracing", JCGT 2014): each depth sample is a slab
-/// from its surface to this far behind it, and a ray hits only inside a slab.
-///
-/// A depth buffer records front faces and nothing behind them, so some thickness has to be
-/// assumed. Too little and a ray that meets a surface at a grazing angle slips past it between
-/// samples; too much and a ray that passed behind something thin — a trunk, a branch — is taken to
-/// have hit it, and paints it where it does not reach. The old march's constant, kept.
-const SSR_THICKNESS: f32 = 6.0;
-
-/// Is a ray at reverse-Z depth `ray` BEHIND the slab of the surface at `depth` — farther than the
-/// point [`SSR_THICKNESS`] yards behind that surface?
-///
-/// Bevy's view is an infinite reverse-Z perspective, where depth is `near / distance`, so the back
-/// of the slab sits at `near·d / (near + T·d)` and the test is `ray < near·d / (near + T·d)`. Every
-/// quantity is positive, so it is asked as `ray·(near + T·d) < near·d` instead — two fused
-/// multiply-adds and no divide. That form is not cosmetic: the compiler hoists this arithmetic out
-/// of the branch it sits in and runs it on every step of the march, taken or not, and with the
-/// divide there (a reciprocal) merely compiling the pass-behind in cost 0.26 ms of the water's pass
-/// at Mirror Lake with the branch never taken. Depth zero (sky) is never passed behind: the right
-/// side is zero.
-fn behind_slab(ray: f32, depth: f32, near: f32) -> bool {
-    return ray * (near + SSR_THICKNESS * depth) < near * depth;
-}
-
-/// Project a world point to the traversal's space: `xy` the screen UV, `z` reverse-Z device depth.
-fn hiz_screen(p: vec3<f32>) -> vec3<f32> {
-    let ndc = position_world_to_ndc(p);
-    return vec3<f32>(ndc_to_uv(ndc.xy), ndc.z);
-}
-
-/// Walk the reflected ray through `liquid::hiz`'s pyramid and read the scene snapshot where it
-/// lands.
-///
-/// **This is AMD FidelityFX SSSR's `FFX_SSSR_HierarchicalRaymarch`**, ported rather than derived
-/// (GPUOpen-Effects/FidelityFX-SSSR, `ffx_sssr.h`, built with `FFX_SSSR_INVERTED_DEPTH_RANGE`
-/// because Bevy is reverse-Z). Its three load-bearing choices, each of which the first version of
-/// this function got differently and paid for:
-///
-/// * **The ray lives in screen space** — UV and device depth. A perspective projection maps lines
-///   to lines, so a world ray is a straight line in that space too, and every cell wall and every
-///   depth plane is an axis-aligned plane the ray meets at a closed-form parameter.
-/// * **Leaving a cell overshoots by a fraction of a texel** ([`HIZ_CROSS`]), so it always leaves.
-/// * **A ray that is still in front of the tile's nearest surface but would pass it inside the
-///   tile advances to that depth before descending**, rather than descending where it stands.
-///
-/// The pyramid holds the NEAREST depth per tile, so the rule is: in front of the tile's nearest
-/// surface and leaving through a wall, the whole tile is provably empty along the ray — skip it and
-/// go up a level; otherwise go down one. Falling below level zero is a hit.
-///
-/// **This is the half of the water's reflection that a plane cannot do.** The direction traced is
-/// `reflect(-V, N)` on the fragment's GEOMETRIC normal ([`surface_normal`]) — the heightfield's own
-/// facet, so a sloped stream is traced at its real orientation and needs no mirror built for it.
-///
-/// The fine ripple is deliberately NOT in that direction: it slides the ray's ORIGIN across the
-/// surface instead, so neighbouring pixels keep one direction and the march stays coherent while
-/// every sample is still a true reflection of a real point (`water_reflect.march.y`). What it cannot
-/// do is see off the screen, which is why it returns a confidence rather than just a colour: where
-/// the ray leaves the frame the planar capture and the sky mix behind it take over. Under
-/// [`WaterStyle::StylisedSsr`] there is no capture behind it and the sky mix alone catches what it
-/// misses, which is the trade that lane is offered for.
-///
-/// The water itself is not in the pyramid (`liquid::hiz` seeds it after the opaque pass, before
-/// anything transparent draws), so there is no self-intersection to bias against — the first step
-/// off the surface is already reading opaque geometry only.
-fn ssr_trace(origin: vec3<f32>, dir: vec3<f32>) -> SsrHit {
-    var out: SsrHit;
-    out.rgb = vec3<f32>(0.0);
-    out.conf = 0.0;
-
-    // The direction as the difference of two projected points. The second point has to be in
-    // front of the eye for the difference to mean anything; `clip.w` is view depth, so a ray
-    // heading back toward the camera is cut to half the distance to the eye plane.
-    let clip_o = position_world_to_clip(origin);
-    let clip_d = direction_world_to_clip(dir);
-    var reach = clip_o.w;
-    if (clip_d.w < 0.0) {
-        reach = min(reach, 0.5 * clip_o.w / -clip_d.w);
-    }
-    let o = hiz_screen(origin);
-    let d = hiz_screen(origin + dir * reach) - o;
-    let big = 3.4e38;
-    let inv_d = vec3<f32>(
-        select(big, 1.0 / d.x, d.x != 0.0),
-        select(big, 1.0 / d.y, d.y != 0.0),
-        select(big, 1.0 / d.z, d.z != 0.0),
-    );
-
-    let top = i32(textureNumLevels(hiz_tex)) - 1;
-    let base_res = vec2<f32>(textureDimensions(hiz_tex, 0));
-    let cross = select(vec2<f32>(HIZ_CROSS), vec2<f32>(-HIZ_CROSS), d.xy < vec2<f32>(0.0)) / base_res;
-    let wall = select(vec2<f32>(1.0), vec2<f32>(0.0), d.xy < vec2<f32>(0.0));
-
-    // Step off the origin's own cell first, so the walk does not open by intersecting it.
-    var level = 0;
-    var t: f32;
-    {
-        let planes = (floor(o.xy * base_res) + wall) / base_res + cross;
-        let tw = (planes - o.xy) * inv_d.xy;
-        t = min(tw.x, tw.y);
-    }
-    var p = o + t * d;
-
-    // **Loop invariants, read once.** Both come from buffers — the lever from the water's storage
-    // buffer, the near plane from the view uniform — and a load the compiler does not hoist is a
-    // memory round trip on every step of a loop whose whole cost is its latency chain. Read inside
-    // the loop, merely compiling the pass-behind in (branch never taken) cost 0.28 ms of the
-    // water's pass at Mirror Lake against 0.09 for the pass-behind work itself.
-    let pass_behind = water_reflect.march.x > 0.5;
-    let near_plane = perspective_camera_near();
-
-    var i = 0;
-    for (; i < HIZ_MAX_STEPS && level >= 0; i = i + 1) {
-        if (any(p.xy < vec2<f32>(0.0)) || any(p.xy >= vec2<f32>(1.0))) {
-            return out; // off the frame: the screen cannot say
-        }
-        if (p.z <= 0.0) {
-            return out; // past the far plane
-        }
-        let res = vec2<f32>(textureDimensions(hiz_tex, level));
-        let cell = floor(p.xy * res);
-        // The nearest surface anywhere in the tile. The farthest is fetched below, only if needed.
-        let surface = textureLoad(hiz_tex, vec2<i32>(cell), level).r;
-
-        // **A tile of pure sky, at any level.** The pyramid reduces with `max` and sky is the far
-        // plane, so a cell reporting zero has nothing in it anywhere — the ray is over open sky.
-        // That is a HIT: reflecting a surface below the eye sends the ray up and forward, at sky
-        // that is on the screen, and treating it as a miss was most of why this mode fell back to
-        // a flat colour over open water. Getting it from the hierarchy costs nothing extra.
-        //
-        // **The colour is the dome's along the reflected ray, not the colour buffer's here.** It
-        // used to be `ssr_read(p.xy)`, which trusts that a pixel with no depth shows sky — and the
-        // colour buffer can hold things the depth does not: anything drawn without writing it.
-        // Every such pixel then became a sky hit that read the object's colour, the same few pixels
-        // for every water row whose ray climbed that column, which is how a palm missing from the
-        // depth came out as a stalk (Stefan's Stranglethorn report). The dome is a pure function
-        // of direction, so the sky can be asked for instead of read: an object without depth then
-        // reads as the sky behind it rather than being smeared down the water.
-        //
-        // It is also the more correct sky. Seen in the water, the sky is what lies along the
-        // reflected ray — its own vanishing point — not whatever the screen shows where the ray
-        // happened to leave the geometry. Reading at the entry point quantised that to the tile
-        // the walk was on, which is what drew the blocky light rectangles in sky reflections.
-        //
-        // The edge fade stays keyed to where the ray left the frame's geometry, so the hand-over
-        // to the tier underneath at the screen border is exactly what it was.
-        if (surface <= 0.0) {
-            if (water_reflect.dome.warp.z > 0.5) {
-                return ssr_read(p.xy);
-            }
-            var sky_hit: SsrHit;
-            sky_hit.rgb = dome_color(water_reflect.dome, normalize(dir));
-            sky_hit.conf = ssr_edge_conf(p.xy);
-            return sky_hit;
-        }
-
-        // FFX_SSSR_AdvanceRay. The cell's two exit walls and its nearest-depth plane; the depth
-        // plane only counts for a ray moving away from the eye, which under reverse-Z is `d.z < 0`.
-        let planes = vec3<f32>((cell + wall) / res + cross, surface);
-        var tp = (planes - o) * inv_d;
-        tp.z = select(big, tp.z, d.z < 0.0);
-        let t_wall = min(tp.x, tp.y);
-        let t_min = min(t_wall, tp.z);
-        // Larger depth is nearer under reverse-Z: the ray is in front of everything in the tile.
-        let in_front = surface < p.z;
-        // **Or behind everything in it** — the half FFX SSSR does not have, and the reason there is
-        // a farthest-depth pyramid beside the nearest. Every surface is a slab [`SSR_THICKNESS`] deep, so a
-        // ray that stays behind the back of the FARTHEST surface's slab for its whole way across
-        // the tile has passed behind all of them, and the tile can be skipped whole exactly as an
-        // empty one in front is. Its nearest point in the tile is whichever end is nearer.
-        //
-        // Without it the ray could only descend onto the first surface it went behind, and a ray
-        // going under a tree crown — which the water sees and the camera does not — met the
-        // crown's front leaves 24 yards and more in front of it and had to be thrown away: the
-        // black fragments in reflected canopies (Stefan's Stranglethorn report; 74% of those
-        // rejects were that far behind). Now it walks on behind the crown to whatever it really
-        // meets. What it cannot know is anything hidden behind the crown that the screen never
-        // held; there it finds the next thing that IS on screen, which is the known cost of the
-        // method and why Bevy's own marcher keeps it off for colour.
-        //
-        // **Only a ray that is NOT in front needs the farthest surface**, so only then is it read:
-        // most steps cross empty space in front of everything, and reading both pyramids on every
-        // step cost the water's pass nearly a millisecond at Mirror Lake as one 64-bit texel.
-        var behind = false;
-        // **The lever first, on its own.** `pass_behind` is the same for every lane, so this is a
-        // scalar branch the compiler does not speculate past. Folded into one condition with the
-        // per-lane `in_front`, it hoisted the whole test onto every step instead, and merely having
-        // it compiled in with the lever OFF cost 0.24 ms of the water's pass at Mirror Lake; apart,
-        // off measures level with the shader that never had it.
-        if (pass_behind) {
-        if (!in_front) {
-            let p_exit_z = o.z + t_wall * d.z;
-            let seg_near = max(p.z, p_exit_z);
-            let seg_far = min(p.z, p_exit_z);
-            // **Only then, and only if the ray is past the NEAREST surface's slab too.** A ray
-            // still within it cannot be behind the farthest's (that slab is never nearer) nor
-            // between the two, so the fetch below would be for nothing — and that is the common
-            // case: a ray closing in on a hit. Measured at Mirror Lake before this gate, the pass
-            // cost 0.44 ms of the water's pass over the lever off.
-            if (behind_slab(seg_near, surface, near_plane)) {
-                let farthest = textureLoad(hiz_far_tex, vec2<i32>(cell), level).r;
-                let behind_all = behind_slab(seg_near, farthest, near_plane);
-                // **At the finest level a texel is two layers, and the ray may be between them.**
-                // A level-zero texel covers one and a half to three and a half screen pixels, so
-                // at the porous edge of a crown most of them hold a leaf AND whatever shows through
-                // beside it. A ray behind the leaf's slab but still in front of the far layer over
-                // its whole way across is in the empty space between the two and walks on; without
-                // this, one mixed texel on the path stopped the ray and it was rejected — measured:
-                // with only the whole-tile skip the canopy's rejects barely moved (14.9% to 13.6%).
-                // A single-layer texel is untouched (its two slabs are one).
-                let between = level == 0 && seg_far > farthest;
-                behind = behind_all || between;
-            }
-        }
-        }
-        let skipped = (t_min != tp.z && in_front) || behind;
-        // **One position update per step.** The march loop is where this shader spends its time,
-        // and its cost is instructions per step — written as two branches each recomputing the
-        // position, the compiler ran both and merged them with selects.
-        let t_next = select(select(t, t_wall, behind), t_min, in_front);
-        t = t_next;
-        p = o + t * d;
-        level = select(level - 1, min(level + 1, top), skipped);
-    }
-    if (level >= 0) {
-        return out; // budget
-    }
-
-    // FFX_SSSR_ValidateHit, the parts that apply. Off the frame is no hit; neither is a ray that
-    // never really left its own texel.
-    if (any(p.xy < vec2<f32>(0.0)) || any(p.xy >= vec2<f32>(1.0))) {
-        return out;
-    }
-    // Against the texel's NEAREST surface when rays cannot pass behind — the test as it was. When
-    // they can, a finest texel may hold two layers (a leaf and the bank behind it), the walk only
-    // stops inside one of their slabs, and the gap is measured to the layer it stopped in.
-    let texel0 = vec2<i32>(floor(p.xy * base_res));
-    let near0 = textureLoad(hiz_tex, texel0, 0).r;
-    var gap = depth_ndc_to_view_z(near0) - depth_ndc_to_view_z(p.z);
-    if (pass_behind && gap > SSR_THICKNESS) {
-        // Past the nearest layer's slab: the walk stopped in the farthest's.
-        let far0 = textureLoad(hiz_far_tex, texel0, 0).r;
-        gap = depth_ndc_to_view_z(far0) - depth_ndc_to_view_z(p.z);
-    }
-    if (abs(gap) > SSR_THICKNESS) {
-        return out;
-    }
-    return ssr_read(p.xy);
-}
-#endif // WATER_SSR
 
 /// One planar mirror's read for this fragment: its reprojected colour, and in `a` its weight —
 /// strength times coverage times [`plane_trust`] — zero where it does not serve this water.
@@ -4621,7 +4279,6 @@ fn occl_plane_weight(y: f32) -> f32 {
 
 fn floor_occ_mix(a: FloorOcc, b: FloorOcc, t: f32) -> FloorOcc {
     return FloorOcc(
-        mix(a.rgb, b.rgb, t),
         mix(a.v, b.v, t),
         mix(a.rho_c, b.rho_c, t),
         mix(a.known, b.known, t),
@@ -4632,9 +4289,7 @@ fn floor_occ_mix(a: FloorOcc, b: FloorOcc, t: f32) -> FloorOcc {
 /// resolution answer at the rippled lookup point, read bilinearly, so it is smooth and never
 /// binary. Off the planes the fragment marches itself, and the VERDICT comes from the unrippled
 /// point along the flat reflection, so a still camera gets a still answer and no silhouette
-/// flickers with the ripple; only the occluder's colour tap follows the rippled lookup point (`n`
-/// slides it, as it slides the mirrors' and the probe's), shifted on screen by as much as the ripple
-/// moves it. Between the two, both run and crossfade ([`occl_plane_weight`]). The plane's answer
+/// flickers with the ripple. Between the two, both run and crossfade ([`occl_plane_weight`]). The plane's answer
 /// is read after the march, so it is not carried through the march's loop.
 fn floor_occlusion(
     world_pos: vec3<f32>,
@@ -4654,9 +4309,8 @@ fn floor_occlusion(
         FLOOR_MARCH_LEVEL,
         FLOOR_MARCH_STEPS,
     );
-    let shift = uv_look - ndc_to_uv(position_world_to_ndc(world_pos).xy);
-    let marched = floor_from_march(m, FLOOR_MARCH_LEVEL, shift);
-    var plane = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    let marched = floor_from_march(m);
+    var plane = FloorOcc(1.0, 0.0, 0.0);
     if (wp > 0.0) {
         plane = floor_occ_plane(uv_look);
     }
@@ -4666,8 +4320,8 @@ fn floor_occlusion(
 /// The compute pass's plane answer at `uv_look`, read bilinearly.
 fn floor_occ_plane(uv_look: vec2<f32>) -> FloorOcc {
     let o = textureSampleLevel(water_occl, scene_samp, uv_look, 0.0);
-    let c = textureSampleLevel(floor_occ, scene_samp, uv_look, 0.0);
-    return FloorOcc(c.rgb, o.r, c.a, o.a);
+    let c = textureSampleLevel(floor_occ, scene_samp, uv_look, 0.0).a;
+    return FloorOcc(o.r, c, o.a);
 }
 
 // ---- the fog, once (REF-8) ----------------------------------------------------------------------
@@ -4778,37 +4432,39 @@ fn mirror_fog(m_g: vec3<f32>, sky: vec3<f32>, fog: WaterFog) -> vec3<f32> {
     return water_dec(mix(fog.g, m_g, mix(1.0, fog.f, dome)));
 }
 
-/// The floor's occluder fogged as the mirror fogs it. Its colour is the frame's at the hit
-/// (`occ.rgb`, times the shut share `1 − v`), fogged at the hit's own eye Z; the mirror would fog
-/// it at the eye Z of its image beyond the surface, along the view ray. The hit's distance from the
-/// surface comes back out of `rho_c` ([`floor_rho_c`]: `D = R·√(ρ/(1 − ρ))`) along the flat
-/// reflection. The scene's fog only; an open floor, a hit over 2000 yd off (ρ ≥ 0.999), a hit and
-/// an image both nearer than the fog's start, and the lane off (`refr.w`) keep the colour.
-fn floor_refog(
+/// The terrain's albedo the floor's occluder is lit at, display gamma: a mid ground or bark.
+const FLOOR_TONE_ALBEDO: f32 = 0.5;
+/// The share of the terrain light's diffuse an occluder seen through partly open sky takes; one in
+/// the way of a shut floor (a deck, a pier, an overhang) is in its own shade, ambient alone.
+const FLOOR_TONE_SUN: f32 = 0.6;
+
+/// The tone of what shuts the sky floor, linear, a world source (the owner's ruling: no colour read
+/// from the screen is reflected). The nearest captured probe cube along the reflected ray where one
+/// is in reach (`probe_l`, linear, its share `probe_k`); else the terrain light at the water: its
+/// ambient, and of its diffuse as much as the sky is open (`occ.v`), so water under cover reflects a
+/// darker underside. That light fogged as the mirror fogs it, at the eye Z of the occluder's image
+/// beyond the surface, its distance out of `rho_c` ([`floor_rho_c`]: `D = R·√(ρ/(1 − ρ))`); the
+/// scene's fog only, and not with the lane off (`refr.w`, `$WOW_WATER_FLOOR_REFOG`).
+fn floor_tone(
     occ: FloorOcc,
+    probe_l: vec3<f32>,
+    probe_k: f32,
     world_pos: vec3<f32>,
     to_view: vec3<f32>,
-    flat_n: vec3<f32>,
-) -> FloorOcc {
+) -> vec3<f32> {
+    var lit = clamp(
+        wow_light.light_ambient.rgb + wow_light.light_diffuse.rgb * (FLOOR_TONE_SUN * occ.v),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    ) * FLOOR_TONE_ALBEDO;
     let fog = wow_light.fog_color;
-    let shut = 1.0 - occ.v;
-    if (fog.w <= 0.5
-        || shut < 1.0 / 255.0
-        || occ.rho_c >= 0.999
-        || water_reflect.look.body.refr.w < 0.5) {
-        return occ;
+    if (fog.w > 0.5 && occ.rho_c < 0.999 && water_reflect.look.body.refr.w > 0.5) {
+        let d = FLOOR_CONTACT_REACH * sqrt(max(occ.rho_c, 0.0) / (1.0 - occ.rho_c));
+        let f_image = fog_law(water_eye_z(world_pos - to_view * d), wow_light.fog_params.xy);
+        lit = mix(fog.rgb, lit, f_image);
     }
-    let d = FLOOR_CONTACT_REACH * sqrt(max(occ.rho_c, 0.0) / (1.0 - occ.rho_c));
-    let span = wow_light.fog_params.xy;
-    let f_hit = fog_law(water_eye_z(world_pos + reflect(-to_view, flat_n) * d), span);
-    let f_image = fog_law(water_eye_z(world_pos - to_view * d), span);
-    if (f_hit >= 1.0 && f_image >= 1.0) {
-        return occ;
-    }
-    let c_g = fog_rebase(water_enc(occ.rgb / shut), f_hit, f_image, fog.rgb);
-    return FloorOcc(water_dec(c_g) * shut, occ.v, occ.rho_c, occ.known);
+    return mix(water_dec(lit), probe_l, saturate(probe_k));
 }
-
 // ---- the linear composite (FND-2) ---------------------------------------------------------------
 //
 // The framebuffer holds gamma values and light adds in linear, so the water is built as
@@ -8479,6 +8135,9 @@ fn stylised_water(
 
     var probe_w = 0.0;
     var probe_rgb = vec3<f32>(0.0);
+    // How much of the sky floor's occluder tone the cube gives ([`floor_tone`]): its taps' cover,
+    // where one was read.
+    var probe_k = 0.0;
     let cut = wt[taps];
     var wsum = 0.0;
     var w = array<f32, 3>(0.0, 0.0, 0.0);
@@ -8533,6 +8192,7 @@ fn stylised_water(
 #endif
         }
         probe_w = water_reflect.probe_cfg.x * min(cover, 1.0);
+        probe_k = select(0.0, min(cover, 1.0), water_reflect.probe_cfg.x > 0.0);
     }
 
     // `$WOW_PROBE_SHOW` — the cube as the water reads it, black where the tier is not contributing.
@@ -8596,38 +8256,12 @@ fn stylised_water(
     // switching off. See [`plane_trust`] for why a hard edge was the wrong shape: a pool and the
     // ocean are routinely in one shot, they are ten yards apart, and whichever one lost the coin
     // toss had no reflection at all.
-    // ---- screen-space reflection, over the planar capture, over the sky ------------------------
-    //
-    // The layering is the whole design, and each tier covers the one below's blind spot. SSR is
-    // right for any surface orientation because it traces the fragment's real normal, and blind to
-    // everything off the screen. The planar capture sees off-screen and behind the camera, and is
-    // right for one plane at one orientation. The sky is always available and always plausible.
-    //
-    // They fail in complementary places, which is why this is a hybrid rather than a compromise:
-    // open water is flat (where the plane is exact) and grazing (where the march runs off the
-    // frame), while a stream is sloped (where the plane is wrong by twice its tilt) and enclosed by
-    // banks a few yards away (where the march has plenty to hit).
-    var ssr: SsrHit;
-    ssr.rgb = vec3<f32>(0.0);
-    ssr.conf = 0.0;
-#ifdef WATER_SSR
-    if (water_reflect.flags.z > 0.0 && view.world_position.y > world_pos.y) {
-        ssr = ssr_trace(
-            world_pos + vec3<f32>(n_slide.x, 0.0, n_slide.z) * water_reflect.march.y,
-            reflect(-to_view, flat_n),
-        );
-    }
-#endif
-
     // ---- the tiers' weights ----------------------------------------------------------------------
     //
-    // **One reflection, four answers to what is in it**, in confidence order: the sky floor, then
-    // the probe, the mirrors and the march, each covering its weight `w` of what the ones beneath
-    // it give. The shares are explicit products:
-    // `refl_l = ((floor·(1 − w_p) + probe·w_p)·(1 − w_m) + mirror·w_m)·(1 − w_s) + ssr·w_s`, and the
-    // floor's share is `(1 − w_p)(1 − w_m)(1 − w_s)`. Where the march found the answer itself,
-    // nothing beneath it averages in: two reflections of one surface blended together are a double
-    // image, not a better one.
+    // **One reflection, three answers to what is in it**, in confidence order: the sky floor, then
+    // the probe and the mirrors, each covering its weight `w` of what the ones beneath it give. The
+    // shares are explicit products: `refl_l = (floor·(1 − w_p) + probe·w_p)·(1 − w_m) + mirror·w_m`,
+    // and the floor's share is `(1 − w_p)(1 − w_m)`. No screen-space reflection (the owner's ruling).
     let w_p = saturate(probe_w);
     // Each mirror serves the water near its own plane: its colour and its weight here — strength
     // times coverage times trust. Where both reach a fragment they blend by weight.
@@ -8669,15 +8303,12 @@ fn stylised_water(
         w_m = saturate(m1.a + m2.a - m1.a * m2.a);
     }
 
-    // …and the march's own weight.
-    let w_s = saturate(water_reflect.flags.z * ssr.conf);
-
     // The sky is the FLOOR, not a layer: the answer for a direction no tier has a better one for,
     // less what the frame shows standing above the water along the reflected ray. Its share of the
     // pixel decides whether that is worth a march; the occluder replaces the shut share of the sky
-    // in linear light.
-    let w_floor = (1.0 - w_p) * (1.0 - w_m) * (1.0 - w_s);
-    var occ = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    // in linear light, its tone a world source ([`floor_tone`]).
+    let w_floor = (1.0 - w_p) * (1.0 - w_m);
+    var occ = FloorOcc(1.0, 0.0, 0.0);
     var occ_marched = 0.0;
     var floor_share = w_floor * f_surf;
 #ifdef WATER_VIEW
@@ -8688,7 +8319,6 @@ fn stylised_water(
 #endif
     if (floor_occlusion_wanted(floor_share, world_pos)) {
         occ = floor_occlusion(world_pos, n_slide, flat_n, to_view);
-        occ = floor_refog(occ, world_pos, to_view, flat_n);
         occ_marched = 1.0 - occl_plane_weight(world_pos.y);
     }
 #ifdef WATER_PREVIEW
@@ -8698,12 +8328,16 @@ fn stylised_water(
     // The reflected sky's light crosses the fog between the surface and the eye, which the dome as
     // drawn never took: the open sky the floor reflects and the dome the mirror drew are fogged at
     // the surface ([`water_fog`]), as the in-scatter is. What the tiers drew of the world they
-    // fogged at its image's distance already ([`mirror_fog`], [`probe_refog`], [`floor_refog`]).
+    // fogged at its image's distance already ([`mirror_fog`], [`probe_refog`], [`floor_tone`]).
     let fog = water_fog(world_pos, room_fog);
     let sky_seen = fog_diffuse(sky, fog.f, fog.g);
     // The chain in linear light: each tier decoded where it has a share, the floor as the
-    // occlusion built it.
-    var floor_l = occ.rgb + occ.v * sky_seen;
+    // occlusion built it, the shut share in the occluder's world tone.
+    var floor_l = occ.v * sky_seen;
+    if (occ.v < 1.0) {
+        floor_l = floor_l
+            + (1.0 - occ.v) * floor_tone(occ, water_dec(probe_rgb), probe_k, world_pos, to_view);
+    }
     if (!eye_above) {
         floor_l = water_dec(sky_g);
     }
@@ -8721,9 +8355,6 @@ fn stylised_water(
     }
     if (w_m > 0.0) {
         refl_l = mix(refl_l, mirror_fog(mirror_g, sky, fog), w_m);
-    }
-    if (w_s > 0.0) {
-        refl_l = mix(refl_l, water_dec(ssr.rgb), w_s);
     }
     var refl_g = refl_l;
     if (graded) {
@@ -8930,18 +8561,15 @@ fn stylised_water(
             v = probe_rgb;
         } else if (view_id == WV_TIERS) {
             // Each tier's share of `refl` as the chain above mixed them: the probe over the sky,
-            // the mirrors over both, the march over all. Sky grey, probe green, the first mirror
-            // blue, the second cyan, the march red.
-            let s_ssr = saturate(water_reflect.flags.z * ssr.conf);
-            let s_mirrors = saturate(m1.a + m2.a - m1.a * m2.a) * (1.0 - s_ssr);
-            let s_probe = saturate(probe_w) * (1.0 - s_mirrors - s_ssr);
-            let s_sky = 1.0 - s_probe - s_mirrors - s_ssr;
+            // the mirrors over both. Sky grey, probe green, the first mirror blue, the second cyan.
+            let s_mirrors = saturate(m1.a + m2.a - m1.a * m2.a);
+            let s_probe = saturate(probe_w) * (1.0 - s_mirrors);
+            let s_sky = 1.0 - s_probe - s_mirrors;
             let s_m1 = select(0.0, k1 / msum, msum > 0.0) * s_mirrors;
             v = vec3<f32>(0.5) * s_sky
                 + vec3<f32>(0.0, 1.0, 0.0) * s_probe
                 + vec3<f32>(0.0, 0.0, 1.0) * s_m1
-                + vec3<f32>(0.0, 1.0, 1.0) * (s_mirrors - s_m1)
-                + vec3<f32>(1.0, 0.0, 0.0) * s_ssr;
+                + vec3<f32>(0.0, 1.0, 1.0) * (s_mirrors - s_m1);
         } else if (view_id == WV_FLOW) {
             // The current at 2 yd/s full scale: 0.5 + flow/4 in rg, the speed in b.
             v = vec3<f32>(vec2<f32>(0.5) + 0.25 * flow, saturate(length(flow) * 0.5));

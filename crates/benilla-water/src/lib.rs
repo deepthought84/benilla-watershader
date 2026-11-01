@@ -131,7 +131,6 @@ fn drive_pipeline_caps(
     let next = WaterPipelineCaps {
         view: dev.water.view != 0,
         tier: quality.tier(),
-        ssr: dev.water.ssr,
         glow: benilla_assets::preview::on(benilla_assets::preview::GLOW)
             && quality.tier() >= 1
             && early_z,
@@ -219,7 +218,7 @@ mod tests {
         world
             .resource_mut::<super::dev_state::DebugState>()
             .water
-            .ssr = true;
+            .view = 1;
         for quality in [High, Low, Medium] {
             world.insert_resource(quality);
             world.run_system_once(super::drive_pipeline_caps).unwrap();
@@ -228,8 +227,8 @@ mod tests {
                 LiquidKey::from_lanes(Vec4::ZERO, Vec4::new(0.0, 1.0, 0.0, caps.bits() as f32));
             assert_eq!(key.tier(), quality.tier(), "{quality:?}");
             assert!(
-                key.has(LiquidKey::SSR),
-                "{quality:?}: the march's variant stays"
+                key.has(LiquidKey::VIEW),
+                "{quality:?}: the debug view's variant stays"
             );
             assert_eq!(
                 world.resource::<super::RippleAniso>().0,

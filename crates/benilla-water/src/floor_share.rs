@@ -411,13 +411,10 @@ fn floor_surfaces<'a, T: Copy>(
     (any, None)
 }
 
-/// Which readers want the depth pyramids: the screen-space march while its switch is on, the
-/// floor occlusion while the floor is on screen, the body's visibility rays while they run.
-fn pyramid_readers(ssr: bool, floor: bool, body: bool) -> WaterHizConsumers {
+/// Which readers want the depth pyramids: the floor occlusion while the floor is on screen, the
+/// body's visibility rays while they run.
+fn pyramid_readers(floor: bool, body: bool) -> WaterHizConsumers {
     let mut readers = 0;
-    if ssr {
-        readers |= WaterHizConsumers::SSR;
-    }
     if floor {
         readers |= WaterHizConsumers::FLOOR_OCCLUSION;
     }
@@ -511,7 +508,7 @@ pub(crate) fn drive_floor_readers(
             None => debug!("water: the sky floor {on:?}"),
         }
     }
-    consumers.set_if_neq(pyramid_readers(dev.water.ssr, on.occluded, on.body));
+    consumers.set_if_neq(pyramid_readers(on.occluded, on.body));
 }
 
 pub(super) fn register(app: &mut App) {
@@ -918,22 +915,20 @@ mod tests {
     }
 
     /// The sky floor's occlusion walks the depth pyramids, so it asks for them while the floor is
-    /// on screen, beside the march's switch and without it; so do the body's rays while they run.
+    /// on screen; so do the body's rays while they run.
     #[test]
     fn the_floor_on_screen_asks_for_the_pyramid() {
         use WaterHizConsumers as C;
-        for (ssr, floor, body, want) in [
-            (false, true, false, C::FLOOR_OCCLUSION),
-            (true, true, false, C::SSR | C::FLOOR_OCCLUSION),
-            (true, false, false, C::SSR),
-            (false, false, false, 0),
-            (false, false, true, C::BODY_VISIBILITY),
-            (false, true, true, C::FLOOR_OCCLUSION | C::BODY_VISIBILITY),
+        for (floor, body, want) in [
+            (true, false, C::FLOOR_OCCLUSION),
+            (false, false, 0),
+            (false, true, C::BODY_VISIBILITY),
+            (true, true, C::FLOOR_OCCLUSION | C::BODY_VISIBILITY),
         ] {
             assert_eq!(
-                pyramid_readers(ssr, floor, body).0,
+                pyramid_readers(floor, body).0,
                 want,
-                "ssr {ssr}, floor {floor}, body {body}"
+                "floor {floor}, body {body}"
             );
         }
     }

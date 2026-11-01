@@ -16,6 +16,7 @@
 @group(0) @binding(2) var hiz_far_tex: texture_2d<f32>;
 // The opaque world's view Z behind each pixel, yards, 0 where nothing was drawn.
 @group(0) @binding(3) var scene_depth_tex: texture_2d<f32>;
+// Bound, not read: the occluder's colour is never taken from the screen.
 @group(0) @binding(4) var scene_tex: texture_2d<f32>;
 @group(0) @binding(5) var scene_samp: sampler;
 // The reflection block (`liquid.wgsl`'s `WaterReflect`) as rows.
@@ -24,7 +25,7 @@
 // where the march reached a verdict. On Medium and High the plane pass writes it into `vis_raw`
 // instead, its visibility scaled by `VIS_STORE`, and `occl_vis_smooth` writes this image.
 @group(0) @binding(7) var water_occl: texture_storage_2d<rgba8unorm, write>;
-// rgb the occluder's radiance times 1 − v, linear; a rho_c.
+// a rho_c; rgb unused (0): the occluder's tone is a world source, never the screen's.
 @group(0) @binding(8) var floor_occ: texture_storage_2d<rgba16float, write>;
 
 struct OcclParams {
@@ -53,8 +54,8 @@ fn water_dec(g: vec3<f32>) -> vec3<f32> {
 //
 // The sky floor's occlusion march, byte-identical in `liquid.wgsl` and `water_compute.wgsl` (a
 // `benilla_water` test compares the text between these markers). It reads only `view`, the two
-// depth pyramids, the scene snapshot and `water_dec`, which both files declare alike, and nothing
-// of the screen-space reflection march it is ported from.
+// depth pyramids and `water_dec`, which both files declare alike: depth alone, never a colour from
+// the screen.
 
 /// How thick every surface in the depth buffer is taken to be, in yards: McGuire & Mara's
 /// `zThickness`, the screen-space march's value.
@@ -141,16 +142,6 @@ fn law_cover(start: f32, end: f32, depth: f32, ray_q: f32, frame_q: f32) -> f32 
         return 0.0;
     }
     return c * (1.0 - saturate((law_view_z(ray_q) - law_view_z(frame_q)) / LAW_THICKNESS));
-}
-
-/// The occluder as the frame shows it, over the walked level's cell: four bilinear taps at
-/// ±2^(level − 1) pixels, averaged, gamma.
-fn snapshot_box(uv: vec2<f32>, level: i32) -> vec3<f32> {
-    let o = exp2(f32(level) - 1.0) / vec2<f32>(textureDimensions(scene_tex));
-    return 0.25 * (textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, -o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, -o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(-o.x, o.y), 0.0).rgb
-        + textureSampleLevel(scene_tex, scene_samp, uv + vec2<f32>(o.x, o.y), 0.0).rgb);
 }
 
 /// The march's verdict: the screen cannot say, the ray reached the sky, or it met something.
@@ -332,12 +323,12 @@ fn floor_march(origin: vec3<f32>, dir: vec3<f32>, min_level: i32, max_steps: i32
     return FloorMarch(cover, state, p.xy, p.z, distance(origin, at));
 }
 
-/// The sky floor's occlusion at one point: `rgb` the occluder's radiance times `1 − v` (linear),
-/// `v` how much of the sky is open, `rho_c` how far behind the water the reflected thing lies
-/// ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known` 1 where the march reached a
-/// verdict.
+/// The sky floor's occlusion at one point: `v` how much of the sky is open, `rho_c` how far behind
+/// the water the reflected thing lies ([`floor_rho_c`]: 0 at a contact, toward 1 far off), `known`
+/// 1 where the march reached a verdict. No colour: nothing the water reflects is read from the
+/// screen (the owner's ruling, no screen-space reflection at all); the shut share's tone is a world
+/// source, in the composite.
 struct FloorOcc {
-    rgb: vec3<f32>,
     v: f32,
     rho_c: f32,
     known: f32,
@@ -360,22 +351,20 @@ fn floor_rho_c(travelled: f32) -> f32 {
 /// The march's verdict as the floor takes it. `rho_c` ([`floor_rho_c`]) is taken at the distance
 /// `D` the verdict was reached: a hit at `D`, an escape or an unknown past it, all say the
 /// reflected thing is at least `D` behind the water, so it is continuous from a contact to the far
-/// field. The occluder's colour is read at the hit shifted by `tap_shift`, the ripple's slide of
-/// the lookup point on screen. An unknown verdict the frame's end covers is that share occluded
-/// and known, its colour the frame's there, read at full resolution.
-fn floor_from_march(m: FloorMarch, min_level: i32, tap_shift: vec2<f32>) -> FloorOcc {
+/// field. An unknown verdict the frame's end covers is that share occluded and known.
+fn floor_from_march(m: FloorMarch) -> FloorOcc {
     let rho = floor_rho_c(m.travelled);
     if (m.state == FLOOR_HIT) {
-        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, min_level)), 0.0, rho, 1.0);
+        return FloorOcc(0.0, rho, 1.0);
     }
     if (m.state == FLOOR_ESCAPED) {
-        return FloorOcc(vec3<f32>(0.0), 1.0, rho, 1.0);
+        return FloorOcc(1.0, rho, 1.0);
     }
     if (m.cover > 0.0) {
         let c = m.cover;
-        return FloorOcc(water_dec(snapshot_box(m.uv + tap_shift, 0)) * c, 1.0 - c, rho, c);
+        return FloorOcc(1.0 - c, rho, c);
     }
-    return FloorOcc(vec3<f32>(0.0), 1.0, rho, 0.0);
+    return FloorOcc(1.0, rho, 0.0);
 }
 // ---- floor march law: end ----
 
@@ -503,17 +492,17 @@ fn occl_plane(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
     let p = pick.xyz;
-    var o = FloorOcc(vec3<f32>(0.0), 1.0, 0.0, 0.0);
+    var o = FloorOcc(1.0, 0.0, 0.0);
     if (params.sun_travel.w > 0.5) {
         let m = floor_march(p + vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(dir.x, -dir.y, dir.z), FLOOR_MARCH_LEVEL, FLOOR_MARCH_STEPS);
-        o = floor_from_march(m, FLOOR_MARCH_LEVEL, vec2<f32>(0.0));
+        o = floor_from_march(m);
     }
     var vis = vec2<f32>(1.0);
 #ifdef WATER_SKY_VIS
     vis = body_vis(p, params.sun_travel.xyz) * VIS_STORE;
 #endif
     textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, vis, o.known));
-    textureStore(floor_occ, vec2<i32>(q), vec4<f32>(o.rgb, o.rho_c));
+    textureStore(floor_occ, vec2<i32>(q), vec4<f32>(0.0, 0.0, 0.0, o.rho_c));
 }
 
 #ifdef WATER_SKY_VIS

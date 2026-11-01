@@ -33,9 +33,8 @@ WOW_DATA="/path/to/World of Warcraft 1.12.1/Data" cargo run --release -p benilla
   `WOW_WATER_STYLE=1`.
 - A player build, without the developer tools:
   `cargo build --release -p benilla --no-default-features --features improved-water`
-- In a developer build, `Ctrl+Shift+D` opens the debug panel. Its Water section switches
-  screen-space reflection on (off by default), turns the probes off, and shows the probe spots on
-  the minimap and in the world.
+- In a developer build, `Ctrl+Shift+D` opens the debug panel. Its Water section turns the
+  probes off, shows the probe spots on the minimap and in the world, and picks a debug view.
 
 This fork is developed and tested on Linux.
 
