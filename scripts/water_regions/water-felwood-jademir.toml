@@ -1,12 +1,13 @@
 # wg-felwood-jademir: Jademir Lake in Feralas, murky green-yellow water under fog; the far
-# waterline at y 475 on the right (x 1300-1600), where the water meets the fogged bank. Flake:
+# waterline at y 464-475 on the right (x 1300-1600), where the water meets the fogged bank (the
+# far box holds it, its rows read each column's own waterline). Flake:
 # lake-bed plants at x1237-1599 y483-608 land in three or more states, and a patch at x750-768
 # y233-278 in two, in the shot and its Reference twin alike; the Reference twin also flakes across
 # x755-1596 y248-572.
 scene = "water-felwood-jademir"
 [box]
 water = [0, 650, 1600, 900]
-far = [1300, 470, 1600, 480]
+far = [1300, 440, 1600, 500]
 # P1-27 holds the deep hue within 10° of the albedo view, judged under P1-35's light (R-E3).
 [[row]]
 metric = "deep_hue"
@@ -20,8 +21,6 @@ box = "water"
 [[row]]
 metric = "horizon_step"
 box = "far"
-water_y = 475
-sky_y = 474
 [[row]]
 metric = "lum_vs_ref"
 box = "water"

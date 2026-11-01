@@ -2173,8 +2173,9 @@ mod tests {
     /// **Each term of the water is fogged once** (REF-8). The world the mirror reflects is fogged
     /// as its camera drew it; nothing in the stylised region fogs the layer as a whole or calls the
     /// reference's `apply_fog`; both of the probe's returns and the floor's occluder are re-based
-    /// to the mirror's fog; the in-scatter, the glints, foam and the reflected sky (the floor's,
-    /// the probe's and the mirror's dome) take the surface's. `fog_law` is `apply_fog`'s
+    /// to the mirror's fog; the body (what it scatters and what it absorbs, one opaque share), the
+    /// glints, foam and the reflected sky (the floor's, the probe's and the mirror's dome) take
+    /// the surface's. `fog_law` is `apply_fog`'s
     /// arithmetic, so the two lanes fog by one law.
     #[test]
     fn the_stylised_lane_fogs_each_term_once() {
@@ -2195,6 +2196,39 @@ mod tests {
             apply.contains(&format!("let factor = {factor};")),
             "apply_fog's law moved: fog_law must follow it"
         );
+        // The same eye Z, colour, span and WMO room gate as `apply_fog`.
+        let eye_z = liquid_function("fn water_eye_z(");
+        let fog = liquid_function("fn water_fog(");
+        for (a, b, what) in [
+            (
+                "let eye_z = -(view.view_from_world * vec4<f32>(world_pos, 1.0)).z;",
+                (
+                    &eye_z,
+                    "return -(view.view_from_world * vec4<f32>(p, 1.0)).z;",
+                ),
+                "the fog's eye Z",
+            ),
+            (
+                "if (w.kind.z > 0.5 && room_fog != 0u) {",
+                (&fog, "if (w.kind.z > 0.5 && room_fog != 0u) {"),
+                "the room gate",
+            ),
+            (
+                "fog_span = wow_light.wmo_fog_params.xy;",
+                (&fog, "span = wow_light.wmo_fog_params.xy;"),
+                "the room's span",
+            ),
+            (
+                "fog_color = wow_light.wmo_fog_color;",
+                (&fog, "colour = wow_light.wmo_fog_color;"),
+                "the room's colour",
+            ),
+        ] {
+            assert!(
+                apply.contains(a) && b.0.contains(b.1),
+                "{what} differs from apply_fog's"
+            );
+        }
         let start = src.find("#ifdef WATER_STYLISED\n").expect("the region");
         let end = src
             .find("#endif // WATER_STYLISED")
@@ -2223,16 +2257,26 @@ mod tests {
             "the floor's occluder does not take its world tone"
         );
         assert!(
-            water.contains("* fog.f;"),
+            water.contains(
+                "* (gw * pow(MOON_SPEC_WEIGHT, WATER_GAMMA) * water_reflect.moon.w))\n        \
+                 * fog.f;"
+            ),
             "the glints are not fogged at the surface"
+        );
+        assert!(
+            water.contains(
+                "var refl_out = refl_g;\n    if (!eye_above) {\n        \
+                 refl_out = fog_diffuse(refl_g, fog.f, fog.g);\n    }"
+            ),
+            "the reflection is fogged at the surface from above too"
         );
         assert!(
             water.contains("fog_diffuse(water_dec(FOAM_COLOR) * light.foam, fog.f, fog.g)"),
             "foam is not fogged at the surface"
         );
         assert!(
-            water.contains("fog_diffuse(light.in_scatter, fog.f, fog.g)"),
-            "the in-scatter is not fogged at the surface"
+            water.contains("body_fog(light.in_scatter, vec3<f32>(body.w_in), body.t_bed, fog),"),
+            "the body is not fogged at the surface as one opaque share"
         );
         for (line, what) in [
             (

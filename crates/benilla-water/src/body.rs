@@ -1049,17 +1049,24 @@ mod tests {
         let row = |i: usize| -> [f32; 4] { lanes[4 * i..4 * i + 4].try_into().unwrap() };
         assert_eq!(row(4), [0.615, 0.5, 0.22, 0.25]);
         assert_eq!(row(5), [1.0, 0.01, 1.0, 1.0]);
-        let off = BodyLook {
-            probe_refog: false,
-            floor_refog: false,
-            ..BodyLook::default()
-        };
-        let lanes = body_lanes(&light, &dome, &off, [1.0, 2.0, 500.0, 1.0]);
-        assert_eq!(
-            lanes[22..24],
-            [0.0, 0.0],
-            "the re-fogs' lanes are refr.z and refr.w"
-        );
+        // Each re-fog's lane alone: the probe's is refr.z, the floor's refr.w.
+        for (probe_refog, floor_refog, want) in [
+            (false, true, [0.0, 1.0]),
+            (true, false, [1.0, 0.0]),
+            (false, false, [0.0, 0.0]),
+        ] {
+            let look = BodyLook {
+                probe_refog,
+                floor_refog,
+                ..BodyLook::default()
+            };
+            let toggled = body_lanes(&light, &dome, &look, [1.0, 2.0, 500.0, 1.0]);
+            assert_eq!(
+                toggled[22..24],
+                want,
+                "probe {probe_refog}, floor {floor_refog}: the re-fogs' lanes are refr.z and refr.w"
+            );
+        }
         assert_eq!(row(6), [1.0, 2.0, 500.0, 1.0]);
         assert_eq!(row(7)[1], 0.72);
         let e = noon_light();

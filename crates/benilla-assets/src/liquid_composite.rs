@@ -93,6 +93,19 @@ fn fog_diffuse(c: V3, k: f32, fog_c: V3) -> V3 {
     dec(zip(fog_c, enc(c), |f, x| f + (x - f) * k))
 }
 
+/// The body's radiance fogged as one opaque surface (`body_fog`): the share it does not pass of
+/// the bed, `1 − t_bed`, scattered (`w_in⊙i`) and absorbed alike, at the colour `w_in⊙i` over that
+/// share, fogged by [`fog_diffuse`]; `w_in⊙i` as it came where the fog leaves all of it.
+fn body_fog(i: V3, w_in: V3, t_bed: V3, k: f32, fog_c: V3) -> V3 {
+    let lit = mul(w_in, i);
+    if k >= 1.0 {
+        return lit;
+    }
+    let o = t_bed.map(|t| 1.0 - t);
+    let own = zip(lit, o, |l, o| l / o.max(1e-4));
+    mul(o, fog_diffuse(own, k, fog_c))
+}
+
 /// GLSL's `smoothstep`.
 fn smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
     let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
@@ -127,18 +140,30 @@ fn floor_reach(rho: f32) -> f32 {
 }
 
 /// The mirror's gamma colour `m_g` in linear light with the share of it that is the dome fogged at
-/// the surface's share `k` (`mirror_fog`): the dome share is the colour's agreement with the sky
-/// floor `sky` (linear), all of it within a fifth, none past two fifths.
+/// the surface's share `k` (`mirror_fog`): the dome's share is the colour's projection, from the
+/// fog's colour `fog_c`, onto the sky floor's (`enc(sky)`), or all of it where the colour is the
+/// dome itself (its linear colour within a fifth of the sky floor `sky`, none past two fifths), whose
+/// own colour then stands for the dome's.
 fn mirror_fog(m_g: V3, sky: V3, k: f32, fog_c: V3) -> V3 {
     let m = dec(m_g);
     if k >= 1.0 {
         return m;
     }
     let len = |v: V3| dot(v, v).sqrt();
-    let off = len(zip(m, sky, |a, b| a - b)) / len(sky).max(1e-3);
-    let dome = 1.0 - smoothstep(0.2, 0.4, off);
-    let share = 1.0 + (k - 1.0) * dome;
-    dec(zip(fog_c, m_g, |f, x| f + (x - f) * share))
+    let own = 1.0
+        - smoothstep(
+            0.2,
+            0.4,
+            len(zip(m, sky, |a, b| a - b)) / len(sky).max(1e-3),
+        );
+    let sky_g = enc(sky);
+    let d = zip(sky_g, fog_c, |s, g| s - g);
+    let along = dot(zip(m_g, fog_c, |m, g| m - g), d) / dot(d, d).max(1e-6);
+    let share = along.clamp(0.0, 1.0).max(own);
+    let dome_g = zip(sky_g, m_g, |s, m| s + (m - s) * own);
+    dec(std::array::from_fn(|ch| {
+        (m_g[ch] - share * (1.0 - k) * (dome_g[ch] - fog_c[ch])).max(0.0)
+    }))
 }
 
 /// The pixel the composite is after: `enc(L + t⊙dec(snap))`.
@@ -317,7 +342,8 @@ fn random_case(rng: &mut Lcg, plain_t: bool) -> Case {
     };
     let (r, i, s) = (rng.v3(0.0, 1.2), rng.v3(0.0, 1.2), rng.v3(0.0, 1.2));
     let (k, fog_c) = (rng.unit(), rng.v3(0.0, 1.0));
-    let mut layer = surface(f, r, scale(s, k), fog_diffuse(i, k, fog_c), w_in, t_bed);
+    let body = body_fog(i, w_in, t_bed, k, fog_c);
+    let mut layer = surface(f, r, scale(s, k), body, [1.0; 3], t_bed);
     layer = cover(layer, rng.unit());
     layer = over(fog_diffuse(rng.v3(0.0, 1.2), k, fog_c), rng.unit(), layer);
     Case {
@@ -361,7 +387,7 @@ fn the_composite_is_the_linear_sum_encoded_once() {
         // Gamma inputs, as the shader holds them before decoding.
         let (f, cov, foam, k) = (rng.range(0.02, 1.0), rng.unit(), rng.unit(), rng.unit());
         let t_bed = rng.v3(0.0, 1.0);
-        let w_in = t_bed.map(|t| 1.0 - t);
+        let w_in = [rng.unit() * (1.0 - t_bed[0].max(t_bed[1]).max(t_bed[2])); 3];
         let (r_g, i_g, foam_g, fog_g) = (
             rng.v3(0.0, 1.0),
             rng.v3(0.0, 1.0),
@@ -378,20 +404,23 @@ fn the_composite_is_the_linear_sum_encoded_once() {
                     f,
                     dec(r_g),
                     scale(s, k),
-                    fog_diffuse(dec(i_g), k, fog_g),
-                    w_in,
+                    body_fog(dec(i_g), w_in, t_bed, k, fog_g),
+                    [1.0; 3],
                     t_bed,
                 ),
                 cov,
             ),
         );
         let got = target(layer, snap);
-        // The same pixel written out term by term, per channel: the in-scatter and foam fogged in
-        // gamma, the glints scaled by the share that stays, the reflection and the bed as they came.
+        // The same pixel written out term by term, per channel: the body's opaque share (the
+        // in-scatter over what does not pass, `o`) and foam fogged in gamma, the glints scaled by
+        // the share that stays, the reflection and the bed as they came.
         let want: V3 = std::array::from_fn(|ch| {
             let dec1 = |g: f32| g.powf(2.2);
             let fogged = |g: f32| (fog_g[ch] + (g - fog_g[ch]) * k).powf(2.2);
-            let surface_l = f * dec1(r_g[ch]) + k * s[ch] + (1.0 - f) * w_in[ch] * fogged(i_g[ch]);
+            let o = 1.0 - t_bed[ch];
+            let own = (w_in[ch] * dec1(i_g[ch]) / o.max(1e-4)).powf(1.0 / 2.2);
+            let surface_l = f * dec1(r_g[ch]) + k * s[ch] + (1.0 - f) * o * fogged(own);
             let surface_t = (1.0 - f) * t_bed[ch];
             let covered_l = cov * surface_l;
             let covered_t = 1.0 - cov * (1.0 - surface_t);
@@ -505,10 +534,12 @@ fn opaque_water_ignores_the_framebuffer_and_empty_water_leaves_it() {
     }
 }
 
-/// Each term is fogged once. Opaque water that only scatters fogs as 1.12 fogs a surface, the
-/// bed a clear layer passes keeps the frame's own fog, a share of 1 changes nothing, and in a full
-/// fog the in-scatter and foam become the fog's colour, the glints go and the reflection stays: the
-/// far water converges on `F·R + (1 − F)·fog`, the mirror's fogged horizon over the fog itself.
+/// Each term is fogged once. Opaque water that only scatters fogs as 1.12 fogs a surface, clear
+/// water passes the bed with the frame's own fog and adds nothing, a share of 1 changes nothing,
+/// and in a full fog the body becomes the fog's colour over all it does not pass of the bed, the
+/// light it absorbs as well as the light it scatters back, the glints go and the reflection stays:
+/// far water over a bed the fog has taken converges on `F·R + (1 − F)·fog`, and with the mirror's
+/// fogged horizon for `R` on the fog's colour itself, never a darker band.
 #[test]
 fn each_term_is_fogged_once() {
     let mut rng = Lcg(0x5EED_0006);
@@ -523,7 +554,7 @@ fn each_term_is_fogged_once() {
             0.0,
             [0.0; 3],
             [0.0; 3],
-            fog_diffuse(i, k, fog_c),
+            body_fog(i, [1.0; 3], [0.0; 3], k, fog_c),
             [1.0; 3],
             [0.0; 3],
         );
@@ -532,23 +563,51 @@ fn each_term_is_fogged_once() {
             max_diff(target(matte, snap), todays) <= 1e-5,
             "case {n} matte"
         );
-        let clear = surface(0.0, [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [1.0; 3]);
+        let clear = surface(
+            0.0,
+            [0.0; 3],
+            [0.0; 3],
+            body_fog(i, [0.0; 3], [1.0; 3], k, fog_c),
+            [1.0; 3],
+            [1.0; 3],
+        );
         assert!(
             max_diff(target(clear, snap), snap) <= 1e-5,
             "case {n} clear"
         );
-        assert_eq!(fog_diffuse(i, 1.0, fog_c), i, "case {n} unfogged");
+        let t_bed = rng.v3(0.0, 1.0);
+        let w_in = [rng.unit() * (1.0 - t_bed[0].max(t_bed[1]).max(t_bed[2])); 3];
+        assert_eq!(
+            body_fog(i, w_in, t_bed, 1.0, fog_c),
+            mul(w_in, i),
+            "case {n} unfogged"
+        );
         let (f, r, s) = (rng.range(0.02, 1.0), rng.v3(0.0, 1.2), rng.v3(0.0, 1.2));
         let far = surface(
             f,
             r,
             scale(s, 0.0),
-            fog_diffuse(i, 0.0, fog_c),
+            body_fog(i, w_in, t_bed, 0.0, fog_c),
             [1.0; 3],
-            [0.0; 3],
+            t_bed,
         );
         let want = enc(add(scale(r, f), scale(dec(fog_c), 1.0 - f)));
-        assert!(max_diff(target(far, snap), want) <= 1e-5, "case {n} far");
+        assert!(
+            max_diff(target(far, fog_c), want) <= 1e-5,
+            "case {n} far, absorbing {w_in:?} + {t_bed:?}"
+        );
+        let horizon = surface(
+            f,
+            dec(fog_c),
+            [0.0; 3],
+            body_fog(i, w_in, t_bed, 0.0, fog_c),
+            [1.0; 3],
+            t_bed,
+        );
+        assert!(
+            max_diff(target(horizon, fog_c), fog_c) <= 1e-5,
+            "case {n} horizon"
+        );
     }
 }
 
@@ -597,11 +656,15 @@ fn the_fog_rebase_is_exact_where_it_can_be_and_bounded_where_it_cannot() {
     );
 }
 
-/// The floor's re-fog finds the reflected thing's distance from `rho_c` again, to a hundredth of a
-/// yard per hundred over the 2000 yd it re-fogs (ρ < 0.999), so the image beyond the surface is
-/// where the march put it.
+/// The floor's re-fog finds the reflected thing's distance from `rho_c` again: in f32 to a
+/// hundredth of a yard per hundred over the 2000 yd it re-fogs (ρ < 0.999). Plane water reads ρ
+/// from the half-float occlusion texture (`floor_occ.a`), where it comes back to within
+/// 0.05 + 4·10⁻⁸·d³ yd (a yard at 300 yd, 14 at 700, 40 at 1000), and past 1830 yd it reads as
+/// ρ ≥ 0.999 and is not re-fogged; the texture's bilinear read across a silhouette blends two
+/// distances into one between them.
 #[test]
 fn the_floors_distance_comes_back_out_of_rho_c() {
+    let mut halved = 0;
     for step in 0..=2000 {
         let d = step as f32;
         let rho = floor_rho_c(d);
@@ -612,17 +675,29 @@ fn the_floors_distance_comes_back_out_of_rho_c() {
             (floor_reach(rho) - d).abs() <= 0.01 * (1.0 + d / 100.0),
             "{d} yd: {rho}"
         );
+        let rho_h = half::f16::from_f32(rho).to_f32();
+        if rho_h < 0.999 {
+            halved += 1;
+            assert!(
+                (floor_reach(rho_h) - d).abs() <= 0.05 + 4e-8 * d * d * d,
+                "{d} yd through f16: {rho_h}"
+            );
+        }
     }
     assert!(floor_rho_c(1999.0) < 0.999 && floor_rho_c(2030.0) >= 0.999);
+    assert_eq!(halved, 1831, "f16 holds ρ < 0.999 to 1830 yd");
 }
 
 /// The mirror's reflection of the dome is fogged at the surface and its reflection of the world is
-/// not: a texel showing the sky floor's own colour takes the surface's fog as the in-scatter does, a
-/// texel a far cry from the sky (a hill, a mast) keeps the fog its image was drawn with, and with
-/// the fog leaving everything the colour is the plain decode.
+/// not: a texel showing the sky floor's own colour takes the surface's fog as the in-scatter does;
+/// a silhouette's edge, the dome blended with a world the fog has taken, takes it on the dome's
+/// share alone and so meets both its neighbours, never a rim brighter than either; a texel darker
+/// than the fog under a brighter sky (a hill, a mast) keeps the fog its image was drawn with; and
+/// with the fog leaving everything the colour is the plain decode.
 #[test]
 fn the_mirror_fogs_the_dome_it_drew_and_not_the_world() {
     let mut rng = Lcg(0x5EED_000B);
+    let (mut edges, mut worlds) = (0, 0);
     for n in 0..5_000 {
         let (sky_g, fog_c, k) = (rng.v3(0.2, 1.0), rng.v3(0.0, 1.0), rng.unit() * 0.999);
         let sky = dec(sky_g);
@@ -631,30 +706,53 @@ fn the_mirror_fogs_the_dome_it_drew_and_not_the_world() {
             max_diff(dome, fog_diffuse(sky, k, fog_c)) <= 1e-5,
             "case {n}: the dome {sky_g:?} at {k}"
         );
-        let world_g = scale(sky_g, 0.3);
-        assert!(
-            max_diff(mirror_fog(world_g, sky, k, fog_c), dec(world_g)) <= 1e-6,
-            "case {n} the world"
-        );
         assert_eq!(mirror_fog(sky_g, sky, 1.0, fog_c), sky, "case {n} unfogged");
+        let len = |v: V3| dot(v, v).sqrt();
+        let off = |c: V3| len(zip(dec(c), sky, |a, b| a - b)) / len(sky).max(1e-3);
+        let a = rng.unit();
+        let edge_g = zip(sky_g, fog_c, |s, g| g + (s - g) * a);
+        if off(edge_g) >= 0.4 {
+            edges += 1;
+            let want = zip(sky_g, fog_c, |s, g| g + (s - g) * a * k);
+            assert!(
+                max_diff(mirror_fog(edge_g, sky, k, fog_c), dec(want)) <= 1e-5,
+                "case {n}: the edge {a} of {sky_g:?} over {fog_c:?} at {k}"
+            );
+        }
+        let darker = rng.unit() * 0.5;
+        let world_g = zip(sky_g, fog_c, |s, g| g - (s - g) * darker);
+        if world_g.iter().all(|&c| c >= 0.0) && off(world_g) >= 0.4 {
+            worlds += 1;
+            assert!(
+                max_diff(mirror_fog(world_g, sky, k, fog_c), dec(world_g)) <= 1e-6,
+                "case {n} the world {world_g:?}"
+            );
+        }
     }
+    assert!(
+        edges > 1_000 && worlds > 500,
+        "{edges} edges, {worlds} worlds"
+    );
 }
 
-/// The shader's re-fog is this mirror's: the bounded un-fog, its fade, and the floor's distance
-/// from `rho_c` against the law that made it, line for line.
+/// The shader's re-fog is this mirror's: the bounded un-fog (both of its clamp's bounds), its fade,
+/// the probe's two shares in their order, the floor's distance from `rho_c` against the law that
+/// made it, and the mirror's dome share, line for line.
 #[test]
 fn the_shaders_refog_is_the_mirrors() {
     let wgsl = include_str!("shaders/liquid.wgsl");
     for line in [
-        "(c_g - (1.0 - f_was) * g) / max(f_was, 0.2),",
-        "max(c_g, g) + vec3<f32>(0.25),",
+        "let clear = clamp(\n        (c_g - (1.0 - f_was) * g) / max(f_was, 0.2),\n        \
+         vec3<f32>(0.0),\n        max(c_g, g) + vec3<f32>(0.25),\n    );",
         "return mix(c_g, mix(g, clear, f_now), smoothstep(0.2, 0.35, f_was));",
+        "return fog_rebase(c_g, shares.x, shares.y, wow_light.fog_color.rgb);",
         "const FLOOR_CONTACT_REACH: f32 = 64.0;",
         "return d2 / (d2 + FLOOR_CONTACT_REACH * FLOOR_CONTACT_REACH);",
         "let d = FLOOR_CONTACT_REACH * sqrt(max(occ.rho_c, 0.0) / (1.0 - occ.rho_c));",
-        "let off = length(m - sky) / max(length(sky), 1e-3);",
-        "let dome = 1.0 - smoothstep(0.2, 0.4, off);",
-        "return water_dec(mix(fog.g, m_g, mix(1.0, fog.f, dome)));",
+        "let own = 1.0 - smoothstep(0.2, 0.4, length(m - sky) / max(length(sky), 1e-3));",
+        "let share = max(saturate(dot(m_g - fog.g, d) / max(dot(d, d), 1e-6)), own);",
+        "let dome_g = mix(sky_g, m_g, own);",
+        "return water_dec(max(m_g - share * (1.0 - fog.f) * (dome_g - fog.g), vec3<f32>(0.0)));",
     ] {
         assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
     }
@@ -776,6 +874,7 @@ fn the_shaders_composite_is_the_mirrors() {
     let wgsl = include_str!("shaders/liquid.wgsl");
     for line in [
         "return WaterLayer(f * r + s + (1.0 - f) * w_in * i, (1.0 - f) * t_bed);",
+        "return o * fog_diffuse(lit / max(o, vec3<f32>(1e-4)), fog.f, fog.g);",
         "return WaterLayer(c * a.l, vec3<f32>(1.0) - c * (vec3<f32>(1.0) - a.t));",
         "return WaterLayer(cover * colour + (1.0 - cover) * a.l, (1.0 - cover) * a.t);",
         "return water_dec(mix(g, water_enc(c), f));",

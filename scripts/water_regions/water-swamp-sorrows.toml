@@ -1,10 +1,10 @@
 # wg-swamp-sorrows: murky swamp water in the Swamp of Sorrows under an orange fog; the far water
-# fades into the fog at y 463-480 (steepest between rows 468 and 469, x 550-850). Flake: x360-390
-# y460-476 moves by up to 3 codes run to run.
+# meets the fog at y 457-466 (x 550-850; the far box holds it, its rows read each column's own
+# waterline). Flake: x360-390 y460-476 moves by up to 3 codes run to run.
 scene = "water-swamp-sorrows"
 [box]
 water = [400, 600, 1100, 850]
-far = [550, 460, 850, 480]
+far = [550, 430, 850, 500]
 # P1-27 holds the deep hue within 10° of the albedo view, judged under P1-35's light (R-E3).
 [[row]]
 metric = "deep_hue"
@@ -18,8 +18,6 @@ box = "water"
 [[row]]
 metric = "horizon_step"
 box = "far"
-water_y = 469
-sky_y = 468
 [[row]]
 metric = "lum_vs_ref"
 box = "water"

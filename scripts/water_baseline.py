@@ -53,13 +53,13 @@ PANS = ["water-pan-burst", "water-elwynn-stream-pan", "water-alameth-bank-pan",
         "water-falfarren-pan", "water-elwynn-falls-pan"]
 # 60 shots 2 fixed steps apart: 2 s at 1/30 s.
 BURST, EVERY = 60, 2
-# The views the contact, deep and seam rows read, and the scenes each is captured at.
+# The views the contact, deep, seam and horizon rows read, and the scenes each is captured at.
 VIEW_SCENES = [
     "water-loch-modan", "water-menethil-wreck-noon", "water-booty-underdeck",
     "water-booty-harbour", "water-stv-river", "water-darkshore-pier-noon", "water-elwynn-falls",
     "water-stormwind-canal", "water-crystal-3p-noon", "water-baradin-noon", "water-savage-coast",
     "water-westfall-noon", "water-stv-mouth", "water-alameth-bank-noon", "water-felwood-jademir",
-    "water-swamp-sorrows", "water-darrowmere", "water-forgotten-coast",
+    "water-swamp-sorrows", "water-darrowmere", "water-forgotten-coast", "water-loch-rain",
 ]
 VIEWS = {
     "fresnel": VIEW_SCENES,

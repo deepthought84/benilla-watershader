@@ -4566,6 +4566,20 @@ fn fog_diffuse(c: vec3<f32>, f: f32, g: vec3<f32>) -> vec3<f32> {
     return water_dec(mix(g, water_enc(c), f));
 }
 
+/// The body's radiance fogged as 1.12 fogs a surface. What it does not pass of the bed, `1 − t_bed`
+/// (the light it scatters back, `w_in·i`, and the light it absorbs), is one opaque surface whose
+/// colour is the in-scatter over that share, fogged at the share `fog.f` that stays: the absorbed
+/// part takes the fog's light as a dark surface does, so far water meets the fog's colour. The bed
+/// passed keeps the fog the frame drew it with.
+fn body_fog(i: vec3<f32>, w_in: vec3<f32>, t_bed: vec3<f32>, fog: WaterFog) -> vec3<f32> {
+    let lit = w_in * i;
+    if (fog.f >= 1.0) {
+        return lit;
+    }
+    let o = vec3<f32>(1.0) - t_bed;
+    return o * fog_diffuse(lit / max(o, vec3<f32>(1e-4)), fog.f, fog.g);
+}
+
 /// A colour `c_g` (gamma) fogged at the share `f_was` re-fogged at the share `f_now`, in the fog
 /// colour `g`. Where little survived the first fog the un-fog would amplify what did (a blurred
 /// near silhouette over a fogged background), so the re-base fades to the colour as it came between
@@ -4613,17 +4627,24 @@ fn probe_refog(c_g: vec3<f32>, shares: vec2<f32>) -> vec3<f32> {
 /// The mirror's colour `m_g` (gamma) in linear light, with the dome it drew fogged at the surface.
 /// The mirror camera fogs the world at the eye Z of its image beyond the surface, which counts the
 /// fog between the surface and the eye already, but draws the dome as it is, and the dome's light
-/// crosses that fog too. The share of the colour that is the dome is read off its agreement with
-/// the sky floor `sky` along the same flat ray (linear; the two show one sky): within a fifth all of
-/// it, past two fifths none, so the world's reflection keeps the fog its image was drawn with.
+/// crosses that fog too. The world beyond the surface is fogged at least as much as the surface,
+/// so near the fog's colour where the surface is far; a texel the capture's filter blends from the
+/// dome and such a world (a silhouette's edge) is the dome by its colour's projection, from the
+/// fog's colour, onto the sky floor `sky` along the same flat ray (gamma, the capture's own
+/// encoding), and that share of the sky floor is fogged. A texel that is the dome itself (its
+/// colour within a fifth of the sky floor's in linear, none past two fifths) is fogged whole, as
+/// the colour it is; one darker than the fog where the sky is brighter is the world's, as drawn.
 fn mirror_fog(m_g: vec3<f32>, sky: vec3<f32>, fog: WaterFog) -> vec3<f32> {
     let m = water_dec(m_g);
     if (fog.f >= 1.0) {
         return m;
     }
-    let off = length(m - sky) / max(length(sky), 1e-3);
-    let dome = 1.0 - smoothstep(0.2, 0.4, off);
-    return water_dec(mix(fog.g, m_g, mix(1.0, fog.f, dome)));
+    let own = 1.0 - smoothstep(0.2, 0.4, length(m - sky) / max(length(sky), 1e-3));
+    let sky_g = water_enc(sky);
+    let d = sky_g - fog.g;
+    let share = max(saturate(dot(m_g - fog.g, d) / max(dot(d, d), 1e-6)), own);
+    let dome_g = mix(sky_g, m_g, own);
+    return water_dec(max(m_g - share * (1.0 - fog.f) * (dome_g - fog.g), vec3<f32>(0.0)));
 }
 
 /// The terrain's albedo the floor's occluder is lit at, display gamma: a mid ground or bark.
@@ -8821,7 +8842,8 @@ fn stylised_water(
 #else
     let body = BodyHeld(vec3<f32>(0.0), optics.t_bed, optics.w_in);
 #endif
-    // The body scatters `w_in` of its light back; `t_bed` of the bed passes.
+    // The body scatters `w_in` of its light back and absorbs the rest of what does not pass;
+    // `t_bed` of the bed passes. Its opaque share is fogged as one surface ([`body_fog`]).
     let light = light_release(light_held);
     // From below the surface the floor is the dome's stops ([`underside_sky`]), which no camera drew
     // and so none fogged: the fog between the surface and the eye takes the reflection here.
@@ -8845,8 +8867,8 @@ fn stylised_water(
         f_surf,
         refl_out,
         spec_all,
-        fog_diffuse(rf_b.in_scatter, fog.f, fog.g),
-        vec3<f32>(rf_b.w_in),
+        body_fog(rf_b.in_scatter, vec3<f32>(rf_b.w_in), rf_b.t_bed, fog),
+        vec3<f32>(1.0),
         rf_b.t_bed,
     );
 #else
@@ -8854,8 +8876,8 @@ fn stylised_water(
         f_surf,
         refl_out,
         spec_l,
-        fog_diffuse(light.in_scatter, fog.f, fog.g),
-        vec3<f32>(body.w_in),
+        body_fog(light.in_scatter, vec3<f32>(body.w_in), body.t_bed, fog),
+        vec3<f32>(1.0),
         body.t_bed,
     );
 #endif

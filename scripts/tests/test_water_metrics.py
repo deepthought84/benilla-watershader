@@ -417,6 +417,52 @@ class Ratios(unittest.TestCase):
         r = wm.shore_band_ratio(img, [0, 140, W, 160], [0, 210, W, 230])
         self.assertAlmostEqual(r["value"], 150 / 80, delta=0.3)
 
+    @staticmethod
+    def far_shore(band=0.0, w=100, h=80):
+        """A fogged land at 120 over water whose far edge steps down the columns (row 30, 32, 34,
+        ...), the water's first rows `band` codes darker, then a ramp of 0.5 a row; its Fresnel
+        and foam views repaint the water only, a critter streaming into the Fresnel view alone at
+        rows 5-9 of three columns."""
+        img = flat([120, 120, 120], w=w, h=h)
+        top = 30 + 2 * (np.arange(w) // 20)
+        fres, foam = img.copy(), img.copy()
+        for x, t in enumerate(top):
+            k = np.arange(h - t)
+            img[t:, x] = (120.0 - 0.5 * k - band * (k < 3))[:, None]
+            fres[t:, x], foam[t:, x] = 90.0, 0.0
+        fres[5:10, 40:43] = 30.0
+        return img, fres, foam, top
+
+    def test_the_horizon_step_is_read_at_each_columns_own_waterline(self):
+        box = [0, 0, 100, 80]
+        img, fres, foam, top = self.far_shore()
+        t = wm.waterline(fres, foam, box)
+        want = top.copy()
+        want[40:43] = -1  # the critter's columns: no waterline
+        self.assertEqual(t.tolist(), want.tolist())
+        r = wm.horizon_step(img, box, fres, foam)
+        self.assertAlmostEqual(r["value"], 0.0, places=5)
+        self.assertAlmostEqual(r["noise"], 0.5, places=5)
+        self.assertLess(r["over_noise"], 0.0)
+        self.assertEqual((r["columns"], r["line"]), (97, 34.0))
+        dark, *_ = self.far_shore(band=6.0)
+        r = wm.horizon_step(dark, box, fres, foam)
+        self.assertAlmostEqual(r["value"], 6.0, delta=1e-4)
+        self.assertGreater(r["over_noise"], 5.0)
+        self.assertIsNone(wm.horizon_step(img, box)["value"])
+        # A box whose top is already water holds no waterline.
+        self.assertIsNone(wm.horizon_step(img, [0, 40, 100, 80], fres, foam)["value"])
+
+    def test_far_water_over_the_land_beyond_it(self):
+        box = [0, 0, 100, 80]
+        img, fres, foam, _ = self.far_shore()
+        # Water rows 2-5 under the line: 120 − 0.5·(2..5) = 118.25 over the land's 120.
+        r = wm.far_over_land(img, box, fres, foam)
+        self.assertAlmostEqual(r["value"], 118.25 / 120.0, places=5)
+        dark, *_ = self.far_shore(band=6.0)
+        self.assertLess(wm.far_over_land(dark, box, fres, foam)["value"], r["value"])
+        self.assertIsNone(wm.far_over_land(img, box)["value"])
+
     def test_the_glint_peak_sits_on_the_bright_column(self):
         img = flat([60, 70, 80])
         xs = np.arange(W)

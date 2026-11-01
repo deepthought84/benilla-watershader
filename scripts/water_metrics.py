@@ -1049,12 +1049,100 @@ def foam_fp(view, box, mask=None, channel=1, thr=0.2):
     return {"value": float((c[m] >= thr).mean() * 100.0), "pixels": int(m.sum()), "basis": "water"}
 
 
-def horizon_step(img, box, water_y, sky_y):
-    """|luma of the last water row − luma of the first sky row| over the box's columns."""
+def waterline(view, other, box, run=4, spread=8, width=31):
+    """The far edge of the water in each of the box's columns: its first water row from the top of
+    the box, the row where the water under the horizon meets the land or sky beyond it. Water is
+    where two WATER_VIEW captures of the pose taken alike differ ([`view_water`]), from a row
+    where `run` rows in a row are water. −1 for a column with no such row, one whose water reaches
+    the box's top (the line lies above the box), and one whose row lies more than `spread` rows off
+    the median of the `width` columns around it (a critter or doodad streaming in on one of the two
+    captures only)."""
+    x0, y0, x1, y1 = (int(v) for v in box)
+    m = crop(view_water(view, other), box)
+    h, w = m.shape
+    if h <= run:
+        return np.full(w, -1, dtype=np.int64)
+    start = np.ones((h - run + 1, w), dtype=bool)
+    for k in range(run):
+        start &= m[k : h - run + 1 + k]
+    t = np.where(start.any(axis=0), start.argmax(axis=0), -1)
+    t = np.where(t > 0, t + y0, -1)
+    good = t >= 0
+    out = np.full(w, -1, dtype=np.int64)
+    for c in np.flatnonzero(good):
+        lo, hi = max(0, c - width // 2), min(w, c + width // 2 + 1)
+        near = t[lo:hi][good[lo:hi]]
+        if abs(t[c] - np.median(near)) <= spread:
+            out[c] = t[c]
+    return out
+
+
+def _horizon_profile(img, box, view, other, above, below):
+    """Luma rows aligned on the traced [`waterline`] and averaged over its columns: `P[k]` for
+    k in [−above, below), row 0 the first water row; with the median line row and the columns
+    used. None without a traced column."""
     L = luma(img)
-    x0, x1 = int(box[0]), int(box[2])
-    a, b = float(L[water_y, x0:x1].mean()), float(L[sky_y, x0:x1].mean())
-    return {"value": abs(a - b), "water": a, "sky": b}
+    x0 = int(box[0])
+    t = waterline(view, other, box)
+    cols = [c for c in np.flatnonzero(t >= 0) if t[c] - above >= 0 and t[c] + below <= L.shape[0]]
+    if not cols:
+        return None
+    rows = np.array([L[t[c] - above : t[c] + below, x0 + c] for c in cols])
+    return rows.mean(axis=0), float(np.median(t[cols])), len(cols)
+
+
+def horizon_step(img, box, view=None, other=None, rows=12):
+    """The step where the far water meets the fogged land or sky beyond it: |luma of the last water
+    row − luma of the row above it|, each column's rows aligned on its own traced waterline
+    ([`waterline`], from the Fresnel and foam views of the pose, which differ on water only) and
+    averaged over the box's columns (`water`, `sky`). `steepest` is the largest row step from the
+    row above across the `rows` water rows under the line and `noise` the median of those water
+    rows' own steps, the row noise REF-8 holds the meeting step to (`over_noise`, value − noise;
+    BL §8.3). `line` is the median waterline row and `columns` the columns traced. None without
+    both views (the Reference twin reads the Improved lane's: the water's outline is the same)."""
+    if view is None or other is None:
+        return {"value": None, "basis": "no water views"}
+    prof = _horizon_profile(img, box, view, other, 1, int(rows))
+    if prof is None:
+        return {"value": None, "basis": "no waterline in the box"}
+    P, line, n = prof
+    steps = np.abs(np.diff(P))
+    value, noise = float(steps[0]), float(np.median(steps[1:]))
+    return {
+        "value": value,
+        "basis": "waterline",
+        "water": float(P[1]),
+        "sky": float(P[0]),
+        "steepest": float(steps.max()),
+        "noise": noise,
+        "over_noise": value - noise,
+        "line": line,
+        "columns": n,
+    }
+
+
+def far_over_land(img, box, view=None, other=None, water=(2, 6), land=(3, 7)):
+    """Far water against the fogged land or sky just beyond it (ART-1, "far water ≥ adjacent
+    fogged land"): the mean luma of the water rows `water` [a, b) under each column's traced
+    waterline ([`horizon_step`]'s trace) over the mean of the rows `land` [a, b) above it, both
+    averaged over the box's columns. None without both views."""
+    if view is None or other is None:
+        return {"value": None, "basis": "no water views"}
+    above, below = int(land[1]), int(water[1])
+    prof = _horizon_profile(img, box, view, other, above, below)
+    if prof is None:
+        return {"value": None, "basis": "no waterline in the box"}
+    P, line, n = prof
+    w = float(P[above + int(water[0]) : above + int(water[1])].mean())
+    g = float(P[above - int(land[1]) + 1 : above - int(land[0]) + 1].mean())
+    return {
+        "value": w / max(g, 1e-6),
+        "basis": "waterline",
+        "water": w,
+        "land": g,
+        "line": line,
+        "columns": n,
+    }
 
 
 def luma_sd(img, box):
@@ -1164,6 +1252,8 @@ def halo_count(img, box, thr=12.0):
 #                                  with "view" the row must name its view, passed as `view`
 #   ("times",) / ("poses",)        the burst's clock (the log, else `every` steps of 1/60 s) / poses
 #   ("view", arg, view, required)  a WATER_VIEW capture; a row parameter `arg` names another view
+#   ("mask_view", arg, view)       the Improved lane's WATER_VIEW capture on either lane (a mask of
+#                                  the water's outline, the same in both)
 #   ("variant", arg, variant[, required])  an A/B capture <scene>~<variant>.png; one not required
 #                                  is skipped when the region row sets `arg = false`
 
@@ -1176,6 +1266,8 @@ class Row:
 
 STILL = [("still", "img")]
 DEEP_VIEWS = [("view", "transmittance", "transmittance", False), ("view", "fog", "fog", False)]
+# The two views a traced waterline reads, the Improved lane's on either lane.
+WATERLINE_VIEWS = [("mask_view", "view", "fresnel"), ("mask_view", "other", "foam")]
 ROWS: dict[str, Row] = {
     "refl_contrast": Row(refl_contrast, STILL, "lower"),
     "ridge_contrast": Row(ridge_contrast, STILL, "higher", {"min": 0.4}),
@@ -1273,7 +1365,8 @@ ROWS: dict[str, Row] = {
         {"max": 0.5},
     ),
     "ring_seam": Row(ring_seam, STILL, "lower", {"max": 2.0}),
-    "horizon_step": Row(horizon_step, STILL, "lower", {"max": 3.0}),
+    "horizon_step": Row(horizon_step, STILL + WATERLINE_VIEWS, "lower", {"max": 3.0}),
+    "far_over_land": Row(far_over_land, STILL + WATERLINE_VIEWS, "higher"),
     "luma_sd": Row(luma_sd, STILL, "higher"),
     "luma_p5": Row(luma_p5, STILL, None),
     "frame_std": Row(frame_std, [("burst", "rgb")], "lower"),
@@ -1473,6 +1566,14 @@ def run_row(scene: Scene, spec: dict, boxes: dict, lane: str) -> dict:
                 args[arg] = img
             elif required:
                 missing.append(f"{scene.name}{base}@{view}.png")
+        elif kind == "mask_view":
+            _, arg, default = need
+            view = params.pop(arg, default)
+            img = scene.image(f"@{view}")
+            if img is not None:
+                args[arg] = img
+            else:
+                missing.append(f"{scene.name}@{view}.png")
         elif kind == "variant":
             arg, default, required = need[1], need[2], need[3] if len(need) > 3 else True
             var = params.pop(arg, default)

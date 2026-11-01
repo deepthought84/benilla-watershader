@@ -1,9 +1,10 @@
 # wg-forgotten-coast: Feralas's Forgotten Coast under a green fog, a raft's planks along the
-# bottom; the sea fades into the fog around y 400 with no step (x 700-1400).
+# bottom; the sea meets the fog band at y 464-471 (x 700-1400; the far box holds it, its rows read
+# each column's own waterline), under the fog's flat colour from y 425.
 scene = "water-forgotten-coast"
 [box]
 water = [0, 500, 1600, 700]
-far = [700, 390, 1400, 410]
+far = [700, 420, 1400, 500]
 [[row]]
 metric = "deep_hue"
 box = "water"
@@ -16,8 +17,9 @@ box = "water"
 [[row]]
 metric = "horizon_step"
 box = "far"
-water_y = 400
-sky_y = 399
+[[row]]
+metric = "far_over_land"
+box = "far"
 [[row]]
 metric = "lum_vs_ref"
 box = "water"
