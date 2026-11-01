@@ -13,9 +13,9 @@
 //! cube at full reach. A surface whose whole mirror water and every spot are served that way is
 //! passed without a look at its patches, so a sea of chunks costs one test each. Anything else, a
 //! surface not summarised yet or a debug view, counts as floor on screen; so does, under the
-//! grading, any visible surface with water below the eye, since the grade's pivot reads the
-//! floor's verdict and `rho_c` on every fragment the eye is above (`floor_occlusion_wanted`),
-//! whatever its tiers.
+//! grading, any visible surface with water below the eye, since every fragment the eye is above
+//! marches then (`floor_occlusion_wanted`), whatever its tiers. The grade itself no longer reads
+//! the verdict (it pivots on world sources only); the glints' open sky (`wg_glint_open`) does.
 //!
 //! The answer, [`FloorOnScreen`], has three parts. `sky` builds the cube: every stylised fragment
 //! reads it for the floor's share, occluded or not, a WMO interior pool's too. `occluded`, the same
@@ -384,8 +384,8 @@ type FloorAt<'a, T> = Option<(T, Option<&'a Patch>)>;
 /// Of the visible water `surfaces` (each with its summary, `None` while it has none, and whether
 /// it is a WMO interior pool), the first with a patch that can show the sky floor, seen from
 /// `eye_y` under `tiers`, and the first such outside a WMO interior, each with that patch. Under
-/// the grading (`graded`) every fragment the eye is above reads the floor's verdict for the
-/// grade's pivot, so any surface with water below the eye counts, with no patch named.
+/// the grading (`graded`) every fragment the eye is above marches the floor (the glints' gate
+/// reads its verdict), so any surface with water below the eye counts, with no patch named.
 fn floor_surfaces<'a, T: Copy>(
     tiers: &Tiers,
     eye_y: f32,

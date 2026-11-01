@@ -3419,6 +3419,36 @@ fn planar_read_rough(
     return vec4<f32>(mirrored.rgb, saturate(min(params.y, 1.0) * mirrored.a * trust * fade));
 }
 
+/// The chain level the grading's pivot reads ([`mirror_local_mean`]): 8 capture texels a side,
+/// an eightieth of the capture's width, the neighbourhood a reflection's contrast is lost to.
+const RR_GRADE_LEVEL: f32 = 2.0;
+
+/// Mirror `second`'s capture averaged over its neighbourhood where this fragment's calm reflection
+/// lands ([`RR_GRADE_LEVEL`] of its chain at the flat lookup [`planar_read_rough`] starts from),
+/// gamma, with its coverage in `a`; 0 where the plane is off, the chain not ready or the lookup off
+/// the capture. A world source: what the mirror camera saw, whatever the screen shows.
+fn mirror_local_mean(params: vec4<f32>, second: bool, world_pos: vec3<f32>) -> vec4<f32> {
+    if (params.y <= 0.0 || !rough_chain_ready(second)) {
+        return vec4<f32>(0.0);
+    }
+    let image = world_pos + vec3<f32>(0.0, 2.0 * (params.x - world_pos.y), 0.0);
+    let lifted = position_world_to_ndc(image);
+    if (lifted.z <= 0.0 || any(abs(lifted.xy) >= vec2<f32>(1.0))) {
+        return vec4<f32>(0.0);
+    }
+    let uv = ndc_to_uv(lifted.xy);
+    let ruv = clamp(vec2<f32>(1.0 - uv.x, uv.y), vec2<f32>(0.002), vec2<f32>(0.998));
+    var m: vec4<f32>;
+    if (second) {
+        let l = min(RR_GRADE_LEVEL, f32(textureNumLevels(reflection_chain2) - 1u));
+        m = textureSampleLevel(reflection_chain2, reflection_samp, ruv, l);
+    } else {
+        let l = min(RR_GRADE_LEVEL, f32(textureNumLevels(reflection_chain) - 1u));
+        m = textureSampleLevel(reflection_chain, reflection_samp, ruv, l);
+    }
+    return vec4<f32>(m.rgb / max(m.a, 1.0e-4), m.a);
+}
+
 /// The probe chain level whose spread is `sigma` radians: between the sharp capture and level 1
 /// a straight blend, past it one level for each step of [`RR_PROBE_SIGMA1`]'s table, at most 5.
 fn rough_probe_lod(sigma: f32) -> f32 {
@@ -4419,7 +4449,9 @@ fn underside_sky(dir: vec3<f32>) -> vec3<f32> {
 
 /// Whether this fragment's floor is occluded: the eye above the surface (the underside is not
 /// this look's), not a WMO interior pool (its floor is unlit and unoccluded), the occlusion lane
-/// on, and the floor's share of the pixel worth a march, or the grading reading `rho_c`.
+/// on, and the floor's share of the pixel worth a march, or the grading on: the grading no longer
+/// reads the verdict, but the glints' open sky ([`wg_glint_open`]) has read it wherever the grading
+/// ran the march, and keeps it.
 fn floor_occlusion_wanted(floor_share: f32, world_pos: vec3<f32>) -> bool {
     return view.world_position.y > world_pos.y
         && w.path.x < 1.5
@@ -4835,15 +4867,15 @@ fn grade_keep(rho: f32) -> f32 {
 }
 
 /// The grading in two stages, as the affine map `r ↦ max(a·r + b, 0)` it is on the reflection `r`,
-/// returned `(b, a)`. Both stages pivot on what the reflection is of: where the floor's march
-/// reached a verdict, on the occluded `floor` (the occluder where it hit, the sky where it
-/// escaped), keeping `K = k_n·k_f` of `r`, so water under a deck is pulled toward the deck's
-/// underside and never toward the sky; where it did not, the near stage (`k_n = 1 − s·C_NEAR`)
-/// has no pivot and the far stage keeps `k_f` of `r` about the open `sky`. An unknown share
-/// carries no occluder and the whole sky, so `floor = known·P + (1 − known)·sky` with `P` the
-/// floor of the share with a verdict: the far pivot is `floor` itself and the near pivot
-/// `mix(r, P, known) = floor + (1 − known)·(r − sky)`, which counts a partial cover once. s = 0 is
-/// the identity. Two terms instead of the sky and the verdict keep the tier chain light.
+/// returned `(b, a)`. Both stages pivot on what the reflection is of: where a world source knows
+/// it (the composite passes the mirrors' local mean and the probe's read, `known` their cover),
+/// on that `floor`, keeping `K = k_n·k_f` of `r`, so water under a deck is pulled toward the
+/// deck's underside and never toward the sky; where none does, the near stage
+/// (`k_n = 1 − s·C_NEAR`) has no pivot and the far stage keeps `k_f` of `r` about the open `sky`.
+/// An unknown share carries no occluder and the whole sky, so `floor = known·P + (1 − known)·sky`
+/// with `P` the floor of the share with a verdict: the far pivot is `floor` itself and the near
+/// pivot `mix(r, P, known) = floor + (1 − known)·(r − sky)`, which counts a partial cover once.
+/// s = 0 is the identity. Two terms instead of the sky and the verdict keep the tier chain light.
 fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<f32> {
     let g = water_reflect.look.grade;
     let k = grade_keep(rho);
@@ -4852,6 +4884,21 @@ fn grade_affine(sky: vec3<f32>, floor: vec3<f32>, known: f32, rho: f32) -> vec4<
     let a = mix(k_f, k, known);
     let b = (1.0 - k) * floor - (k_f - k) * (1.0 - known) * sky;
     return vec4<f32>(b, a);
+}
+
+/// The grading applied to the reflection `r` in its luminance alone: the luma [`grade_affine`]'s
+/// map `ab` gives it, `max(a·Y + Y(b), 0)`, at `r`'s own hue and never above its saturation. A
+/// graded reflection dimmer than `a·r` is `r` scaled; a brighter one is `a·r` lifted by a grey.
+/// The map per channel pulled each reflection toward the pivot's colour, the sky's or the
+/// occluder's, so a grey pier reflected blue and green trees teal (Darkshore's pier legs at 3.2×
+/// their saturation, Loch Modan's island trees turned 60° toward the sky).
+fn grade_apply(ab: vec4<f32>, r: vec3<f32>) -> vec3<f32> {
+    let y = luma709(r);
+    let y_g = max(ab.w * y + luma709(ab.xyz), 0.0);
+    if (y_g <= ab.w * y) {
+        return r * (y_g / max(y, 1e-6));
+    }
+    return ab.w * r + vec3<f32>(y_g - ab.w * y);
 }
 
 // ---- the body (BODY-2): Beer-Lambert on the true path in the zone's own spectrum ---------------
@@ -8457,13 +8504,41 @@ fn stylised_water(
     if (!eye_above) {
         floor_l = water_dec(sky_g);
     }
-    // The grading's map, built while the floor's verdict and the open sky are at hand
-    // ([`grade_affine`]): the pivot is the occluded floor where the march reached a verdict, the
-    // open sky where it did not. From below the surface, or at strength 0, nothing is graded.
+    // The grading's map ([`grade_affine`]) from world sources alone, so a reflection grades alike
+    // whether or not what it shows is on the screen (the owner's ruling). Both stages pivot on
+    // the reflection's own neighbourhood where the tiers know it: the mirrors' captures averaged
+    // around the lookup ([`mirror_local_mean`]) by their weight, over the probe's read along the
+    // reflected ray by its cover; the far stage alone on the open sky where neither does. The
+    // reach is the surface's roughness. The floor march's verdict and distance (`occ`), which
+    // pivoted it before, are the screen's depth: Loch Modan's island on the screen graded about
+    // its grey occluder tone and the same island above the screen's edge about the blue sky. From
+    // below the surface, or at strength 0, nothing is graded.
     let graded = eye_above && water_reflect.look.grade.x > 0.0;
     var grade_ab = vec4<f32>(0.0, 0.0, 0.0, 1.0);
     if (graded) {
-        grade_ab = grade_affine(sky_seen, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));
+        var pivot = mix(sky_seen, water_dec(probe_rgb), probe_k);
+        var known = probe_k;
+#ifdef WATER_PREVIEW
+        if (w_m > 0.0) {
+            var a1 = vec4<f32>(0.0);
+            var a2 = vec4<f32>(0.0);
+            if (k1 > 0.0) {
+                a1 = mirror_local_mean(water_reflect.params, false, world_pos);
+            }
+            if (k2 > 0.0) {
+                a2 = mirror_local_mean(water_reflect.mirror2, true, world_pos);
+            }
+            let q1 = a1.a * k1;
+            let q2 = a2.a * k2;
+            if (q1 + q2 > 0.0) {
+                let mean_g = (a1.rgb * q1 + a2.rgb * q2) / (q1 + q2);
+                let share = w_m * saturate((q1 + q2) / max(k1 + k2, 1e-4));
+                pivot = mix(pivot, mirror_fog(mean_g, sky, fog), share);
+                known = mix(known, 1.0, share);
+            }
+        }
+#endif
+        grade_ab = grade_affine(sky_seen, pivot, known, grade_rho(surf.rho_a, 0.0));
     }
     var refl_l = floor_l;
     if (w_p > 0.0) {
@@ -8474,7 +8549,7 @@ fn stylised_water(
     }
     var refl_g = refl_l;
     if (graded) {
-        refl_g = max(grade_ab.w * refl_l + grade_ab.xyz, vec3<f32>(0.0));
+        refl_g = grade_apply(grade_ab, refl_l);
     }
     // **The probe lane draws its reflection and nothing else** (`probe_at.w`), ungraded. Not a
     // debug switch: it is what that lane is while the tier is being made correct, because a
@@ -8790,8 +8865,8 @@ fn stylised_water(
     } else if (view_id == WV_ALBEDO) {
         return vec4<f32>(optics.a_g, 1.0);
     } else if (view_id == WV_GRADE) {
-        let keep = select(1.0, grade_keep(grade_rho(surf.rho_a, occ.rho_c)), eye_above);
-        return vec4<f32>(surf.rho_a, occ.rho_c, keep, 1.0);
+        let keep = select(1.0, grade_keep(grade_rho(surf.rho_a, 0.0)), eye_above);
+        return vec4<f32>(surf.rho_a, probe_k, keep, 1.0);
     } else if (view_id == WV_REFL_UNGRADED) {
         return vec4<f32>(water_enc(refl_l), 1.0);
     } else if (view_id == WV_REFL_GRADED) {

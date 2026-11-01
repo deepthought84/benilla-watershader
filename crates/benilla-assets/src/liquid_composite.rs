@@ -264,9 +264,22 @@ fn grade_affine(
     (a, b)
 }
 
-/// The affine map applied: `max(a·r + b, 0)`.
+/// The affine map applied per channel: `max(a·r + b, 0)`, the law the grading's luma follows.
 fn grade_apply((a, b): (f32, V3), r: V3) -> V3 {
     zip(add(scale(r, a), b), [0.0; 3], f32::max)
+}
+
+/// The grading as the shader applies it, in luminance alone: the luma the map gives,
+/// `max(a·Y + Y(b), 0)`, at `r`'s hue; dimmer than `a·r` it is `r` scaled, brighter `a·r` lifted
+/// by a grey, so it never gains saturation and never takes the pivot's hue.
+fn grade_luma((a, b): (f32, V3), r: V3) -> V3 {
+    let y = dot(r, LUMA_709);
+    let y_g = (a * y + dot(b, LUMA_709)).max(0.0);
+    if y_g <= a * y {
+        scale(r, y_g / y.max(1e-6))
+    } else {
+        add(scale(r, a), [y_g - a * y; 3])
+    }
 }
 
 /// How the blender's arithmetic is modelled: plain f32, or a half-float target whose sources and
@@ -1044,7 +1057,7 @@ fn the_grading_counts_partial_cover_once() {
 /// the reflection is the dark underside and the floor the coarser read of it, and the grading
 /// pulls the one toward the other, never toward the sky, at any strength up to 2.4: with the
 /// floor a hair off the underside it reads no brighter than 1.05x itself, and with the floor
-/// clearly brighter or darker it lies between the two, channel by channel. The mutation it
+/// clearly brighter or darker its luma lies between the two. The mutation it
 /// guards against, a far stage about the open sky, reads more than 4x.
 #[test]
 fn the_grading_keeps_under_deck_water_dark() {
@@ -1054,14 +1067,16 @@ fn the_grading_keeps_under_deck_water_dark() {
     for floor in [close, [0.08, 0.075, 0.07], [0.01, 0.012, 0.008]] {
         for i in 0..=24 {
             let s = i as f32 * 0.1;
-            let graded = grade_apply(grade_affine(sky, floor, 1.0, rho, s, c_near, c_far), under);
-            for ch in 0..3 {
-                let (lo, hi) = (under[ch].min(floor[ch]), under[ch].max(floor[ch]));
-                assert!(
-                    graded[ch] >= lo - 1e-6 && graded[ch] <= hi + 1e-6,
-                    "s {s}, floor {floor:?}: {graded:?}"
-                );
-            }
+            let graded = grade_luma(grade_affine(sky, floor, 1.0, rho, s, c_near, c_far), under);
+            let (yu, yf, yg) = (
+                dot(under, LUMA_709),
+                dot(floor, LUMA_709),
+                dot(graded, LUMA_709),
+            );
+            assert!(
+                yg >= yu.min(yf) - 1e-6 && yg <= yu.max(yf) + 1e-6,
+                "s {s}, floor {floor:?}: {graded:?}"
+            );
             if floor == close {
                 assert!(
                     dot(graded, LUMA_709) <= 1.05 * dot(under, LUMA_709),
@@ -1074,8 +1089,57 @@ fn the_grading_keeps_under_deck_water_dark() {
     assert!(dot(sky_pivot, LUMA_709) > 4.0 * dot(under, LUMA_709));
 }
 
+/// HSV saturation of a linear colour as the display shows it (2.2 gamma), and its hue in linear
+/// light (degrees), where the grading adds its grey.
+fn hsv_sat_hue(c: V3) -> (f32, f32) {
+    let g = c.map(|x| x.max(0.0).powf(1.0 / 2.2));
+    let (mx, mn) = (g[0].max(g[1]).max(g[2]), g[0].min(g[1]).min(g[2]));
+    let s = if mx > 0.0 { (mx - mn) / mx } else { 0.0 };
+    let h = (3f32.sqrt() * (c[1] - c[2]))
+        .atan2(2.0 * c[0] - c[1] - c[2])
+        .to_degrees();
+    (s, h)
+}
+
+/// The grading moves a reflection's luminance only: its luma is the map's, `max(a·Y + Y(b), 0)`,
+/// and against any pivot, a blue sky's or a dark occluder's, it keeps the reflection's hue
+/// (within a degree in linear light where it has one) and never raises its saturation as the
+/// display shows it.
+/// Per channel the map took the pivot's colour: a grey pier under a blue sky reflected blue.
+#[test]
+fn the_grading_keeps_the_reflections_hue_and_saturation() {
+    let (c_near, c_far) = (0.2, 0.3);
+    let mut rng = Lcg(0x5EED_0013);
+    for _ in 0..20_000 {
+        let (r, sky, occ) = (rng.v3(0.0, 1.2), rng.v3(0.0, 1.2), rng.v3(0.0, 1.2));
+        let known = rng.unit();
+        let floor = add(scale(occ, known), scale(sky, 1.0 - known));
+        let (rho, s) = (rng.unit(), rng.range(0.0, 2.4));
+        let ab = grade_affine(sky, floor, known, rho, s, c_near, c_far);
+        let g = grade_luma(ab, r);
+        let want = (ab.0 * dot(r, LUMA_709) + dot(ab.1, LUMA_709)).max(0.0);
+        assert!(
+            (dot(g, LUMA_709) - want).abs() <= 1e-5,
+            "{r:?} -> {g:?}, luma {want}"
+        );
+        let ((s0, h0), (s1, h1)) = (hsv_sat_hue(r), hsv_sat_hue(g));
+        assert!(s1 <= s0 + 1e-4, "{r:?} -> {g:?}: saturation {s0} -> {s1}");
+        if s0 > 0.05 && s1 > 0.05 {
+            let dh = (h1 - h0 + 540.0).rem_euclid(360.0) - 180.0;
+            assert!(dh.abs() <= 1.0, "{r:?} -> {g:?}: hue {h0} -> {h1}");
+        }
+    }
+    let (pier, sky) = ([0.06, 0.06, 0.06], [0.35, 0.5, 0.8]);
+    let ab = grade_affine(sky, sky, 1.0, 0.5, 1.0, c_near, c_far);
+    assert!(hsv_sat_hue(grade_apply(ab, pier)).0 > 0.2);
+    assert!(hsv_sat_hue(grade_luma(ab, pier)).0 <= 1e-4);
+}
+
 /// The shader's grading is this mirror's, line for line, and wired as the composite takes it: the
-/// map built from the floor's verdict, applied to the tier chain only with the eye above and s
+/// map built from world sources alone (the mirrors' captures about the lookup and the probe's read
+/// where they cover the water, else the open sky; never the floor march's screen-depth verdict, so
+/// nothing on the screen moves it),
+/// applied in luma to the tier chain only with the eye above and s
 /// above 0, and the graded chain is what the surface layer reflects at the one Fresnel `f_surf`
 /// (fogged there only from below the surface, where no camera fogged it).
 #[test]
@@ -1090,12 +1154,21 @@ fn the_shaders_grading_is_the_mirrors() {
         "let b = (1.0 - k) * floor - (k_f - k) * (1.0 - known) * sky;",
         "return vec4<f32>(b, a);",
         "let graded = eye_above && water_reflect.look.grade.x > 0.0;",
-        "grade_ab = grade_affine(sky_seen, floor_l, occ.known, grade_rho(surf.rho_a, occ.rho_c));",
-        "refl_g = max(grade_ab.w * refl_l + grade_ab.xyz, vec3<f32>(0.0));",
+        "var pivot = mix(sky_seen, water_dec(probe_rgb), probe_k);",
+        "pivot = mix(pivot, mirror_fog(mean_g, sky, fog), share);",
+        "grade_ab = grade_affine(sky_seen, pivot, known, grade_rho(surf.rho_a, 0.0));",
+        "let y_g = max(ab.w * y + luma709(ab.xyz), 0.0);",
+        "if (y_g <= ab.w * y) {\n        return r * (y_g / max(y, 1e-6));\n    }",
+        "return ab.w * r + vec3<f32>(y_g - ab.w * y);",
+        "refl_g = grade_apply(grade_ab, refl_l);",
         "var refl_out = refl_g;",
         "refl_out = fog_diffuse(refl_g, fog.f, fog.g);",
         "var layer = layer_surface(\n        f_surf,\n        refl_out,\n",
     ] {
         assert!(wgsl.contains(line), "liquid.wgsl lost `{line}`");
     }
+    assert!(
+        !wgsl.contains("grade_affine(sky_seen, floor_l"),
+        "the grading pivots on the screen march's floor again"
+    );
 }
