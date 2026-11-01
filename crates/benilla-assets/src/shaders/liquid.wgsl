@@ -6181,6 +6181,12 @@ fn rf_fall_at(p: vec3<f32>, flow: vec2<f32>) -> RfFall {
         if (at.w <= 0.0) {
             continue;
         }
+        // Perf: a row whose pool level and sheet window both miss this height gives nothing (both
+        // weights below are exactly 0 there).
+        let dy = p.y - at.x;
+        if (abs(dy) >= 1.2 && (dy <= 0.1 || dy >= at.y + 1.2)) {
+            continue;
+        }
         let ab = foot.zw - foot.xy;
         let len = length(ab);
         let u = select(vec2<f32>(1.0, 0.0), ab / max(len, 1e-4), len > 1e-3);
@@ -6189,12 +6195,16 @@ fn rf_fall_at(p: vec3<f32>, flow: vec2<f32>) -> RfFall {
         let proj = dot(rel, u);
         let d = rel - u * clamp(proj, 0.0, len);
         let r = length(d);
-        let dir = select(nrm, d / max(r, 1e-4), r > 1e-3);
         let size = clamp(sqrt(at.y / RF_DROP_REF_YD), 0.6, 1.6);
         // `z`: how far the pool spreads against a fall's into open water (less where the curtain
         // comes down on the bank in front of it).
         let reach = RF_PLUNGE_REACH_YD * size * select(1.0, at.z, at.z > 0.0);
-        let dy = p.y - at.x;
+        // Perf: past the pool's, the outflow's and the sheet's reach the row gives nothing.
+        let run = 2.0 * at.y + 4.0;
+        if (r >= max(max(reach, run), RF_DRIFT_REACH * RF_PLUNGE_REACH_YD * size * (1.0 + RF_DRIFT_DOWN))) {
+            continue;
+        }
+        let dir = select(nrm, d / max(r, 1e-4), r > 1e-3);
         let level = at.w * (1.0 - smoothstep(0.4, 1.2, abs(dy)));
         // Past the line's ends the pool stops within a short taper, so no foam runs on along a
         // bank beside the curtain.
@@ -6225,7 +6235,6 @@ fn rf_fall_at(p: vec3<f32>, flow: vec2<f32>) -> RfFall {
         }
         // The sheet stands over the foot, within a run of its drop: no steeper than half a grade
         // reaches further.
-        let run = 2.0 * at.y + 4.0;
         let sheet = at.w * smoothstep(0.1, 0.5, dy)
             * (1.0 - smoothstep(at.y + 0.3, at.y + 1.2, dy))
             * (1.0 - smoothstep(0.8 * run, run, r));
@@ -6383,6 +6392,10 @@ fn rf_standing(xz: vec2<f32>, o: vec2<f32>, s: RfSite, px: f32) -> vec2<f32> {
 fn rf_obstacle(p: vec3<f32>, e1: vec2<f32>) -> f32 {
     var hit = 0.0;
     for (var k = 0; k < 2; k = k + 1) {
+        // The far probe counts 0.6 at most: past that the near one's answer stands.
+        if (k == 1 && hit >= 0.6) {
+            break;
+        }
         let d = select(2.8, 1.1, k == 0);
         let q = vec3<f32>(p.x - e1.x * d, p.y, p.z - e1.y * d);
         let clip = position_world_to_clip(q);
@@ -6452,14 +6465,18 @@ struct RfLace {
     stag: f32,
 };
 
-/// [`foam_noise`] without its drifts: the rafts' lace rides the raft, so a raft's edge (the
+/// The rafts' lace is [`foam_noise`] without its drifts: it rides the raft, so a raft's edge (the
 /// lace's cut) holds its shape while it is carried instead of boiling as the shore's pattern
-/// drifts under it. The warp tap's height is the raft's birth field, at no extra read.
-fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> RfLace {
+/// drifts under it. Its warp tap: `rg` warp the two fine taps ([`rf_lace_fine`]), and its height
+/// `b` is the raft's birth field, at no extra read.
+fn rf_lace_warp(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+    return textureSampleGrad(ripples, ripples_samp, p * 0.031, ddx * 0.031, ddy * 0.031);
+}
+
+/// The lace's two fine taps under the warp `warp` ([`rf_lace_warp`]): its value and footprint.
+fn rf_lace_fine(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>, warp: vec2<f32>) -> vec2<f32> {
     let rot = vec2<f32>(0.8305, 0.5570);
     let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
-    let wt = textureSampleGrad(ripples, ripples_samp, p * 0.031, ddx * 0.031, ddy * 0.031);
-    let warp = wt.rg * 2.0 - 1.0;
     let a_dx = ddx * 0.83;
     let a_dy = ddy * 0.83;
     let a = textureSampleGrad(ripples, ripples_samp, p * 0.83 + warp * 0.35, a_dx, a_dy);
@@ -6469,7 +6486,7 @@ fn rf_lace_noise(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> RfLace {
     let ga = (a.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
     let gb = (b.rg * 2.0 - 1.0) * (RIPPLE_TEXELS * 0.5);
     let fw = (abs(dot(ga, a_dx)) + abs(dot(ga, a_dy))) * 0.55 + (abs(dot(gb, b_dx)) + abs(dot(gb, b_dy))) * 0.45;
-    return RfLace(a.b * 0.55 + b.b * 0.45, fw, (wt.b - 0.5) / RF_B_SD);
+    return vec2<f32>(a.b * 0.55 + b.b * 0.45, fw);
 }
 
 /// [`sc_bubble_mask`] for a raft: its lace's interior is thicker (three quarters of the edge's white,
@@ -6506,24 +6523,17 @@ fn rf_bin_frame(bin: f32, k: vec2<f32>) -> mat2x2<f32> {
     return rf_rows(vec2<f32>(-along.y, along.x) * k.x, along * k.y);
 }
 
-/// One bearing's raft body and lace at the carried point `q`.
-struct RfRaftRead {
-    n: RfNoise,
-    lace: RfLace,
-};
-
-fn rf_raft_read(
+/// One bearing's raft body at the carried point `q`.
+fn rf_raft_body(
     q: vec2<f32>,
     bin: f32,
     h: vec2<f32>,
     o: vec2<f32>,
     ddx: vec2<f32>,
     ddy: vec2<f32>,
-) -> RfRaftRead {
+) -> RfNoise {
     let j = rf_bin_frame(bin, RF_RAFT_ANISO / (4.0 * RF_RAFT_YD));
-    let n = rf_noise(rf_uv(q, j, o) + h + vec2<f32>(0.29, 0.53) * bin, j, ddx, ddy);
-    let l = rf_bin_frame(bin, RF_LACE_ANISO * RF_LACE_SCALE);
-    return RfRaftRead(n, rf_lace_noise(l * (q + h * 37.0), l * ddx, l * ddy));
+    return rf_noise(rf_uv(q, j, o) + h + vec2<f32>(0.29, 0.53) * bin, j, ddx, ddy);
 }
 
 /// One set `k` (0 or 1, half a life apart) of whitewater rafts at `xz` (round 4). The set's frame
@@ -6556,20 +6566,27 @@ fn rf_raft(
     // The two bearings' reads, blended as [`rf_mix2`] blends, the spread kept; over the middle of a
     // bin one bearing is read alone (explicit gradients: legal off uniform control flow). One loop
     // body, so the reads are compiled once.
+    // Perf: the body and the lace's warp tap (the birth field) first; the lace's two fine taps only
+    // where a raft shows them (below).
     var n = RfNoise(0.0, vec2<f32>(0.0));
-    var pat = RfLace(0.0, 0.0, 0.0);
+    var stag = 0.0;
+    var warp = array<vec2<f32>, 2>(vec2<f32>(0.0), vec2<f32>(0.0));
     for (var j = 0; j < 2; j = j + 1) {
         let w = select(1.0 - bins.w0, bins.w0, j == 0);
         if (w <= 0.0) {
             continue;
         }
-        let r = rf_raft_read(q, select(bins.b1, bins.b0, j == 0), h, o, ddx, ddy);
-        n = RfNoise(n.n + r.n.n * w, n.g + r.n.g * w);
-        pat = RfLace(pat.v + (r.lace.v - 0.5) * w, pat.fw + r.lace.fw * w, pat.stag + r.lace.stag * w);
+        let bin = select(bins.b1, bins.b0, j == 0);
+        let r = rf_raft_body(q, bin, h, o, ddx, ddy);
+        n = RfNoise(n.n + r.n * w, n.g + r.g * w);
+        let l = rf_bin_frame(bin, RF_LACE_ANISO * RF_LACE_SCALE);
+        let wt = rf_lace_warp(l * (q + h * 37.0), l * ddx, l * ddy);
+        warp[j] = wt.rg * 2.0 - 1.0;
+        stag = stag + (wt.b - 0.5) / RF_B_SD * w;
     }
     let kw = inverseSqrt(max(bins.w0 * bins.w0 + (1.0 - bins.w0) * (1.0 - bins.w0), 1e-4));
     n = RfNoise(n.n * kw, n.g * kw);
-    pat = RfLace(0.5 + pat.v * kw, pat.fw * kw, pat.stag * kw);
+    var pat = RfLace(0.5, 0.0, stag * kw);
     let born = RF_RAFT_BIRTH * saturate(0.5 + 0.5 * pat.stag);
     let u = saturate((p - born) / RF_RAFT_SPAN);
     // The lumps' share of the drive (`ride` of the cover), carried with the raft on its birth field.
@@ -6583,16 +6600,36 @@ fn rf_raft(
     // The core lies a level deeper: inside it the lace is dense and white, on the rim between it is
     // torn, thinner and (in [`rf_river`]) cooler, so a raft has a body instead of a decal's flat cream.
     let core = smoothstep(lev + 0.1, lev + 0.9, n.n);
-    let pv = saturate((pat.v - 0.5) * 3.5 + 0.5);
-    // The lace opens as the raft ages, but its unresolved mean stays white.
-    let open = mix(0.86, 0.74, smoothstep(0.55, 1.0, u));
-    // Its outer edge feathers over the body's own ramp, and the lace's thick parts mottle the core.
-    let thick = smoothstep(lev - 0.1, lev + 0.35, n.n) * mix(0.65, 1.0, core)
-        * mix(0.82, 1.0, smoothstep(0.35, 0.85, pv));
-    var foam = rf_lace_mask(min(body * 1.1, mix(0.6, open, core)), pv, pat.fw * 3.5) * thick;
     // Unresolved, lace is mostly water: its mean, not a veil over the mirror.
+    let far = smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px);
+    var foam = 0.0;
+    // Where there is no body the lace's cut leaves nothing, and far out only its mean shows: the
+    // lace's fine taps are read where they show.
+    if (body > 0.0 && far < 1.0) {
+        var lv = 0.0;
+        var lfw = 0.0;
+        for (var j = 0; j < 2; j = j + 1) {
+            let w = select(1.0 - bins.w0, bins.w0, j == 0);
+            if (w <= 0.0) {
+                continue;
+            }
+            let l = rf_bin_frame(select(bins.b1, bins.b0, j == 0), RF_LACE_ANISO * RF_LACE_SCALE);
+            let f = rf_lace_fine(l * (q + h * 37.0), l * ddx, l * ddy, warp[j]);
+            lv = lv + (f.x - 0.5) * w;
+            lfw = lfw + f.y * w;
+        }
+        pat = RfLace(0.5 + lv * kw, lfw * kw, pat.stag);
+        let pv = saturate((pat.v - 0.5) * 3.5 + 0.5);
+        // The lace opens as the raft ages, but its unresolved mean stays white.
+        let open = mix(0.86, 0.74, smoothstep(0.55, 1.0, u));
+        // Its outer edge feathers over the body's own ramp, and the lace's thick parts mottle the
+        // core.
+        let thick = smoothstep(lev - 0.1, lev + 0.35, n.n) * mix(0.65, 1.0, core)
+            * mix(0.82, 1.0, smoothstep(0.35, 0.85, pv));
+        foam = rf_lace_mask(min(body * 1.1, mix(0.6, open, core)), pv, pat.fw * 3.5) * thick;
+    }
     let share = gate / (1.0 + exp(1.702 * lev));
-    foam = mix(foam, share * 0.5, smoothstep(0.25 * RF_RAFT_YD, 0.7 * RF_RAFT_YD, px));
+    foam = mix(foam, share * 0.5, far);
     return RfRaft(foam, n.g, body * (1.0 - body) * 4.0, core * body);
 }
 
@@ -6637,7 +6674,11 @@ fn rf_river(s: RfSite, i: RfIn, o: vec2<f32>, px: f32, sun: vec3<f32>) -> RfPart
     var contact = 0.0;
 #ifndef WATER_TIER_LOW
     let off_bank = smoothstep(1.0, 2.0, i.to_shore);
-    tail = rf_obstacle(i.world_pos, s.e1) * smoothstep(0.9, 1.8, s.speed) * off_bank;
+    // Perf: the probes' two depth reads only where a tail can show.
+    let tail_k = smoothstep(0.9, 1.8, s.speed) * off_bank;
+    if (tail_k > 0.0) {
+        tail = rf_obstacle(i.world_pos, s.e1) * tail_k;
+    }
     contact = (1.0 - smoothstep(0.03, 0.14, i.depth)) * i.bed_known * off_bank
         * smoothstep(1.0, 2.5, s.speed);
 #endif
