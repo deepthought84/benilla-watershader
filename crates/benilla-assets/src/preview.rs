@@ -69,11 +69,12 @@ pub const WINDOW: u32 = 1 << 11;
 pub const TINT: u32 = 1 << 12;
 /// UW-4: light shafts under water.
 pub const SHAFTS: u32 = 1 << 13;
-/// UW-4: caustics on the bed under water.
+/// Retired: one caustic net lights the bed from above and from below, under [`CAUSTICS`]. The bit
+/// and its name stay so the mask keeps its layout; it switches nothing.
 pub const UW_CAUSTICS: u32 = 1 << 14;
 /// UW-3: the waterline split and meniscus at the near plane.
 pub const WATERLINE: u32 = 1 << 15;
-/// BODY-5: the caustic net on the bed seen from above.
+/// BODY-5, UW-4: the caustic net on the bed, seen from above and from below under water.
 pub const CAUSTICS: u32 = 1 << 16;
 /// WX-1: rain rings, rain's roughness, snow's stillness.
 pub const RAIN: u32 = 1 << 17;

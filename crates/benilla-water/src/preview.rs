@@ -67,7 +67,7 @@ fn wind_at(secs: f64, storm: f32) -> (Vec2, f32) {
 }
 
 /// Fill the rows from the lever, the clock and the weather.
-fn drive_preview(
+pub(super) fn drive_preview(
     clock: Res<WaterClock>,
     weather: Option<Res<WeatherState>>,
     glint: Res<benilla_world::sun::SunGlintVisibility>,

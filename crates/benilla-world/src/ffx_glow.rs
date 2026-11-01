@@ -293,13 +293,15 @@ fn sync_wave(
 /// The Improved Water preview's combine lanes: the eye-below rows (`liquid.wgsl`'s `UnderLanes`,
 /// 16 rows, `fs_combine_wave_improved`), then the veil's 16 (round 3, `fs_combine_veil`: the mist
 /// over the water and the falls' spray over everything in the frame), and the opaque world's
-/// linear depth, written by the water plugin. While `lanes[18]` (`surface.z`, the eye in water with
+/// linear depth and the lighting sun's terrain shadow torus (`benilla_water::mcsh`, the caustic
+/// net's shadow from below), written by the water plugin. While `lanes[18]` (`surface.z`, the eye in water with
 /// the preview's `tint`) is 0 or the depth is missing, the reference warp runs; while `lanes[64]`
 /// (the veil's armed flag) is 0 or the depth is missing, the dry frame takes the plain combine.
 #[derive(Resource, Clone, ExtractResource)]
 pub struct FfxUnderwater {
     pub lanes: [f32; 128],
     pub depth: Option<Handle<Image>>,
+    pub shadow: Option<Handle<Image>>,
 }
 
 impl Default for FfxUnderwater {
@@ -307,6 +309,7 @@ impl Default for FfxUnderwater {
         Self {
             lanes: [0.0; 128],
             depth: None,
+            shadow: None,
         }
     }
 }
@@ -396,7 +399,8 @@ struct FfxGlowLabel;
 struct FfxGlowPipelines {
     layout_filter: BindGroupLayoutDescriptor,
     layout_combine: BindGroupLayoutDescriptor,
-    /// The improved underwater combine's: the combine's six, the eye-below lanes and the depth.
+    /// The improved underwater combine's: the combine's six, the eye-below lanes, the depth and
+    /// the terrain shadow at 9.
     layout_combine_uw: BindGroupLayoutDescriptor,
     /// The water downsample's: the filter's two and the glow accumulator at 8.
     layout_filter_water: BindGroupLayoutDescriptor,
@@ -534,17 +538,31 @@ fn init_pipelines(
     );
     let layout_combine_uw = BindGroupLayoutDescriptor::new(
         "ffx_glow_combine_uw_layout",
-        &BindGroupLayoutEntries::sequential(
+        &BindGroupLayoutEntries::with_indices(
             ShaderStages::FRAGMENT,
             (
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                sampler(SamplerBindingType::Filtering),
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
-                texture_2d(TextureSampleType::Float { filterable: true }),
-                sampler(SamplerBindingType::Filtering),
-                uniform_buffer_sized(false, Some(std::num::NonZero::new(512).unwrap())),
-                texture_2d(TextureSampleType::Float { filterable: false }),
+                (0, texture_2d(TextureSampleType::Float { filterable: true })),
+                (1, sampler(SamplerBindingType::Filtering)),
+                (2, texture_2d(TextureSampleType::Float { filterable: true })),
+                (
+                    3,
+                    uniform_buffer_sized(false, Some(std::num::NonZero::new(32).unwrap())),
+                ),
+                (4, texture_2d(TextureSampleType::Float { filterable: true })),
+                (5, sampler(SamplerBindingType::Filtering)),
+                (
+                    6,
+                    uniform_buffer_sized(false, Some(std::num::NonZero::new(512).unwrap())),
+                ),
+                (
+                    7,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
+                // Read with loads; the depth stands in while the torus is not resident.
+                (
+                    9,
+                    texture_2d(TextureSampleType::Float { filterable: false }),
+                ),
             ),
         ),
     );
@@ -980,7 +998,12 @@ impl ViewNode for FfxGlowNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let (uniform, wave) = live_combine(world, glow);
         let (uniform, preview) = preview_combine(world, glow, wave, uniform);
-        let (uw, uw_depth, water_glow) = (preview.uw, preview.uw_depth, preview.water_glow);
+        let (uw, uw_depth, uw_shadow, water_glow) = (
+            preview.uw,
+            preview.uw_depth,
+            preview.uw_shadow,
+            preview.water_glow,
+        );
         let improved = uw_depth.is_some();
         let water = water_glow.is_some();
         let (Some(downsample), Some(gauss_h), Some(gauss_v)) = (
@@ -1103,15 +1126,16 @@ impl ViewNode for FfxGlowNode {
                 render_device.create_bind_group(
                     "ffx_glow_combine_uw",
                     &layout,
-                    &BindGroupEntries::sequential((
-                        out.source,
-                        &pipelines.sampler,
-                        &textures.quarter_a.default_view,
-                        textures.gain_buf.as_entire_binding(),
-                        &pipelines.wave_view,
-                        &pipelines.wave_sampler,
-                        textures.uw_buf.as_entire_binding(),
-                        depth,
+                    &BindGroupEntries::with_indices((
+                        (0, out.source),
+                        (1, &pipelines.sampler),
+                        (2, &textures.quarter_a.default_view),
+                        (3, textures.gain_buf.as_entire_binding()),
+                        (4, &pipelines.wave_view),
+                        (5, &pipelines.wave_sampler),
+                        (6, textures.uw_buf.as_entire_binding()),
+                        (7, depth),
+                        (9, uw_shadow.as_ref().unwrap_or(depth)),
                     )),
                 )
             }
@@ -1159,6 +1183,8 @@ struct PreviewCombine<'w> {
     /// The underwater combine's lanes and the linear depth's view, while armed.
     uw: Option<&'w FfxUnderwater>,
     uw_depth: Option<TextureView>,
+    /// The terrain shadow torus's view, while resident.
+    uw_shadow: Option<TextureView>,
     /// The water glow's accumulator, weight and cap, while armed.
     water_glow: Option<(Buffer, f32, f32)>,
 }
@@ -1179,6 +1205,10 @@ fn preview_combine<'w>(
         .and_then(|u| u.depth.as_ref())
         .and_then(|h| world.resource::<RenderAssets<GpuImage>>().get(h))
         .map(|g| g.texture_view.clone());
+    let uw_shadow = uw
+        .and_then(|u| u.shadow.as_ref())
+        .and_then(|h| world.resource::<RenderAssets<GpuImage>>().get(h))
+        .map(|g| g.texture_view.clone());
     let water_glow = world
         .get_resource::<FfxWaterGlow>()
         .filter(|_| player)
@@ -1192,6 +1222,7 @@ fn preview_combine<'w>(
         PreviewCombine {
             uw,
             uw_depth,
+            uw_shadow,
             water_glow,
         },
     )
@@ -1341,15 +1372,16 @@ impl ViewNode for FfxTransparent2dNode {
                         render_context.render_device().create_bind_group(
                             "ffx_glow_combine_uw",
                             &pipeline_cache.get_bind_group_layout(&pipelines.layout_combine_uw),
-                            &BindGroupEntries::sequential((
-                                world_target.main_texture_view(),
-                                &pipelines.sampler,
-                                &textures.quarter_a.default_view,
-                                textures.gain_buf.as_entire_binding(),
-                                &pipelines.wave_view,
-                                &pipelines.wave_sampler,
-                                textures.uw_buf.as_entire_binding(),
-                                depth,
+                            &BindGroupEntries::with_indices((
+                                (0, world_target.main_texture_view()),
+                                (1, &pipelines.sampler),
+                                (2, &textures.quarter_a.default_view),
+                                (3, textures.gain_buf.as_entire_binding()),
+                                (4, &pipelines.wave_view),
+                                (5, &pipelines.wave_sampler),
+                                (6, textures.uw_buf.as_entire_binding()),
+                                (7, depth),
+                                (9, preview.uw_shadow.as_ref().unwrap_or(depth)),
                             )),
                         )
                     }

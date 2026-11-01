@@ -14,12 +14,13 @@ use benilla_assets::materials::WowModelMaterial;
 use benilla_assets::preview as lever;
 use benilla_world::ffx_glow::FfxUnderwater;
 use benilla_world::liquid::{
-    EyeLiquid, LiquidClaim, WaterPassImages, LOOK_BODY, PREVIEW_LANES, PV_FALLS, PV_UNDER, PV_WAKE,
-    PV_WEATHER, PV_WIND,
+    EyeLiquid, LiquidClaim, WaterPassImages, LOOK_BODY, PREVIEW_LANES, PV_CLOCKS, PV_DRIFT,
+    PV_FALLS, PV_GAINS, PV_UNDER, PV_WAKE, PV_WEATHER, PV_WIND,
 };
 use benilla_world::water_fx::params::wave_push;
 
 use super::clock::{cycle, WaterClock};
+use super::mcsh::{WaterShadow, WaterShadowWindow};
 use super::preview::PreviewLanes;
 use super::reflect::WaterReflectData;
 use super::{WaterChunkInfo, WaterIndex, WaterQuality, WaterStyle};
@@ -48,7 +49,8 @@ fn wu_bits() -> u32 {
         (lever::RINGS, WU_RINGS),
         (lever::WINDOW, WU_WINDOW),
         (lever::TINT, WU_TINT),
-        (lever::UW_CAUSTICS, WU_CAUSTICS),
+        // One caustic net, seen from above and from below.
+        (lever::CAUSTICS, WU_CAUSTICS),
         (lever::SHAFTS, WU_SHAFTS),
         (lever::WATERLINE, WU_WATERLINE),
     ];
@@ -364,11 +366,22 @@ fn drive_under_lanes(
     dry: Option<Res<benilla_world::lighting::DrySky>>,
     data: Option<Res<WaterReflectData>>,
     pass: Option<Res<WaterPassImages>>,
+    shadow: (Res<WaterShadow>, Res<WaterShadowWindow>),
     mut lanes: ResMut<PreviewLanes>,
     ffx: Option<ResMut<FfxUnderwater>>,
 ) {
     let dry = dry.map(|d| *d).unwrap_or_default();
     let mut u = [0.0f32; 64];
+    // The caustic net from below rides the drift the water above lights its bed with: the 3.6-yd
+    // ripple octave's (the wind's under `waves`, today's otherwise), in the camera rows' spare
+    // lanes; its clock rides the refracted sun's row.
+    let drift = if lever::on(lever::WAVES) {
+        let d = at(PV_DRIFT) + 6;
+        [lanes.0[d], lanes.0[d + 1]]
+    } else {
+        let c = clock.lanes();
+        [c[6], c[7]]
+    };
     let mut row = |r: usize, v: [f32; 4]| u[4 * r..4 * r + 4].copy_from_slice(&v);
     if let Ok((t, camera, Projection::Perspective(p))) = cam.single() {
         let pos = t.translation();
@@ -378,8 +391,11 @@ fn drive_under_lanes(
         let height = camera.physical_target_size().map_or(900.0, |s| s.y as f32);
         row(0, [pos.x, pos.y, pos.z, p.near]);
         row(1, [fwd.x, fwd.y, fwd.z, 2.0 * tan_v / height.max(1.0)]);
-        row(2, [right.x * tan_h, right.y * tan_h, right.z * tan_h, 0.0]);
-        row(3, [up.x * tan_v, up.y * tan_v, up.z * tan_v, 0.0]);
+        row(
+            2,
+            [right.x * tan_h, right.y * tan_h, right.z * tan_h, drift[0]],
+        );
+        row(3, [up.x * tan_v, up.y * tan_v, up.z * tan_v, drift[1]]);
     }
     let sub = eye.submersion();
     let in_water = sub.is_water() && style.is_stylised();
@@ -416,9 +432,16 @@ fn drive_under_lanes(
             UW_INSCATTER_K / dry.wet_fog_end.max(8.0),
         ],
     );
-    let c = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
-    row(6, c(dry.wet_fog_color));
-    row(7, c(dry.fog_color));
+    let caustics = if lever::on(lever::CAUSTICS) {
+        lanes.0[at(PV_GAINS)]
+    } else {
+        0.0
+    };
+    // The kind's turbidity and the net's gain ride the fog rows' spare lanes.
+    let wet = dry.wet_fog_color;
+    row(6, [wet[0], wet[1], wet[2], sig[3]]);
+    let fog = dry.fog_color;
+    row(7, [fog[0], fog[1], fog[2], caustics]);
     row(
         8,
         [
@@ -428,16 +451,21 @@ fn drive_under_lanes(
             dry.fog_end,
         ],
     );
-    row(9, c(dry.sky_zenith));
-    row(10, c(dry.sky_horizon));
-    row(11, c(dry.sun_color));
+    // The sun's direct share's inputs ride the sky and sun rows' spare lanes: the share the sun
+    // keeps in shadow, the open sky's luminance and the sun's on the body (`nwg_sun_share`).
+    let (e_sky, e_sun) = (body(2), body(3));
+    let luma = |v: [f32; 4]| 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    let (zen, hor, sun) = (dry.sky_zenith, dry.sky_horizon, dry.sun_color);
+    row(9, [zen[0], zen[1], zen[2], e_sky[3]]);
+    row(10, [hor[0], hor[1], hor[2], luma(e_sky)]);
+    row(11, [sun[0], sun[1], sun[2], luma(e_sun)]);
     // The lighting sun refracted into the water, pointing up toward it.
     let to_sun = -lighting.sun_dir.normalize_or(Vec3::NEG_Y);
     let xz = Vec2::new(to_sun.x, to_sun.z) / 1.333;
     let y = (1.0 - xz.length_squared()).max(0.0).sqrt();
-    row(12, [xz.x, y, xz.y, 0.0]);
-    let (e_sky, e_sun, e_sun_foam) = (body(2), body(3), body(9));
-    let luma = |v: [f32; 4]| 0.2126 * v[0] + 0.7152 * v[1] + 0.0722 * v[2];
+    // Its w: the caustic net's clock, the weather clock's phase (`preview.clocks.y`).
+    row(12, [xz.x, y, xz.y, lanes.0[at(PV_CLOCKS) + 1]]);
+    let e_sun_foam = body(9);
     let share = luma(e_sun) / (luma(e_sun) + luma(e_sky)).max(1e-4);
     row(13, [e_sun_foam[0], e_sun_foam[1], e_sun_foam[2], share]);
     let tier = match *quality {
@@ -483,6 +511,7 @@ fn drive_under_lanes(
             flag(veil_on && falls_on),
         ],
     );
+    row(15, shadow.1.lanes());
     let base = at(PV_UNDER);
     lanes.0[base..base + 64].copy_from_slice(&u);
     let mut v = [0.0f32; 64];
@@ -509,6 +538,8 @@ fn drive_under_lanes(
         } else {
             None
         };
+        // The terrain shadow the caustic net from below is cast under.
+        ffx.shadow = (u[18] > 0.5).then(|| shadow.0.image());
     }
 }
 
@@ -1361,7 +1392,10 @@ pub(super) fn register(app: &mut App) {
             drive_wake_lanes,
             drive_fall_lanes,
             // The veil copies the falls' rows this frame's scan wrote.
-            drive_under_lanes.after(drive_fall_lanes),
+            // The caustic net's clock and drift are the preview rows' of this frame.
+            drive_under_lanes
+                .after(drive_fall_lanes)
+                .after(super::preview::drive_preview),
         )
             .before(super::reflect::drive_reflection),
     );

@@ -226,7 +226,7 @@ struct UnderLanes {
     // xyz the view's forward axis, w the angle one output pixel subtends (radians).
     cam_fwd: vec4<f32>,
     // xyz the right axis times tan(half the horizontal field); then the up axis times tan(half the
-    // vertical field); w spare on both.
+    // vertical field); w the caustic net's octave drift (tiles), x then y.
     cam_right: vec4<f32>,
     cam_up: vec4<f32>,
     // x the water surface's world Y over the eye, y the eye's depth under it, z 1 while the eye is
@@ -234,24 +234,29 @@ struct UnderLanes {
     surface: vec4<f32>,
     // rgb the absorption per yard, w the in-scatter's extinction per yard.
     sigma: vec4<f32>,
-    // rgb the swapped (underwater) fog colour, then the dry fog colour, gamma; w spare.
+    // rgb the swapped (underwater) fog colour, then the dry fog colour, gamma; w the kind's
+    // turbidity per yard, then the caustic net's gain (0 with `caustics` off).
     fog_wet: vec4<f32>,
     fog_dry: vec4<f32>,
     // x/y the swapped fog's start and end, z/w the dry fog's, yards.
     fog_span: vec4<f32>,
-    // rgb the dry dome's zenith and horizon stops, gamma; w spare.
+    // rgb the dry dome's zenith and horizon stops, gamma; w the sun's share kept in shadow
+    // (`look.body.e_sky.w`), then the open sky's luminance on the body.
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,
-    // rgb the dry sun's colour (Light.dbc row 9), gamma; w spare.
+    // rgb the dry sun's colour (Light.dbc row 9), gamma; w the lighting sun's luminance on the body.
     sun_dry: vec4<f32>,
-    // xyz the lighting sun refracted into the water, unit, pointing up toward it; w spare.
+    // xyz the lighting sun refracted into the water, unit, pointing up toward it; w the caustic
+    // net's clock phase (`preview.clocks.y`).
     sun_refr: vec4<f32>,
     // rgb the lighting sun's irradiance, linear; w its share of the light under the surface (0 at
     // night or under cloud).
     sun_e: vec4<f32>,
-    // x the underwater clock in seconds reduced by `UW_CLOCK_PERIOD`, y the quality tier; zw spare.
+    // x the underwater clock in seconds reduced by `UW_CLOCK_PERIOD`, y the quality tier, z the
+    // veil's mist and w its falls on (above the water).
     clock: vec4<f32>,
-    spare: vec4<f32>,
+    // The terrain shadow's window (`look.body.shadow`): centre XZ, half extent, valid.
+    shadow: vec4<f32>,
 };
 
 // ---- wu law: begin ----------------------------------------------------------------------------
@@ -363,14 +368,8 @@ const WU_SHALLOW_GAIN: f32 = 1.9;
 const WU_SHALLOW_LIFT: f32 = 0.01;
 /// The in-scatter's darkening with depth under the surface, per yard.
 const WU_DEPTH_DIM: f32 = 0.02;
-/// The shafts' and the caustics' strength, the caustics' fade depth (yards) and their cell rates
-/// (cells a yard: 56 and 80 to the 64-yard tile).
+/// The shafts' strength.
 const WU_SHAFT_GAIN: f32 = 1.6;
-const WU_CAUSTIC_GAIN: f32 = 1.5;
-const WU_CAUSTIC_DEPTH: f32 = 14.0;
-const WU_CAUSTIC_F1: f32 = 0.875;
-const WU_CAUSTIC_F2: f32 = 1.25;
-const WU_CAUSTIC_MEAN: f32 = 0.22;
 /// The light curtains: three plane waves on the 64-yard lattice (2π/64 × (11, 4), (−6, 10),
 /// (3, −12), about 5.4 yd apart), their phase turns per clock period, and the fundamentals' and
 /// harmonics' amplitudes.
@@ -1011,17 +1010,6 @@ fn wu_inscatter(
     return c * exp(-WU_DEPTH_DIM * max(depth, 0.0));
 }
 
-/// The light-curtain field at the surface point `q`: three plane waves on the 64-yard lattice and
-/// their first harmonics, in about [−1, 1]; `phase` is the underwater clock in radians of its
-/// period.
-fn wu_shaft_field(q: vec2<f32>, phase: f32) -> f32 {
-    let a0 = dot(WU_SHAFT_K0, q) + WU_SHAFT_M0 * phase;
-    let a1 = dot(WU_SHAFT_K1, q) + WU_SHAFT_M1 * phase;
-    let a2 = dot(WU_SHAFT_K2, q) + WU_SHAFT_M2 * phase;
-    return WU_SHAFT_A * (cos(a0) + cos(a1) + cos(a2))
-        + WU_SHAFT_H * (cos(2.0 * a0) + cos(2.0 * a1) + cos(2.0 * a2));
-}
-
 /// ∫ e^{−bt}·cos(α + ωt) dt over [t0, t1], in closed form; `e0`, `e1` are e^{−b·t0} and e^{−b·t1}.
 fn wu_sheet(alpha: f32, omega: f32, b: f32, t0: f32, t1: f32, e0: f32, e1: f32) -> f32 {
     let nx = e1 * cos(omega * t1) - e0 * cos(omega * t0);
@@ -1154,21 +1142,171 @@ fn wu_shaft_columns(
     return acc;
 }
 
-/// The caustic web on a surface under `depth` yards of water whose sunlight entered at `q` (world
-/// XZ): two layers of cell borders whose points circle at whole turns of the clock, sharpest in the
-/// first yards, blue focusing a little deeper; over its mean, so 1 is plain light. Faded to 1 where
-/// the footprint `fp` (yards) cannot hold a cell.
-fn wu_caustic(q: vec2<f32>, depth: f32, fp: f32, phase: f32) -> vec3<f32> {
-    let sharp = mix(7.0, 3.0, smoothstep(0.3, 3.0, depth));
-    let rq = vec2<f32>(0.4536 * q.x - 0.8912 * q.y, 0.8912 * q.x + 0.4536 * q.y);
-    let w1 = wu_worley(q * WU_CAUSTIC_F1, phase * 48.0);
-    let w2 = wu_worley(rq * WU_CAUSTIC_F2 + vec2<f32>(3.1), -phase * 37.0);
-    let sh = vec3<f32>(0.96, 1.0, 1.05) * sharp;
-    let c1 = exp(-(w1.y - w1.x) * sh);
-    let c2 = exp(-(w2.y - w2.x) * sh);
-    let c = (c1 * c2 * 2.2 + (c1 + c2) * 0.28) / WU_CAUSTIC_MEAN;
-    let keep = 1.0 - smoothstep(0.12, 0.35, fp * WU_CAUSTIC_F2);
-    return mix(vec3<f32>(1.0), vec3<f32>(0.4) + 0.6 * c, keep);
+// ---- one caustic net, seen from above and from below (BODY-5, UW-4) ------------------------------
+//
+// The bed is lit through the surface's lenses: a ray of the lighting sun entering at `x` lands at
+// `x + D·κ·∇h(x)` on a bed `D` deep along the refracted ray, κ = 1 − 1/n, so the bed's irradiance is
+// the sun's over |det(I + D·κ·H)|, H the surface's Hessian. The lenses are two sets of six ripples,
+// 1.0-0.3 yd and 3.6-1.6 yd, laid on the visible surface's 3.6-yd ripple octave (`water_surface`'s
+// fourth, its lattice turn and tile), each a whole number of cycles a tile on spread headings, so
+// the net rides that octave's drift and the current with it, and the octave's wrap moves it by
+// whole periods: the net moves with the water the eye sees. Each ripple also runs at a whole number
+// of cycles in the preview's weather clock. The fine set's curvatures are scaled so its net is
+// sharpest at `WU_CAU_FOCUS_YD` (a soft mottle in the first hand's breadth, bright lines at a
+// yard), the coarse set's `WU_CAU_COARSE` times deeper, and the fine net hands over to the coarse
+// one as the bed falls away; neither is drawn past its sharpest, where the net would break into
+// speckle. The intensity is regularised (`WU_CAU_EPS`) and divided by its mean at that depth
+// (`wu_caustic_mean`), so the bed keeps its energy and only the sun's direct share is
+// redistributed. The water above (`nwg_caustic_gain`) and the improved underwater combine
+// (`wu_post`) both light the bed with it; only what the eye looks through differs.
+
+/// The octave the net rides: its lattice turn and its tile, yards (`water_surface`'s `rot3`, `f3`).
+const WU_CAU_ROT: vec2<f32> = vec2<f32>(-0.2924, 0.9563);
+const WU_CAU_TILE_YD: f32 = 3.6;
+/// The path along the refracted sun, yards, at which a curvature of one focuses: the net is
+/// sharpest at about 1.25 of it.
+const WU_CAU_FOCUS_YD: f32 = 0.72;
+/// The intensity's regularisation, 1/sqrt(det² + ε²): the brightest line is 1/ε over the mean.
+const WU_CAU_EPS: f32 = 0.15;
+/// The path over which the net's contrast fades out, yards.
+const WU_CAU_FADE_YD: vec2<f32> = vec2<f32>(6.0, 20.0);
+/// The deepest focus ratio either set's net is drawn at: past it the net would break into speckle.
+const WU_CAU_RHO_MAX: f32 = 1.6;
+/// Each ripple's curvature per unit focus.
+const WU_CAU_CURV: f32 = 0.57735;
+/// How much deeper the coarse set focuses than the fine one (its ripples' length over theirs).
+const WU_CAU_COARSE: f32 = 3.3;
+/// The footprint over which the net resolves to its mean, yards.
+const WU_CAU_FP_YD: vec2<f32> = vec2<f32>(0.08, 0.35);
+/// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
+const WU_CAU_TURB: f32 = 0.6;
+/// The eye's adaptation under water: the bed lies behind yards of in-scatter that flatten it, and
+/// the eye adapted to the dim body reads its light's contrast this much stronger. Only the view
+/// from below takes it.
+const WU_CAU_UNDER_GAIN: f32 = 2.5;
+/// The flow map's restart period, seconds (`FLOW_PERIOD_S`).
+const WU_CAU_FLOW_PERIOD_S: f32 = 1.6;
+
+/// World XZ `x` on the net's octave lattice at its drift `drift` (tiles).
+fn wu_caustic_uv(x: vec2<f32>, drift: vec2<f32>) -> vec2<f32> {
+    let r = WU_CAU_ROT;
+    return vec2<f32>(r.x * x.x + r.y * x.y, -r.y * x.x + r.x * x.y) / WU_CAU_TILE_YD + drift;
+}
+
+/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus: `mn` its cycles a tile
+/// on the lattice, `m` its cycles in the clock's period, `p0` its phase; its curvature
+/// `WU_CAU_CURV` along its world heading.
+fn wu_cwave(uv: vec2<f32>, phi: f32, mn: vec2<f32>, m: f32, p0: f32) -> vec3<f32> {
+    let r = WU_CAU_ROT;
+    let d = normalize(vec2<f32>(r.x * mn.x - r.y * mn.y, r.y * mn.x + r.x * mn.y));
+    let w = WU_CAU_CURV * vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y);
+    return -sin(WU_TAU * fract(dot(uv, mn) - m * phi + p0)) * w;
+}
+
+/// The fine set's Hessian at lattice point `uv`, per unit focus (ripples of 1.0-0.3 yd); `phi` the
+/// weather clock's phase.
+fn wu_caustic_hessian(uv: vec2<f32>, phi: f32) -> vec3<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(2.0, -3.0), 40.0, 0.0000);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 5.0), 45.0, 0.6180);
+    h += wu_cwave(uv, phi, vec2<f32>(-4.0, -4.0), 50.0, 0.2361);
+    h += wu_cwave(uv, phi, vec2<f32>(7.0, 0.0), 56.0, 0.8541);
+    h += wu_cwave(uv, phi, vec2<f32>(-7.0, 6.0), 63.0, 0.4721);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, -12.0), 71.0, 0.0902);
+    return h;
+}
+
+/// The coarse set's (ripples of 3.6-1.6 yd, slower, as longer waves run).
+fn wu_caustic_hessian_coarse(uv: vec2<f32>, phi: f32) -> vec3<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(1.0, 0.0), 21.0, 0.3820);
+    h += wu_cwave(uv, phi, vec2<f32>(2.0, 1.0), 30.0, 0.7639);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 2.0), 32.0, 0.1459);
+    h += wu_cwave(uv, phi, vec2<f32>(0.0, 1.0), 22.0, 0.5279);
+    h += wu_cwave(uv, phi, vec2<f32>(-1.0, 1.0), 25.0, 0.9098);
+    h += wu_cwave(uv, phi, vec2<f32>(-2.0, 1.0), 33.0, 0.2918);
+    return h;
+}
+
+/// The regularised intensity's mean over the pattern at focus ratio `rho` (path over
+/// `WU_CAU_FOCUS_YD`): a rational fit, within 11% from 0 to 6.
+fn wu_caustic_mean(rho: f32) -> f32 {
+    let r = min(rho, 6.0);
+    let r2 = r * r;
+    let r3 = r2 * r;
+    return (0.989 + 2.1614 * r2 - 0.1102 * r3) / (1.0 - 0.1993 * r2 + 0.6322 * r3);
+}
+
+/// The caustic of the Hessian `h` (per unit focus) at focus ratio `rho`, mean 1.
+fn wu_caustic_lens(h: vec3<f32>, rho: f32) -> f32 {
+    let jxx = 1.0 + rho * h.x;
+    let jzz = 1.0 + rho * h.y;
+    let jxz = rho * h.z;
+    let det = jxx * jzz - jxz * jxz;
+    return inverseSqrt(det * det + WU_CAU_EPS * WU_CAU_EPS) / wu_caustic_mean(rho);
+}
+
+/// Both sets' net at lattice point `uv` down a path of `path` yards, mean 1: the fine net sharp in
+/// the first yard or two, handing over to the coarse net, which focuses `WU_CAU_COARSE` times
+/// deeper, as the bed falls away.
+fn wu_caustic_at(uv: vec2<f32>, path: f32, phi: f32) -> f32 {
+    let wf = 1.0 - smoothstep(1.0, 3.5, path);
+    let wc = smoothstep(0.4, 2.0, path);
+    var c = 1.0;
+    if (wf > 0.0) {
+        let rho = min(path / WU_CAU_FOCUS_YD, WU_CAU_RHO_MAX);
+        c += wf * (wu_caustic_lens(wu_caustic_hessian(uv, phi), rho) - 1.0);
+    }
+    if (wc > 0.0) {
+        let rho = min(path / (WU_CAU_FOCUS_YD * WU_CAU_COARSE), WU_CAU_RHO_MAX);
+        c += wc * (wu_caustic_lens(wu_caustic_hessian_coarse(uv, phi), rho) - 1.0);
+    }
+    return c;
+}
+
+/// The net, mean 1, on the bed point whose refracted sun ray entered the surface at `entry` (world
+/// XZ) and ran `path` yards down to it: on the octave's lattice at its `drift`, carried along
+/// `flow` (world XZ yards a second) by the two-phase flow map at phase `ph0` as the octave is.
+fn wu_caustic_net(
+    entry: vec2<f32>,
+    path: f32,
+    phi: f32,
+    drift: vec2<f32>,
+    flow: vec2<f32>,
+    ph0: f32,
+) -> f32 {
+    if (dot(flow, flow) < 1e-4) {
+        return wu_caustic_at(wu_caustic_uv(entry, drift), path, phi);
+    }
+    // Two phases half a period apart, blended so the net's variance holds through the restart.
+    let ph1 = fract(ph0 + 0.5);
+    let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+    let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) * WU_CAU_TILE_YD;
+    let a = wu_caustic_at(wu_caustic_uv(entry - flow * (ph0 * WU_CAU_FLOW_PERIOD_S), drift), path, phi)
+        - 1.0;
+    let b = wu_caustic_at(
+        wu_caustic_uv(entry - flow * (ph1 * WU_CAU_FLOW_PERIOD_S) + apart, drift),
+        path,
+        phi,
+    ) - 1.0;
+    return 1.0 + (a * w0 + b * (1.0 - w0)) * inverseSqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
+}
+
+/// The net's contrast kept over a path of `path` yards through water of turbidity `sig_turb` per
+/// yard, seen through a footprint of `fp` yards.
+fn wu_caustic_keep(path: f32, sig_turb: f32, fp: f32) -> f32 {
+    return (1.0 - smoothstep(WU_CAU_FADE_YD.x, WU_CAU_FADE_YD.y, path))
+        * exp(-sig_turb * path * WU_CAU_TURB)
+        * (1.0 - smoothstep(WU_CAU_FP_YD.x, WU_CAU_FP_YD.y, fp));
+}
+
+/// The lighting sun's direct share of the bed's light under its shadow `lit` (1 lit): the sun's
+/// luminance `sun` over it and the open sky's `sky`, the sun keeping `keep` of itself in shadow.
+fn wu_sun_share(lit: f32, sun: f32, sky: f32, keep: f32) -> f32 {
+    return saturate(sun * lit / max(sky + sun * mix(keep, 1.0, lit), 1e-4));
+}
+
+/// The bed's gain under the net, 1 where there is none: the net at `amp` of its contrast.
+fn wu_caustic_gain(c: f32, amp: f32) -> f32 {
+    return max(1.0 + amp * (c - 1.0), 0.0);
 }
 
 /// The water's height over the plane where the near plane meets it, a few centimetres of slosh.
@@ -1199,15 +1337,17 @@ fn wu_dry_sky(rd: vec3<f32>, u: UnderLanes) -> vec3<f32> {
 /// The frame under water, per pixel, gamma in and out: `sg` the scene as drawn (the world fogged by
 /// the swapped underwater fog), `rd` the pixel's ray, `view_z` the opaque world's view Z behind it
 /// (0 where nothing was drawn), `n_recv` the receiving surface's normal from the depth's
-/// derivatives. Below the waterline the swapped fog comes off and the water's own transport goes
-/// on: per-channel absorption, in-scatter by direction and depth with the shafts in it, caustics on
-/// what lies under the plane, under the exposure ceiling; above it, the dry fog and sky come back;
-/// across it, the meniscus. The lanes' `surface.z` 0 returns the scene unchanged.
+/// derivatives, `lit` the lighting sun's terrain shadow there (1 lit). Below the waterline the
+/// swapped fog comes off and the water's own transport goes on: per-channel absorption, in-scatter
+/// by direction and depth with the shafts in it, the caustic net ([`wu_caustic_net`]) on what lies
+/// under the plane, under the exposure ceiling; above it, the dry fog and sky come back; across it,
+/// the meniscus. The lanes' `surface.z` 0 returns the scene unchanged.
 fn wu_post(
     sg: vec3<f32>,
     rd: vec3<f32>,
     view_z: f32,
     n_recv: vec3<f32>,
+    lit: f32,
     u: UnderLanes,
 ) -> vec3<f32> {
     let bits = u.surface.w;
@@ -1261,19 +1401,25 @@ fn wu_post(
         var lin = vec3<f32>(0.0);
         if (!open_water) {
             lin = wu_dec(wu_unfog(sg, f_wet, u.fog_wet.rgb));
-            // The segment ends on the opaque world: caustics where it lies under the plane.
+            // The segment ends on the opaque world: the one caustic net where it lies under the
+            // plane, its contrast the sun's direct share under the shadow `lit` and its facing.
             if (wu_has(bits, WU_CAUSTICS) && t_d < 0.5 * WU_FAR && t_d <= t1 + 1e-3) {
                 let p = eye + rd * t_d;
                 let depth = h - p.y;
-                if (depth > 0.05) {
-                    let s = u.sun_refr.xyz;
-                    let q = p.xz + s.xz * (depth / max(s.y, 0.2));
-                    let cau = wu_caustic(q, depth, t_d * u.cam_fwd.w, phase)
-                        * (1.0 + 0.35 * wu_shaft_field(q, phase));
+                let s = u.sun_refr.xyz;
+                if (depth > 0.0 && s.y > 0.02) {
+                    let path = depth / max(s.y, 0.2);
                     let facing = smoothstep(0.05, 0.5, dot(nr, s));
-                    let k = WU_CAUSTIC_GAIN * u.sun_e.w * facing * smoothstep(0.1, 0.6, depth)
-                        * exp(-depth / WU_CAUSTIC_DEPTH);
-                    lin = lin * (vec3<f32>(1.0) + k * (cau - vec3<f32>(1.0)));
+                    let amp = wu_caustic_keep(path, u.fog_wet.w, t_d * u.cam_fwd.w)
+                        * wu_sun_share(lit * facing, u.sun_dry.w, u.sky_horizon.w, u.sky_zenith.w)
+                        * u.fog_dry.w * WU_CAU_UNDER_GAIN;
+                    if (amp >= 1.0 / 256.0) {
+                        let entry = p.xz + s.xz * path;
+                        // No current from below: the eye's body has none on the CPU.
+                        let c = wu_caustic_net(entry, path, u.sun_refr.w,
+                            vec2<f32>(u.cam_right.w, u.cam_up.w), vec2<f32>(0.0), 0.0);
+                        lin = lin * wu_caustic_gain(c, amp);
+                    }
                 }
             }
         }
@@ -1337,6 +1483,37 @@ struct FfxUwBlock {
 @group(0) @binding(6) var<uniform> uwb: FfxUwBlock;
 // The opaque world's linear depth (view Z, yards; 0 where nothing was drawn), the water's own.
 @group(0) @binding(7) var uw_depth: texture_2d<f32>;
+// The lighting sun's terrain shadow torus (`benilla_water::mcsh`, 1 shadowed), inside the window
+// `uwb.u.shadow`; the depth stands in, unread, while the window is not valid.
+@group(0) @binding(9) var uw_shadow: texture_2d<f32>;
+
+/// The map's north-west corner from its centre and the shadow torus's span, yards
+/// (`liquid.wgsl`'s `MAP_HALF_YD`, `MCSH_SPAN_YD`).
+const UW_MAP_HALF_YD: f32 = 17066.666;
+const UW_MCSH_SPAN_YD: f32 = 1066.6666;
+
+/// Whether the lighting sun reaches the ground at world point `p`, 1 lit and 0 shadowed: the
+/// terrain's MCSH there, read bilinearly across the torus, as `liquid.wgsl`'s `lighting_sun_mcsh`
+/// reads it for the bed seen from above. Lit outside the window.
+fn uw_sun_lit(p: vec3<f32>, win: vec4<f32>) -> f32 {
+    if (win.w < 0.5 || any(abs(p.xz - win.xy) >= vec2<f32>(win.z))) {
+        return 1.0;
+    }
+    let dims = vec2<i32>(textureDimensions(uw_shadow));
+    let t = fract((p.xz + vec2<f32>(UW_MAP_HALF_YD)) / UW_MCSH_SPAN_YD) * vec2<f32>(dims) - 0.5;
+    let i = vec2<i32>(floor(t));
+    let f = t - floor(t);
+    let s00 = uw_shadow_texel(i, dims);
+    let s10 = uw_shadow_texel(i + vec2<i32>(1, 0), dims);
+    let s01 = uw_shadow_texel(i + vec2<i32>(0, 1), dims);
+    let s11 = uw_shadow_texel(i + vec2<i32>(1, 1), dims);
+    return 1.0 - mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+}
+
+/// One texel of the shadow torus, its index wrapped.
+fn uw_shadow_texel(i: vec2<i32>, dims: vec2<i32>) -> f32 {
+    return textureLoad(uw_shadow, ((i % dims) + dims) % dims, 0).r;
+}
 
 /// The stock warp's reach kept, and the haze's: the water's own absorption replaces most of the
 /// haze's blur.
@@ -1358,7 +1535,8 @@ fn fs_combine_wave_improved(in: FullscreenVertexOutput) -> @location(0) vec4<f32
     // The receiving surface's facing from the depth's own derivatives, in uniform control flow.
     let n_recv = normalize(cross(dpdx(p), dpdy(p)) + vec3<f32>(0.0, 1e-7, 0.0));
     let scene = textureSample(in_tex, in_samp, uv);
-    let sg = wu_post(clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), rd, z, n_recv, uw);
+    let lit = uw_sun_lit(p, uw.shadow);
+    let sg = wu_post(clamp(scene.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), rd, z, n_recv, lit, uw);
     let bg = max(textureSample(blur_tex, in_samp, uv).rgb, vec3<f32>(0.0));
     let hazed = mix(sg, min(bg, vec3<f32>(1.0)), ffx.lane.z * UW_HAZE_KEEP);
     let outg = min(hazed + ffx.lane.x * bg * bg, vec3<f32>(1.0));
