@@ -12,7 +12,11 @@
 //!   tier, flecks drifting in trails on water under the whitewater's speeds), `SWIMMER` (yards: a
 //!   phantom swimmer that far ahead of the camera, for a still capture of the wake) and, in a
 //!   capture only, `SWIMMER_PASS` (seconds: the phantom swims a fixed straight line instead, passing
-//!   that point then, so a burst shows its wake form and age in place).
+//!   that point then, so a burst shows its wake form and age in place). `SURFACE2` (1: the
+//!   dispersive wave field, `benilla_water`'s `surface2`, draws the surface under `waves`; 0 the
+//!   five ripple octaves, for an A/B), `SURFACE2_GAIN` and `SURFACE2_SWELL` (1: its steepness
+//!   and its swell's), `SURFACE2_THIN` (the band Medium sums every other train from, 1-based:
+//!   1 all, 10 none; unset the shader's default, the two shortest).
 //!
 //! With no feature on, no stylised pipeline compiles the preview and the frame is today's.
 
@@ -184,6 +188,20 @@ pub fn number(name: &str, default: f32, lo: f32, hi: f32) -> f32 {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite() && (lo..=hi).contains(v))
         .unwrap_or(default)
+}
+
+/// Whether the dispersive wave field draws the surface under `waves` (`$WOW_PREVIEW_SURFACE2`,
+/// on unless `0`), read once.
+pub fn surface2() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !matches!(
+            std::env::var("WOW_PREVIEW_SURFACE2")
+                .as_deref()
+                .map(str::trim),
+            Ok("0") | Ok("off")
+        )
+    })
 }
 
 #[cfg(test)]

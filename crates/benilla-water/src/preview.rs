@@ -8,12 +8,13 @@ use bevy::prelude::*;
 
 use benilla_assets::preview as lever;
 use benilla_world::liquid::{
-    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_MASK, PV_SWELL, PV_WEATHER,
-    PV_WIND,
+    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_MASK, PV_SWELL, PV_TRAINS,
+    PV_WEATHER, PV_WIND,
 };
 use benilla_world::weather::{storm_blend, WeatherKind, WeatherState};
 
 use super::clock::{cycle, WaterClock};
+use super::surface2;
 
 /// The preview block's floats.
 const PREVIEW_FLOATS: usize = PREVIEW_LANES.end - PREVIEW_LANES.start;
@@ -104,8 +105,18 @@ pub(super) fn drive_preview(
         )
     });
     let cone = if lever::on(lever::ROUGH) { cone } else { 0.0 };
-    // The slow tier's lane holds 1 − gain, so an unwritten (zero) lane runs it.
-    row(PV_MASK, [mask as f32, cone, 1.0 - river_slow, 0.0]);
+    // The slow tier's lane holds 1 − gain, so an unwritten (zero) lane runs it; `w` says whether
+    // the dispersive surface draws under `waves`.
+    let surface2 = lever::on(lever::WAVES) && lever::surface2();
+    row(
+        PV_MASK,
+        [
+            mask as f32,
+            cone,
+            1.0 - river_slow,
+            f32::from(u8::from(surface2)),
+        ],
+    );
     row(PV_GAINS, gains);
     row(
         PV_CLOCKS,
@@ -155,12 +166,16 @@ pub(super) fn drive_preview(
         PV_GUST,
         [cycle(GUST_RATE * secs), 0.0, cycle(SLICK_RATE * secs), 0.0],
     );
+    // `z`: the band the dispersive surface thins from at Medium, 1-based (`WOW_PREVIEW_SURFACE2_THIN`;
+    // 0 the shader's default).
+    static THIN: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let thin = *THIN.get_or_init(|| lever::number("SURFACE2_THIN", 0.0, 0.0, 10.0).round());
     row(
         PV_CAP,
         [
             cycle(CAP_DRIFT[0] * secs),
             cycle(CAP_DRIFT[1] * secs),
-            0.0,
+            thin,
             0.0,
         ],
     );
@@ -174,6 +189,11 @@ pub(super) fn drive_preview(
     row(PV_DRIFT, [d0[0], d0[1], d1[0], d1[1]]);
     row(PV_DRIFT + 4, [d2[0], d2[1], d3[0], d3[1]]);
     row(PV_DRIFT + 8, [d4[0], d4[1], 0.0, 0.0]);
+    // The dispersive surface's trains, under the same wind.
+    if surface2 {
+        lanes.0[at(PV_TRAINS)..at(PV_TRAINS) + surface2::FLOATS]
+            .copy_from_slice(&surface2::rows(secs, dir, speed));
+    }
 }
 
 pub(super) fn register(app: &mut App) {

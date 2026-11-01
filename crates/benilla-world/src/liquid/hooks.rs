@@ -212,9 +212,10 @@ pub const LOOK_SHORE_KIND: usize = LOOK_SHORE + 4;
 /// [`PREVIEW_ROWS`] `vec4`s, zero where the preview or a feature of it is off.
 pub const PREVIEW_LANES: std::ops::Range<usize> = LOOK_LANES.end..LOOK_LANES.end + 4 * PREVIEW_ROWS;
 /// The preview block's rows.
-pub const PREVIEW_ROWS: usize = 77;
+pub const PREVIEW_ROWS: usize = 77 + 3 * S2_TRAINS + 3 * S2_BANDS;
 /// `mask`: x the feature bits (`benilla_assets::preview`), y the rough reflection's cone share,
-/// z 1 − the rivers' slow tier's gain (`WOW_PREVIEW_RIVER_SLOW`; zero runs it), w spare.
+/// z 1 − the rivers' slow tier's gain (`WOW_PREVIEW_RIVER_SLOW`; zero runs it), w 1 while the
+/// dispersive surface draws (`WOW_PREVIEW_SURFACE2`).
 pub const PV_MASK: usize = PREVIEW_LANES.start;
 /// `gains`: x caustics, y lights, z sparkles, w river foam.
 pub const PV_GAINS: usize = PV_MASK + 4;
@@ -228,7 +229,8 @@ pub const PV_WEATHER: usize = PV_MASK + 16;
 pub const PV_SWELL: usize = PV_MASK + 20;
 /// `gust`: xy the gust field's offset, zw the slick field's, in their tiles.
 pub const PV_GUST: usize = PV_MASK + 24;
-/// `cap`: xy the capillary octave's drift in its tiles, zw spare.
+/// `cap`: xy the capillary octave's drift in its tiles, z the band the dispersive surface thins
+/// from at Medium (1-based; 0 the shader's default), w spare.
 pub const PV_CAP: usize = PV_MASK + 28;
 /// `drift`: the five ripple octaves' downwind drifts under `waves`, (d0, d1), (d2, d3), (d4, –).
 pub const PV_DRIFT: usize = PV_MASK + 32;
@@ -240,6 +242,18 @@ pub const PV_WAKE: usize = PV_MASK + 108;
 pub const PV_UNDER: usize = PV_MASK + 212;
 /// `spare`: room for shader-only iteration.
 pub const PV_SPARE: usize = PV_MASK + 276;
+/// `trains`: the dispersive surface's wave trains (`benilla_water`'s `surface2`), three rows each:
+/// (k·d / 2π in cycles a yard, the phase in cycles, the wind sea's slope amplitude), (the swell's
+/// slope amplitude, Q·λ/2π of the orbital displacement, the Stokes share, –), (the direction, 1/λ²,
+/// 1 + St²).
+pub const PV_TRAINS: usize = PV_MASK + 308;
+/// `bands`: the trains' bands, longest first, three rows each: the band's slope variance sums at
+/// unit gains (wind sea², 2·wind sea·swell, swell², the kind gain's share), (its longest wavelength
+/// squared, its first train, its trains, –), and its direction tensor (xx, zz, xz, –) of trace 1.
+pub const PV_BANDS: usize = PV_TRAINS + 4 * 3 * S2_TRAINS;
+/// The dispersive surface's trains and bands (`liquid.wgsl`'s `S2_TRAINS`, `S2_BANDS`).
+pub const S2_TRAINS: usize = 40;
+pub const S2_BANDS: usize = 9;
 /// The reflection block's length in floats — `liquid.wgsl`'s `WaterReflect`.
 pub const REFLECT_FLOATS: usize = PREVIEW_LANES.end;
 

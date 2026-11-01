@@ -34,6 +34,7 @@ mod reflect;
 mod ripple_sim;
 mod scene_color;
 mod sky_lut;
+mod surface2;
 mod water_compute;
 mod water_map;
 mod world_view;

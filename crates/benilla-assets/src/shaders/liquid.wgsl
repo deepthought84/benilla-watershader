@@ -306,7 +306,8 @@ struct WaterPreview {
     swell: vec4<f32>,
     // xy the gust field's offset and zw the slick field's, in their tiles.
     gust: vec4<f32>,
-    // xy the capillary octave's drift in its tiles, zw spare.
+    // xy the capillary octave's drift in its tiles, z the band the dispersive surface thins from
+    // at Medium (1-based; 0 the shader's default), w spare.
     cap: vec4<f32>,
     // The five ripple octaves' downwind drifts under `waves`: (d0, d1), (d2, d3), (d4, spare).
     drift: array<vec4<f32>, 3>,
@@ -318,6 +319,14 @@ struct WaterPreview {
     under: UnderLanes,
     // Room for shader-only iteration.
     spare: array<vec4<f32>, 8>,
+    // The dispersive surface's wave trains (`benilla_water`'s `surface2`), three rows each: (k·d / 2π
+    // in cycles a yard, the phase in cycles, the wind sea's slope amplitude), (the swell's slope
+    // amplitude, Q·λ/2π of the orbital displacement, the Stokes share, –), (the direction, 1/λ²,
+    // 1 + St²); and their bands, longest first, three rows each: the variance sums at unit gains
+    // (wind², 2·wind·swell, swell², the kind gain's share), (the longest wavelength squared, the
+    // first train, the trains, –), the direction tensor (xx, zz, xz, –) of trace 1.
+    trains: array<vec4<f32>, 120>,
+    bands: array<vec4<f32>, 27>,
 };
 
 // The stylised look's rows (`benilla_water`'s `look`), the last member of `WaterReflect` but the
@@ -1088,6 +1097,12 @@ fn pv_drift(i: i32) -> vec2<f32> {
 /// Ripple octave `i`'s drift as the surface reads it: downwind under `waves`, today's otherwise.
 fn pv_octave_drift(i: i32) -> vec2<f32> {
     return select(water_reflect.drift[i], pv_drift(i), pv_on(PV_WAVES));
+}
+
+/// Whether the dispersive wave field draws the surface under `waves` (`WOW_PREVIEW_SURFACE2`,
+/// `preview.mask.w`; [`water_surface_s2`]), the five ripple octaves otherwise.
+fn pv_surface2() -> bool {
+    return water_reflect.preview.mask.w > 0.5;
 }
 
 /// The sea state, 0..1: the wind's (`preview.weather.z`), or the override the CPU folded in.
@@ -4256,6 +4271,200 @@ fn water_surface_wg(
         + k2 * water_reflect.look.ripple_mean.z * (WG_W2_LONG * g.long_oct * g.long_oct
             + WG_W2_SHORT * g.short_oct * g.short_oct + cw * cw)
         + (g.rough2 + WG_SWELL_FULL2 * g.swell * g.swell) * scale * scale;
+    s.rho_a = smoothstep(a0, max(sqrt(full), a0 + 1e-4), s.alpha);
+    s.full2 = full;
+    return s;
+}
+
+
+// ---- the dispersive surface (WAV-1, WAV-3, WAV-5: `surface2`) ----------------------------------
+//
+// The surface is a sum of `S2_TRAINS` wave trains the CPU publishes (`benilla_water`'s `surface2`,
+// `preview.trains`): each a sinusoid of its own wavelength, 48 yd down to 0.19 yd, travelling
+// along its own direction at the deep-water phase speed √(g/k), with a Stokes second harmonic on
+// the long ones, so the long waves run, the short ripples crawl, and no two move alike; nothing is
+// a scrolled sheet and nothing tiles. Each train is filtered by the pixel's footprint along its
+// own direction (a Gaussian pixel of σ `S2_SIGMA`: exactly what a mip does to a sinusoid), and the
+// slope variance the filter removes joins the roughness tensor along the train, so the far field
+// stays alive as roughness. The long trains carry the short ones: their orbital displacement
+// (Gerstner's Q) moves the point the shorter trains are read at, so ripples crowd on crests and
+// stretch in troughs. The kind's gains ([`wg_wave_kind`], [`wg_gains`]) weigh each train by its
+// wavelength (long, short, capillary) and the swell by its own; the gusts and slicks ride on; the
+// current carries the whole field by the two-phase flow map; the live wake adds on top. The same
+// `WaterSurface`, so every reader of it is unchanged.
+
+/// The trains and the bands the block holds (`benilla_world::liquid::S2_TRAINS`, `S2_BANDS`).
+const S2_TRAINS: i32 = 40;
+const S2_BANDS: i32 = 9;
+/// The band Medium thins from unless the lever says otherwise: the two shortest (under 0.375 yd).
+const S2_THIN_MEDIUM: i32 = 7;
+
+/// The first band whose trains are thinned (every other one at √2 the amplitude: the same
+/// variance, half the cost): Low thins every band, High none, Medium from `S2_THIN_MEDIUM` or the
+/// band `WOW_PREVIEW_SURFACE2_THIN` names (`preview.cap.z`, 1-based so an unwritten lane is the
+/// default; 1 thins all, 10 none).
+fn s2_thin_from() -> i32 {
+#ifdef WATER_TIER_LOW
+    return 0;
+#else
+#ifdef WATER_TIER_HIGH
+    return S2_BANDS;
+#else
+    let lane = water_reflect.preview.cap.z;
+    return select(S2_THIN_MEDIUM, i32(lane) - 1, lane > 0.5);
+#endif
+#endif
+}
+/// The pixel filter on q = (px / λ)²: a train keeps (1 − S2_FILTER·q)³ of its slope, the cubic
+/// that follows a Gaussian pixel of σ = 0.5 px, exp(−4.93 q) (0.63 at 3 px against 0.58, 0.78 at
+/// 4 px against 0.73, 0.31 at 2 px against 0.29), and is gone at 1.14 px; no transcendental.
+const S2_FILTER: f32 = 1.3;
+/// The band cut on q: a band whose longest train is under a pixel is gone with every shorter one.
+const S2_CUT_Q: f32 = 1.0;
+/// The resolved low band the reflections slide by: a band whose longest train spans 10 px along
+/// the footprint's major axis (q = 1/100) slides them whole, one of 6 px (q = 1/36) not at all.
+const S2_LO_Q: vec2<f32> = vec2<f32>(1.0 / 36.0, 56.25);
+/// A band under this slope variance (α², an rms slope of 0.2°) is not drawn, only counted.
+const S2_BAND_MIN: f32 = 1e-5;
+
+/// The field at a point: the slope (−∇h) as the normal carries it, its resolved low band, the slope
+/// variance the footprint lost as GGX α² (xx, zz, xz), and the whole field's as α².
+struct S2Field {
+    slope: vec2<f32>,
+    slope_lo: vec2<f32>,
+    lost: vec3<f32>,
+    full: f32,
+};
+
+/// The trains summed at `xz0` through the footprint `px` at the gains `g`, band by band from the
+/// longest. A band under a pixel along the footprint's major axis is unresolved whatever its
+/// trains' directions, and so is every shorter one, so from there each band's variance joins the
+/// tensor along its own direction tensor and no train is visited; a band with no amplitude to
+/// see (a lake's long bands, a pond's swell) is skipped the same way. What a band's trains lose
+/// to the filter joins the tensor along the band's direction tensor too, and the band's share of
+/// the low band is its longest train's.
+fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
+    var f = S2Field(vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0), 0.0);
+    // The point the trains are read at: the long trains' orbital displacement moves it for the
+    // shorter ones.
+    var xz = xz0;
+    let maj2 = px.major * px.major;
+    let min2 = px.minor * px.minor;
+    let dm = maj2 - min2;
+    var dead = false;
+    let thin_from = s2_thin_from();
+    for (var b = 0; b < S2_BANDS; b = b + 1) {
+        let bv = water_reflect.preview.bands[3 * b];
+        let bl = water_reflect.preview.bands[3 * b + 1];
+        // Thinned bands sum every other train at √2 the amplitude.
+        let thin = b >= thin_from;
+        let step = select(1, 2, thin);
+        let boost = select(1.0, 1.4142, thin);
+        // The kind's gain for this band (long, short or capillary), the swell's; the band's
+        // variance at the gains.
+        let gw = mix(mix(g.short_oct, g.cap, max(-bv.w, 0.0)), g.long_oct, max(bv.w, 0.0)) * boost;
+        let gs = g.swell * boost;
+        let band_var = gw * gw * bv.x + gw * gs * bv.y + gs * gs * bv.z;
+        f.full += band_var;
+        let tensor = water_reflect.preview.bands[3 * b + 2].xyz;
+        // The band's longest train along the major axis: q = (px / λ)².
+        let q_band = maj2 / bl.x;
+        dead = dead || (q_band > S2_CUT_Q);
+        if (dead) {
+            f.lost += tensor * band_var;
+            continue;
+        }
+        if (band_var <= S2_BAND_MIN) {
+            f.lost += tensor * band_var;
+            continue;
+        }
+        let lo = saturate((S2_LO_Q.x - q_band) * S2_LO_Q.y);
+        let has_q = water_reflect.preview.trains[3 * i32(bl.y) + 1].y > 0.0;
+        var band_slope = vec2<f32>(0.0);
+        var band_lost = 0.0;
+        let first = i32(bl.y);
+        let last = first + i32(bl.z);
+        for (var i = first; i < last; i = i + step) {
+            let a = water_reflect.preview.trains[3 * i];
+            let bb = water_reflect.preview.trains[3 * i + 1];
+            let c = water_reflect.preview.trains[3 * i + 2];
+            let amp = a.w * gw + bb.x * gs;
+            // The footprint along the train over its wavelength, squared.
+            let e = dot(px.e, c.xy);
+            let q = (min2 + e * e * dm) * c.z;
+            let t = saturate(1.0 - S2_FILTER * q);
+            let keep = t * t * t;
+            // The train's slope variance as α²: what the filter drops joins the roughness.
+            let var1 = amp * amp * c.w;
+            band_lost += var1 * (1.0 - keep * keep);
+            if (keep > 1e-3) {
+                let th = TAU * fract(dot(a.xy, xz) - a.z);
+                let cs = cos(th);
+                band_slope -= c.xy * (amp * keep * (cs + bb.z * (2.0 * cs * cs - 1.0)));
+                if (has_q) {
+                    // h = a·sin θ: the water under this point came from Q·a·cos θ up the train.
+                    xz -= c.xy * (bb.y * amp * cs);
+                }
+            }
+        }
+        f.slope += band_slope;
+        f.slope_lo += band_slope * lo;
+        f.lost += tensor * band_lost;
+    }
+    return f;
+}
+
+/// The dispersive surface at a fragment: the trains at the kind's gains `wk` under the wind and
+/// the gusts, carried by the current, with the wake's slope; the same `WaterSurface` as
+/// [`water_surface_wg`]. Called in uniform control flow (the gust taps).
+fn water_surface_s2(
+    xz: vec2<f32>,
+    flow: vec2<f32>,
+    wake_slope: vec2<f32>,
+    wk: WaveKind,
+) -> WaterSurface {
+    let px = pixel_footprint(xz);
+    let wind = wg_wind();
+    let g = wg_gains(wk, wg_gust(xz, px), wind);
+    var f: S2Field;
+    if (length(flow) > 1e-3) {
+        // The current: the field carried along it for one period and restarted, twice, half a
+        // period apart, each weighted by a triangle that is zero at its own restart.
+        let ph0 = water_reflect.cycle.x;
+        let ph1 = fract(ph0 + 0.5);
+        let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+        let fa = s2_field(xz - flow * (ph0 * FLOW_PERIOD_S), px, g);
+        let fb = s2_field(xz - flow * (ph1 * FLOW_PERIOD_S), px, g);
+        f = S2Field(
+            mix(fb.slope, fa.slope, w0),
+            mix(fb.slope_lo, fa.slope_lo, w0),
+            mix(fb.lost, fa.lost, w0),
+            fa.full,
+        );
+    } else {
+        f = s2_field(xz, px, g);
+    }
+    // `probe_box_min.w` scales the whole surface: 1, 0 for a dead-flat one.
+    let scale = water_reflect.probe_box_min.w;
+    var s: WaterSurface;
+    s.k = scale;
+    s.n = normalize(vec3<f32>(
+        (f.slope.x + wake_slope.x) * scale,
+        1.0,
+        (f.slope.y + wake_slope.y) * scale,
+    ));
+    s.n_lo = normalize(vec3<f32>(
+        (f.slope_lo.x + wake_slope.x) * scale,
+        1.0,
+        (f.slope_lo.y + wake_slope.y) * scale,
+    ));
+    // The roughness tensor: the calm surface's α0, every train's unresolved share along itself,
+    // and the wind's sub-train share below the shortest train.
+    let a0 = water_reflect.look.surf.x;
+    let s2 = scale * scale;
+    s.a2 = vec3<f32>(a0 * a0, a0 * a0, 0.0) + (f.lost + vec3<f32>(g.rough2, g.rough2, 0.0)) * s2;
+    s.alpha = sqrt(sqrt(max(s.a2.x * s.a2.y - s.a2.z * s.a2.z, 1e-12)));
+    let full = a0 * a0 + (f.full + g.rough2) * s2;
     s.rho_a = smoothstep(a0, max(sqrt(full), a0 + 1e-4), s.alpha);
     s.full2 = full;
     return s;
@@ -8107,7 +8316,9 @@ fn stylised_water(
     ));
     let pv_slope = wake_slope * wk.keep + wu_wake_tilt(wk) + rf.slope;
     var surf: WaterSurface;
-    if (pv_on(PV_WAVES)) {
+    if (pv_on(PV_WAVES) && pv_surface2()) {
+        surf = water_surface_s2(xz, flow, pv_slope, wg_wave_kind(flow, shore, sb, tilt));
+    } else if (pv_on(PV_WAVES)) {
         surf = water_surface_wg(xz, flow, pv_slope, wg_wave_kind(flow, shore, sb, tilt));
     } else {
         surf = water_surface(xz, flow, pv_slope);
