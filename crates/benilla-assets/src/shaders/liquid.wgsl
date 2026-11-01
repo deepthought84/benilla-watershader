@@ -1215,6 +1215,19 @@ const WU_FEATHER: f32 = 1.16;
 /// The bow wave's gain, and its crest's apex ahead of the bow point in head units.
 const WU_BOW_GAIN: f32 = 0.55;
 const WU_BOW_APEX: f32 = 0.015;
+/// The kicked trail's bubble lace: lookups a yard (big cells 0.29 yd, small bubbles 0.11 yd), the
+/// stage's life in seconds (a sheet at 0, lace by about half of it, islands by 0.8), how much older
+/// the trail's edges are per (lateral / spread)², and the lace's peak opacity.
+const WU_LACE_SCALE: f32 = 4.0;
+const WU_LACE_LIFE: f32 = 2.2;
+const WU_LACE_EDGE_AGE: f32 = 0.8;
+const WU_LACE_LEVEL: f32 = 0.7;
+/// The holes' radii in cell units on a fresh sheet (x) and their growth to a spent one (y): the big
+/// cells, then the small bubbles between them.
+const WU_LACE_RA: vec2<f32> = vec2<f32>(0.16, 0.46);
+const WU_LACE_RB: vec2<f32> = vec2<f32>(0.16, 0.30);
+/// A film's opacity against a Plateau border's.
+const WU_LACE_FILM: f32 = 0.5;
 /// The steepest normal tilt the summed wake may give.
 const WU_SLOPE_MAX: f32 = 0.85;
 /// A fragment takes a swimmer's wake only within this height of the swimmer's water, yards.
@@ -1328,6 +1341,35 @@ fn wu_worley(p: vec2<f32>, phase: f32) -> vec2<f32> {
         }
     }
     return vec2<f32>(d1, d2);
+}
+
+/// The distance outside the nearest round hole of a jittered lattice, in cell units: positive in the
+/// foam, negative in a hole. Each hole is `rad` times its own size in [1 − spread, 1 + spread], its
+/// centre jittered `jit` about its cell's. The union of discs, so a hole's rim is an arc and the foam
+/// between holes thins to a neck and thickens into a Plateau border where three meet; no `sin` and
+/// no sort, so it costs less than [`wu_worley`].
+fn wu_holes(p: vec2<f32>, rad: f32, jit: f32, spread: f32) -> f32 {
+    let i = floor(p);
+    let f = p - i;
+    var s = 8.0;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let c = vec2<f32>(f32(x), f32(y));
+            let h = wu_hash22(i + c);
+            let o = vec2<f32>(0.5) + jit * (2.0 * h - vec2<f32>(1.0));
+            let size = 1.0 + spread * (2.0 * fract(h.x * 7.13 + h.y * 3.71) - 1.0);
+            s = min(s, length(c + o - f) - rad * size);
+        }
+    }
+    return s;
+}
+
+/// Bubbles at two sizes (big cells 0.85 and small 2.2 a unit of `p`, warped): the distance to the
+/// nearest hole's rim in units of `p`, the holes `ra` and `rb` in their cells' units.
+fn wu_bubbles(p: vec2<f32>, ra: f32, rb: f32) -> f32 {
+    let sa = wu_holes(p * 0.85, ra, 0.36, 0.2) / 0.85;
+    let sb = wu_holes(p * 2.2 + vec2<f32>(7.0), rb, 0.42, 0.4) / 2.2;
+    return min(sa, sb);
 }
 
 /// GGX's distribution at `nh` for roughness `alpha`, over its peak: 1 on the mirror direction.
@@ -1518,24 +1560,24 @@ fn wu_trail_cover(lat: f32, b: f32, age: f32, n1: f32, n2: f32) -> f32 {
     return cov * (1.0 - smoothstep(1.6, 3.0, age));
 }
 
-/// Foam as a web: the borders of warped bubble cells at two sizes. Coverage `c` widens the threads
-/// from lace to a holed sheet; as it falls they thin, break into islands and go. `aa` the pixel's
-/// footprint in cell units. A crisp outer edge, the thread's centre denser than its rim, and
-/// threads too thin to resolve fade instead of aliasing.
-fn wu_foam_lace(p: vec2<f32>, c: f32, aa: f32) -> f32 {
-    let q = p + 1.1 * vec2<f32>(wu_vnoise(p * 0.5), wu_vnoise(p * 0.5 + vec2<f32>(5.2)));
-    let w1 = wu_worley(q * 0.85, 0.0);
-    let w2 = wu_worley(q * 2.2 + vec2<f32>(7.0), 0.0);
-    let e = min(w1.y - w1.x, (w2.y - w2.x) * 0.8 + 0.10 * (1.0 - c));
-    // Round 2: wider, softer threads, a bubbly web rather than cracked glass.
-    let wid = mix(0.05, 0.42, c) * (0.78 + 0.44 * wu_vnoise(q * 1.3 + vec2<f32>(3.0)));
-    var a = 1.0 - smoothstep(wid - aa * 0.5 - 0.06, wid + aa + 0.04, e);
-    a = a * mix(0.72, 1.0, smoothstep(0.0, wid * 0.8 + 1e-3, wid - e));
-    // Older foam: whole patches of the web gone.
-    a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * c);
-    // Round 3: dimmer threads (the trail peaked near white over a lake at luma 100).
-    return a * mix(0.32, 0.6, c) * smoothstep(0.2, 1.2, wid / max(aa, 1e-3))
-        * smoothstep(0.04, 0.22, c);
+/// Foam as a raft of bubbles (round 4; round 3's web of Worley borders read as cracked glass): a
+/// sheet with round holes at two sizes that grow with the foam's stage `g` (0 fresh, 1 spent), so a
+/// sheet opens into lace and the lace breaks into islands. The Plateau borders, far from every hole,
+/// are dense; the films at the necks are translucent. `dens` the trail's cover there (0-1), `aa` the
+/// pixel's footprint in lace units; holes too small for the pixel give way to the stage's mean.
+fn wu_foam_lace(p: vec2<f32>, g_in: f32, dens: f32, aa: f32) -> f32 {
+    let g = saturate(g_in);
+    let q = p + 0.9 * vec2<f32>(wu_vnoise(p * 0.5), wu_vnoise(p * 0.5 + vec2<f32>(5.2)))
+        + 0.22 * vec2<f32>(wu_vnoise(p * 1.7 + vec2<f32>(2.0)), wu_vnoise(p * 1.7 + vec2<f32>(9.0)));
+    let s = wu_bubbles(q, WU_LACE_RA.x + WU_LACE_RA.y * pow(max(g, 1e-4), 0.9), WU_LACE_RB.x + WU_LACE_RB.y * g);
+    let w = 0.02 + 0.6 * aa;
+    var a = smoothstep(-0.5 * w, w, s);
+    a = a * mix(WU_LACE_FILM, 1.0, smoothstep(0.0, 0.10 + aa, s));
+    a = a * (0.75 + 0.25 * wu_vnoise(q * 3.1 + vec2<f32>(1.3, 4.1)));
+    // Older foam: whole patches of the raft gone, so the islands come in clusters.
+    a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * (1.0 - g));
+    a = mix(a, pow(max(1.0 - g, 1e-4), 1.6) * 0.7, smoothstep(0.12, 0.35, aa));
+    return a * WU_LACE_LEVEL * dens;
 }
 
 /// One swimmer's wake at `xz`: the Kelvin field, the bow wave, the collar and the kicked trail,
@@ -1613,8 +1655,10 @@ fn wu_swimmer(
             let ang = atan2(q.x, q.y + 0.9 * hw);
             // Whole turns of the angle, so the wobble meets itself behind the head.
             let wob = 0.35 * sin(ang * 5.0 + ph * 19.0) + 0.15 * sin(ang * 11.0 - ph * 31.0);
-            let wc = wu_worley(xz * 12.8, ph * 7.0);
-            let brk = smoothstep(0.08, 0.22, wc.y - wc.x);
+            // Round bubbles at two sizes (8 lookups a yard), drifting slowly round the clock.
+            let pc = xz * 8.0 + 0.6 * vec2<f32>(wu_vnoise(xz * 4.0), wu_vnoise(xz * 4.0 + vec2<f32>(5.2)))
+                + 0.35 * vec2<f32>(sin(ph * 7.0), cos(ph * 7.0));
+            let brk = smoothstep(-0.02, 0.06, wu_bubbles(pc, 0.30, 0.26));
             let rest = mix(WU_COLLAR_REST, 1.0, ramp);
             foam = max(foam, wu_collar(dc, hw, front, brk, wob, aa) * st * rest);
         }
@@ -1638,12 +1682,16 @@ fn wu_swimmer(
         if (bk > 0.05 && age < 4.5) {
             let n1 = wu_vnoise(xz * 1.92 + vec2<f32>(3.0));
             let n2 = wu_vnoise(xz * 1.28 + vec2<f32>(9.0));
-            let cov = wu_trail_cover(abs(q.x) / bs, bk, age, n1, n2) * st * ramp;
+            let lat = abs(q.x) / bs;
+            let cov = wu_trail_cover(lat, bk, age, n1, n2) * st * ramp;
             aer = max(aer, saturate(cov * 1.9) * 0.62);
             if (cov > 0.02) {
-                // 3.2 cells a metre.
-                let s = 2.93;
-                let lace = wu_foam_lace(xz * s, saturate(cov / 0.58), fp * s * 1.5 + 0.015);
+                // Round 4: the lace's stage from the water's age (its edges older, so the band
+                // frays instead of ending on a line), its density from the trail's cover.
+                let latn = lat / (0.14 + 0.9 * sqrt(age));
+                let g = age / WU_LACE_LIFE + WU_LACE_EDGE_AGE * latn * latn + 0.3 * (n1 - 0.5);
+                let s = WU_LACE_SCALE;
+                let lace = wu_foam_lace(xz * s, g, smoothstep(0.02, 0.30, cov), fp * s * 1.5 + 0.015);
                 foam = max(foam, lace);
             }
         }

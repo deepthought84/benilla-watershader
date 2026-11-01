@@ -103,6 +103,32 @@ struct WakeState {
     /// `[cx, cz, age, strength, radius, decay, foam, 0]`; strength 0 is an empty slot.
     rings: [[f32; 8]; RINGS],
     next: usize,
+    /// The phantom's swim along its fixed line ([`PhantomSwim`]), once it has one.
+    swim: Option<PhantomSwim>,
+}
+
+/// The phantom swimmer's straight line (`$WOW_PREVIEW_SWIMMER_PASS`, captures only): `anchor` the
+/// point it passes at `pass` seconds of virtual time, `heading` its course, `t` the virtual time so
+/// far, and its stroke credit and side.
+struct PhantomSwim {
+    anchor: Vec2,
+    heading: Vec2,
+    pass: f32,
+    t: f32,
+    credit: f32,
+    side: f32,
+}
+
+/// `$WOW_PREVIEW_SWIMMER_PASS=<s>`, read once: the phantom swims a fixed line through the world,
+/// passing its anchor `<s>` seconds of virtual time after the first frame, instead of riding the
+/// camera; `None` unless set, and unless this run is a capture (`$WOW_CAPTURE`), so play never
+/// sees it. A golden scene ages 1000 steps of 1/60 s, so 16.67 puts it on the anchor at the shot.
+fn phantom_pass() -> Option<f32> {
+    static PASS: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *PASS.get_or_init(|| {
+        let pass = lever::number("SWIMMER_PASS", -1.0, 0.0, 3600.0);
+        (pass >= 0.0 && std::env::var_os("WOW_CAPTURE").is_some()).then_some(pass)
+    })
 }
 
 impl WakeState {
@@ -261,7 +287,8 @@ fn drive_wake_lanes(
     }
     st.tracks.retain(|e, _| seen.contains(e));
 
-    // The phantom swimmer, ahead of the camera on the water there.
+    // The phantom swimmer, ahead of the camera on the water there; with a pass time, on its fixed
+    // line from there instead, its strokes rings it leaves behind as it swims.
     static PHANTOM: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     let phantom = *PHANTOM.get_or_init(|| lever::number("SWIMMER", 0.0, 0.0, 200.0));
     if phantom > 0.0 {
@@ -269,11 +296,32 @@ fn drive_wake_lanes(
             let fwd = Vec2::new(t.forward().x, t.forward().z).normalize_or(Vec2::Y);
             let right = Vec2::new(-fwd.y, fwd.x);
             let c = t.translation();
-            let at2 = Vec2::new(c.x, c.z) + fwd * phantom;
+            let ahead = Vec2::new(c.x, c.z) + fwd * phantom;
+            let swim = phantom_pass().map(|pass| {
+                let sw = st.swim.get_or_insert(PhantomSwim {
+                    anchor: ahead,
+                    heading: -right,
+                    pass,
+                    t: 0.0,
+                    credit: 0.0,
+                    side: 1.0,
+                });
+                // Laid from the view as the clock starts, after the scene's still settle.
+                if sw.t == 0.0 {
+                    sw.anchor = ahead;
+                    sw.heading = -right;
+                }
+                sw.t += dt;
+                sw.credit += SWIM_SPEED * dt / STROKE_YD;
+                (
+                    sw.anchor + sw.heading * (SWIM_SPEED * (sw.t - sw.pass)),
+                    sw.heading,
+                )
+            });
+            let (at2, heading) = swim.unwrap_or((ahead, -right));
             if let Some((surface_wow, _)) =
                 surface_under(&index, &water, Vec3::new(at2.x, c.y + 50.0, at2.y))
             {
-                let heading = -right;
                 live.insert(
                     0,
                     (
@@ -284,9 +332,17 @@ fn drive_wake_lanes(
                         ),
                     ),
                 );
-                if bits & WU_RINGS != 0 {
+                let side = Vec2::new(heading.y, -heading.x);
+                if let (Some(sw), true) = (st.swim.as_mut(), bits & WU_RINGS != 0) {
+                    // A stroke per `STROKE_YD` swum, on alternating sides behind the bow.
+                    if sw.credit >= 1.0 {
+                        sw.credit = (sw.credit - 1.0).min(1.0);
+                        sw.side = -sw.side;
+                        let p = at2 - heading * 0.9 + side * (0.35 * sw.side);
+                        st.ring(p, 0.07, 2.5, 0.8, 0.7);
+                    }
+                } else if bits & WU_RINGS != 0 {
                     // Its last three strokes, aged by the swim speed.
-                    let side = Vec2::new(heading.y, -heading.x);
                     for k in 1..=3 {
                         let back = STROKE_YD * k as f32 - 1.5;
                         let sign = if k % 2 == 0 { 1.0 } else { -1.0 };

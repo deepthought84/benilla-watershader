@@ -8,8 +8,10 @@
 //! - Sub-levers, numbers ([`number`]): `ROUGH_CONE` (0.2), `SEA` (unset: the wind's),
 //!   `CAUSTICS_GAIN`, `LIGHTS_GAIN`, `SPARKLES_GAIN`, `RIVER_FOAM_GAIN`, `RIVER_MIST_GAIN` (1),
 //!   `FORCE_RAIN` and `FORCE_SNOW` (0..1 over the zone weather), `RIVER_SLOW` (1: the rivers' slow
-//!   tier, flecks drifting in trails on water under the whitewater's speeds), and `SWIMMER` (yards: a
-//!   phantom swimmer that far ahead of the camera, for a still capture of the wake).
+//!   tier, flecks drifting in trails on water under the whitewater's speeds), `SWIMMER` (yards: a
+//!   phantom swimmer that far ahead of the camera, for a still capture of the wake) and, in a
+//!   capture only, `SWIMMER_PASS` (seconds: the phantom swims a fixed straight line instead, passing
+//!   that point then, so a burst shows its wake form and age in place).
 //!
 //! With no feature on, no stylised pipeline compiles the preview and the frame is today's.
 
