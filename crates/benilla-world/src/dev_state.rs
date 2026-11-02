@@ -105,8 +105,11 @@ impl Default for WaterDebug {
 /// `mcsh` the lighting sun's terrain shadow at the surface, white lit; `sky_vis` and `sun_vis` the
 /// open share of the sky and of the lighting sun the body is lit through (1 off the mirror planes
 /// and on Low); `foam_light` foam's illuminant left of the screen's centre against the body's right
-/// of it; `fog` the surface's fog, the share that stays in red and the fog colour's green and blue.
-pub const WATER_VIEWS: [&str; 32] = [
+/// of it; `fog` the surface's fog, the share that stays in red and the fog colour's green and blue;
+/// `body_split` the pixel's split, the reflectance in red, the in-scatter's weight in green and the
+/// bed's luma transmittance in blue (the reflection's, the body's and the bed's shares are `r`,
+/// `(1 − r)·g` and `(1 − r)·b`).
+pub const WATER_VIEWS: [&str; 33] = [
     "off",
     "mirror1",
     "mirror2",
@@ -139,6 +142,7 @@ pub const WATER_VIEWS: [&str; 32] = [
     "sun_vis",
     "foam_light",
     "fog",
+    "body_split",
 ];
 
 /// A debug view named by id or by name (any case), as `$WOW_WATER_VIEW` takes it.

@@ -141,7 +141,9 @@ fn grazing_limit() -> f32 {
 /// the three bands pull the ramp (0 unbanded), `$WOW_WATER_TURB=<0-4>` the turbidity's scale on
 /// both kinds, `$WOW_WATER_REFRACT=<0-8>` the refraction's strength (1 physical), or
 /// `$WOW_WATER_PROBE_REFOG=0|1` and `$WOW_WATER_FLOOR_REFOG=0|1` whether the probe's and the floor
-/// occluder's fog are re-based to the mirror's; each read once, to measure it.
+/// occluder's fog are re-based to the mirror's, or `$WOW_WATER_CLARITY=<0.5-8>` how clear the clear
+/// kinds are (`BodyLook::clarity`: 1 the default, 0.5 the look before the clarity pass, 2 very
+/// clear); each read once, to measure it.
 fn body_look() -> BodyLook {
     struct Forced {
         ceiling: Option<f32>,
@@ -150,6 +152,7 @@ fn body_look() -> BodyLook {
         refract: Option<f32>,
         probe_refog: Option<bool>,
         floor_refog: Option<bool>,
+        clarity: Option<f32>,
     }
     static FORCED: OnceLock<Forced> = OnceLock::new();
     let forced = FORCED.get_or_init(|| {
@@ -171,6 +174,7 @@ fn body_look() -> BodyLook {
             refract: ranged("WOW_WATER_REFRACT", 8.0),
             probe_refog: switch("WOW_WATER_PROBE_REFOG"),
             floor_refog: switch("WOW_WATER_FLOOR_REFOG"),
+            clarity: ranged("WOW_WATER_CLARITY", 8.0).filter(|c| *c > 0.0),
         }
     });
     let look = BodyLook::default();
@@ -183,6 +187,7 @@ fn body_look() -> BodyLook {
         refract: forced.refract.unwrap_or(look.refract),
         probe_refog: forced.probe_refog.unwrap_or(look.probe_refog),
         floor_refog: forced.floor_refog.unwrap_or(look.floor_refog),
+        clarity: forced.clarity.unwrap_or(look.clarity),
         ..look
     }
 }

@@ -48,6 +48,16 @@ pub const TURB_REF: f32 = 0.2377;
 /// then ocean; the deep alpha is 1 everywhere.
 pub const MODAL_SHALLOW_ALPHA: [f32; 2] = [0.5, 0.75];
 
+/// The clarity at which the turbidity the image loses is the swatch's whole turbidity: the look
+/// before the clarity pass. The default clarity of 1 halves it twice ([`turb_keep`]).
+pub const CLARITY_SWATCH: f32 = 0.5;
+
+/// The murk (a kind's turbidity over [`TURB_REF`]) between which the clarity's reach fades from
+/// whole to none: a lake, a harbour or a coast at the modal alpha (murk 1 to 1.6: Loch Modan's,
+/// Booty Bay's, Westfall's, Darkshore's rows) takes it whole; a yellow-green hollow (Felwood's
+/// 2.4, Teldrassil's 2.6) a third of it; a swamp (4) none.
+pub const CLEAR_MURK: [f32; 2] = [1.5, 3.0];
+
 /// The dome law's stops weighed by their share of a horizontal surface's irradiance (the cosine
 /// integral over the rings at 90, 16.8, 9.8, 3.7, 1.8 and 0 degrees): sky0 to sky4, then fog.
 pub const DOME_IRRADIANCE_W: [f32; 6] =
@@ -67,6 +77,11 @@ pub struct BodyLook {
     pub k_phys: f32,
     /// The turbidity's scale, river then ocean.
     pub turb_scale: [f32; 2],
+    /// How clear the clear kinds are: the share of the swatch's turbidity the image loses is
+    /// `(CLARITY_SWATCH / clarity)²` ([`turb_keep`]), so 0.5 is the swatch's whole turbidity, 1
+    /// (the default) a quarter of it and 2 a sixteenth. The swatch's turbidity still paces the
+    /// colour ramp, and a swamp's keeps the image whatever the clarity (`$WOW_WATER_CLARITY`).
+    pub clarity: f32,
     /// The swatch ramp's rate against the turbidity.
     pub ramp_rate: f32,
     /// The three bands' push and edge.
@@ -101,6 +116,7 @@ impl Default for BodyLook {
         Self {
             k_phys: 0.25,
             turb_scale: [1.0; 2],
+            clarity: 1.0,
             ramp_rate: 0.615,
             band_push: 0.5,
             band_edge: 0.22,
@@ -115,11 +131,14 @@ impl Default for BodyLook {
     }
 }
 
-/// A kind's optics: absorption per yard per channel and grey turbidity per yard.
+/// A kind's optics: absorption per yard per channel, the grey turbidity per yard the image loses
+/// (what weighs the in-scatter and scatters the bed away) and the swatch's own turbidity per yard,
+/// which paces the colour ramp alone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KindOptics {
     pub sigma_abs: [f32; 3],
     pub sigma_turb: f32,
+    pub sigma_ramp: f32,
 }
 
 /// The body's illuminant, linear: the sky's and the sun's parts with the body's chroma (`e_*`),
@@ -247,10 +266,27 @@ pub fn kind_optics(
     let f_alpha = (1.0 - shallow_alpha.clamp(0.0, 254.0 / 255.0)).ln()
         / (1.0 - MODAL_SHALLOW_ALPHA[kind]).ln();
     let f_hue = yellowness(sigma_abs) / yellowness(SIGMA_CLEAR_LAKE);
+    let murk = look.turb_scale[kind] * f_alpha * f_hue;
+    let sigma_ramp = TURB_REF * murk;
     KindOptics {
         sigma_abs,
-        sigma_turb: TURB_REF * look.turb_scale[kind] * f_alpha * f_hue,
+        sigma_turb: sigma_ramp * turb_keep(murk, look.clarity),
+        sigma_ramp,
     }
+}
+
+/// The share of a kind's turbidity the image loses, by its `murk` (its turbidity over
+/// [`TURB_REF`]) at `clarity`: the swatch's turbidity is a scattering coefficient, and most of
+/// what clear water scatters goes forward within the pixel and takes nothing from the bed's image,
+/// so a clear kind loses only `(CLARITY_SWATCH / clarity)²` of it (a quarter at the default
+/// clarity of 1, as a Jerlov coastal water loses about a quarter of its scattering to the
+/// backward half), and a kind as murky as a swamp, whose suspension scatters wide, all of it;
+/// between [`CLEAR_MURK`]'s ends the share fades from the one to the other. 1 at
+/// [`CLARITY_SWATCH`] or below, whatever the murk.
+pub fn turb_keep(murk: f32, clarity: f32) -> f32 {
+    let r = CLARITY_SWATCH / clarity.max(CLARITY_SWATCH);
+    let clear = 1.0 - smoothstep(CLEAR_MURK[0], CLEAR_MURK[1], murk);
+    1.0 - clear * (1.0 - r * r)
 }
 
 /// The optical path in yards to a bed `z_bed` yards under the surface, `liquid.wgsl`'s `l_opt`:
@@ -361,8 +397,9 @@ pub fn body_lift(a_g: [f32; 3], lift: f32) -> [f32; 3] {
     a_g.map(|x| lift * x / peak.max(lift.max(1e-4)))
 }
 
-/// The body rows (`WaterBody`): each kind's optics from the clear-noon swatch, the illuminant, the
-/// look's knobs and the terrain shadow's window `shadow` (centre x, z, half extent, valid).
+/// The body rows (`WaterBody`): each kind's optics from the clear-noon swatch (the ramp turbidity
+/// in the foam rows' spare lanes), the illuminant, the look's knobs and the terrain shadow's window
+/// `shadow` (centre x, z, half extent, valid).
 pub fn body_lanes(
     light: &WowLighting,
     dome: &[Vec4; 7],
@@ -371,7 +408,10 @@ pub fn body_lanes(
 ) -> [f32; BODY_FLOATS] {
     let optics = |kind: LiquidKind| {
         let (shallow, deep, alpha, _) = light.water_colors_noon(kind);
-        let o = kind_optics(shallow, deep, alpha, kind == LiquidKind::Ocean, look);
+        kind_optics(shallow, deep, alpha, kind == LiquidKind::Ocean, look)
+    };
+    let (still, ocean) = (optics(LiquidKind::Still), optics(LiquidKind::Ocean));
+    let sig = |o: KindOptics| {
         let [r, g, b] = o.sigma_abs;
         [r, g, b, o.sigma_turb]
     };
@@ -385,8 +425,8 @@ pub fn body_lanes(
     );
     let rgb = |c: [f32; 3], w: f32| [c[0], c[1], c[2], w];
     let rows: [[f32; 4]; 10] = [
-        optics(LiquidKind::Still),
-        optics(LiquidKind::Ocean),
+        sig(still),
+        sig(ocean),
         rgb(e.e_sky, e.s0),
         rgb(e.e_sun, e.k_e),
         [
@@ -403,8 +443,9 @@ pub fn body_lanes(
         ],
         shadow,
         [e.sun_share, look.deep_ceiling, e.night, 0.0],
-        rgb(e.e_sky_foam, 0.0),
-        rgb(e.e_sun_foam, 0.0),
+        // The foam rows' spare lanes carry each kind's ramp turbidity, river then ocean.
+        rgb(e.e_sky_foam, still.sigma_ramp),
+        rgb(e.e_sun_foam, ocean.sigma_ramp),
     ];
     let mut lanes = [0.0; BODY_FLOATS];
     lanes.copy_from_slice(rows.as_flattened());
@@ -557,12 +598,12 @@ mod tests {
         for (ocean, alpha) in [(false, 0.5), (true, 0.75)] {
             let o = kind_optics([0.3, 0.4, 0.4], [0.1, 0.2, 0.25], alpha, ocean, &look);
             let want = TURB_REF * yellowness(o.sigma_abs) / yellowness(SIGMA_CLEAR_LAKE);
-            assert!((o.sigma_turb / want - 1.0).abs() < 1e-5, "{o:?}");
+            assert!((o.sigma_ramp / want - 1.0).abs() < 1e-5, "{o:?}");
         }
         // A 0.85 river is murkier: ln(0.15)/ln(0.5) = 2.74.
         let modal = kind_optics([0.3, 0.4, 0.4], [0.1, 0.2, 0.25], 0.5, false, &look);
         let murky = kind_optics([0.3, 0.4, 0.4], [0.1, 0.2, 0.25], 0.85, false, &look);
-        assert!((murky.sigma_turb / modal.sigma_turb - 2.737).abs() < 1e-3);
+        assert!((murky.sigma_ramp / modal.sigma_ramp - 2.737).abs() < 1e-3);
     }
 
     /// The clear lake's blue over green absorption, the turbidity's hue reference, and a black row
@@ -572,7 +613,7 @@ mod tests {
         assert!((yellowness(SIGMA_CLEAR_LAKE) - 0.7645).abs() < 1e-3);
         assert!((yellowness(anchored(SIGMA_CLEAR_LAKE)) - 0.7645).abs() < 1e-3);
         let o = kind_optics([0.2, 0.3, 0.3], [0.0; 3], 0.5, false, &BodyLook::default());
-        assert!((o.sigma_turb / TURB_REF - 1.0).abs() < 1e-4, "{o:?}");
+        assert!((o.sigma_ramp / TURB_REF - 1.0).abs() < 1e-4, "{o:?}");
     }
 
     /// A blue deep row is clearer than the clear lake, however dull its blue; a teal one about as
@@ -583,7 +624,7 @@ mod tests {
         let look = BodyLook::default();
         let turb = |s: [f32; 3], d: [f32; 3]| {
             let b = |c: [f32; 3]| c.map(|x| x / 255.0);
-            kind_optics(b(s), b(d), 0.5, false, &look).sigma_turb / TURB_REF
+            kind_optics(b(s), b(d), 0.5, false, &look).sigma_ramp / TURB_REF
         };
         let blue = turb([95.0, 80.0, 56.0], [64.0, 78.0, 110.0]);
         let teal = turb([79.0, 93.0, 20.0], [51.0, 82.0, 85.0]);
@@ -592,6 +633,64 @@ mod tests {
         assert!(blue < 0.8, "{blue}");
         assert!((0.9..1.4).contains(&teal), "{teal}");
         assert!(green > 2.0 && yellow > green, "{green} {yellow}");
+    }
+
+    /// The clarity: at the swatch's clarity the image loses the swatch's whole turbidity; at the
+    /// default a clear kind loses a quarter of it and a swamp all of it, and the ramp's turbidity
+    /// is the swatch's at every clarity; at 2 a clear kind loses a sixteenth; below the swatch's
+    /// clarity nothing murkier happens.
+    #[test]
+    fn the_clarity_clears_the_clear_kinds_and_leaves_the_swamp() {
+        assert_eq!(turb_keep(1.0, CLARITY_SWATCH), 1.0);
+        assert_eq!(turb_keep(4.0, CLARITY_SWATCH), 1.0);
+        assert_eq!(turb_keep(1.0, 0.1), 1.0);
+        assert!((turb_keep(0.7, 1.0) - 0.25).abs() < 1e-6);
+        assert!((turb_keep(1.0, 1.0) - 0.25).abs() < 1e-6);
+        assert!((turb_keep(1.0, 2.0) - 0.0625).abs() < 1e-6);
+        assert_eq!(turb_keep(4.1, 1.0), 1.0);
+        assert_eq!(turb_keep(4.1, 2.0), 1.0);
+        assert!((turb_keep(1.6, 1.0) - 0.25).abs() < 0.01);
+        let mid = turb_keep(2.25, 1.0);
+        assert!((0.5..0.75).contains(&mid), "{mid}");
+        let b = |c: [f32; 3]| c.map(|x| x / 255.0);
+        for clarity in [0.5, 1.0, 2.0] {
+            let look = BodyLook {
+                clarity,
+                ..BodyLook::default()
+            };
+            // Loch Modan's noon row (murk 1.36): a lake.
+            let loch = kind_optics(
+                b([95.0, 80.0, 56.0]),
+                b([64.0, 78.0, 110.0]),
+                0.5,
+                false,
+                &look,
+            );
+            let swatch = kind_optics(
+                b([95.0, 80.0, 56.0]),
+                b([64.0, 78.0, 110.0]),
+                0.5,
+                false,
+                &BodyLook {
+                    clarity: CLARITY_SWATCH,
+                    ..BodyLook::default()
+                },
+            );
+            assert_eq!(loch.sigma_ramp, swatch.sigma_ramp);
+            assert_eq!(swatch.sigma_turb, swatch.sigma_ramp);
+            let murk = loch.sigma_ramp / TURB_REF;
+            let want = loch.sigma_ramp * turb_keep(murk, clarity);
+            assert!((loch.sigma_turb - want).abs() < 1e-6, "{clarity}: {loch:?}");
+            // The Swamp of Sorrows' yellow row (murk 4): the image loses it all.
+            let swamp = kind_optics(
+                b([160.0, 125.0, 18.0]),
+                b([84.0, 68.0, 18.0]),
+                0.5,
+                false,
+                &look,
+            );
+            assert_eq!(swamp.sigma_turb, swamp.sigma_ramp, "{clarity}");
+        }
     }
 
     /// The body's light has the terrain's open-sky luminance, whatever its chroma.
@@ -874,6 +973,7 @@ mod tests {
             "o.l_view = z_path / mu_v;",
             "o.l_opt = min(o.l_view + z_path / mu_d, 4096.0);",
             "let tau_t = bi.sig_turb * o.l_opt;",
+            "let tau_ramp = bi.sig_ramp * o.l_opt;",
             "depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),",
             "w.path.x < 0.5,",
         ] {
@@ -919,16 +1019,21 @@ mod tests {
     /// The authored column caps a deep lake's path: a bed 45 yd down under a river column authored
     /// at byte 6 (V 6/42, 0.67 yd) shows through as the 1.12 lake does, where the true column passes
     /// almost nothing (Loch Modan's noon row, a grazing view, the sun 60° up). A column authored at
-    /// V = 1 is the river LUT's 4.67 yd, which still passes a little.
+    /// V = 1 is the river LUT's 4.67 yd, which still passes a little at the swatch's clarity and
+    /// more at the default.
     #[test]
     fn a_deep_lake_bed_shows_through_its_authored_column() {
         let b = |c: [f32; 3]| c.map(|x| x / 255.0);
+        let look = BodyLook {
+            clarity: CLARITY_SWATCH,
+            ..BodyLook::default()
+        };
         let loch = kind_optics(
             b([95.0, 80.0, 56.0]),
             b([64.0, 78.0, 110.0]),
             0.5,
             false,
-            &BodyLook::default(),
+            &look,
         );
         let mu_d = 0.85;
         let t = |path: f32| luma(bed_transmittance(&loch, path));
@@ -940,6 +1045,15 @@ mod tests {
         assert!(t(uncapped) < 1e-3, "{}", t(uncapped));
         let full = optical_path(45.0, AUTHORED_YD_PER_V[0], MU_REFRACTED_MIN, mu_d, true);
         assert!((0.01..0.05).contains(&t(full)), "{}", t(full));
+        let clear = kind_optics(
+            b([95.0, 80.0, 56.0]),
+            b([64.0, 78.0, 110.0]),
+            0.5,
+            false,
+            &BodyLook::default(),
+        );
+        let t_clear = luma(bed_transmittance(&clear, full));
+        assert!((0.05..0.15).contains(&t_clear), "{t_clear}");
     }
 
     /// A bed shallower than its authored column keeps its own path, a deep ocean column authored
@@ -961,6 +1075,7 @@ mod tests {
         let clear = KindOptics {
             sigma_abs: anchored(SIGMA_CLEAR_LAKE),
             sigma_turb: TURB_REF,
+            sigma_ramp: TURB_REF,
         };
         assert!(luma(bed_transmittance(&clear, held)) < 1e-4);
         // WMO water: the byte is no depth.
@@ -1073,5 +1188,14 @@ mod tests {
         assert_eq!(row(2), [e.e_sky[0], e.e_sky[1], e.e_sky[2], e.s0]);
         assert_eq!(row(8)[..3], e.e_sky_foam);
         assert_eq!(row(9)[..3], e.e_sun_foam);
+        // The foam rows' spare lanes: each kind's ramp turbidity.
+        let (shallow, deep, alpha, _) = light.water_colors_noon(LiquidKind::Still);
+        let still = kind_optics(shallow, deep, alpha, false, &BodyLook::default());
+        assert_eq!(row(8)[3], still.sigma_ramp);
+        assert_eq!(row(0)[3], still.sigma_turb);
+        let (shallow, deep, alpha, _) = light.water_colors_noon(LiquidKind::Ocean);
+        let ocean = kind_optics(shallow, deep, alpha, true, &BodyLook::default());
+        assert_eq!(row(9)[3], ocean.sigma_ramp);
+        assert_eq!(row(1)[3], ocean.sigma_turb);
     }
 }

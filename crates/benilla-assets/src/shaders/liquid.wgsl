@@ -202,7 +202,8 @@ fn dome_color(c: DomeColors, dir: vec3<f32>) -> vec3<f32> {
 
 // The body's rows of the look block (`WaterLook::body`).
 struct WaterBody {
-    // rgb the absorption per yard, w the turbidity: river and lake, then the ocean.
+    // rgb the absorption per yard, w the turbidity the image loses per yard (the clarity's share of
+    // the swatch's, `benilla_water::body::turb_keep`): river and lake, then the ocean.
     sig_river: vec4<f32>,
     sig_ocean: vec4<f32>,
     // rgb the sky's and the sun's irradiance, linear, chroma-bounded; e_sky.w the shadow floor's
@@ -219,7 +220,8 @@ struct WaterBody {
     // x the sun's share (debug), y the deep stop's ceiling, z the night weight (debug), w spare.
     spare: vec4<f32>,
     // rgb the sky's and the sun's irradiance in the terrain light's colour, for foam and the
-    // underside: open, they add up to the terrain's open-sky light; w spare.
+    // underside: open, they add up to the terrain's open-sky light; w the swatch's own turbidity
+    // per yard, which paces the colour ramp alone: the river's, then the ocean's.
     e_sky_foam: vec4<f32>,
     e_sun_foam: vec4<f32>,
 };
@@ -5115,9 +5117,12 @@ fn grade_apply(ab: vec4<f32>, r: vec3<f32>) -> vec3<f32> {
 // The bed passes `t_bed = exp(−σ_abs·L)·exp(−σ_turb·L)` per channel and the zone's colour replaces
 // `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the refracted view ray's length from the surface
 // down to the bed's depth plus the way down to the bed along the refracted lighting sun, the depth
-// on ADT water at most the authored column's. The colour is the zone's swatch ramp (`look.body`'s
-// rows from Light.dbc) read at the turbidity's optical depth, in three soft bands.
-// `benilla_water::body` derives σ from the swatch on the CPU.
+// on ADT water at most the authored column's. σ_turb is the turbidity the image loses: the
+// clarity's share of the swatch's (a quarter on a clear kind at the default, all of it on a swamp).
+// The colour is the zone's swatch ramp (`look.body`'s rows from Light.dbc) read at the optical
+// depth of the swatch's own turbidity `σ_ramp`, in three soft bands, so the ramp reads the colour
+// the artists set for the depth whatever the clarity. `benilla_water::body` derives every σ from
+// the swatch on the CPU.
 
 /// Fresh water's index of refraction and its inverse.
 const WATER_IOR: f32 = 1.333;
@@ -5140,9 +5145,11 @@ struct BodyIn {
     s: vec3<f32>,
     m: vec3<f32>,
     d: vec3<f32>,
-    // The kind's absorption per yard per channel and its turbidity per yard.
+    // The kind's absorption per yard per channel, the turbidity per yard its image loses and the
+    // swatch's own turbidity per yard, which paces the colour ramp.
     sig_abs: vec3<f32>,
     sig_turb: f32,
+    sig_ramp: f32,
     // The lift: `look.body.look.w` × the frame sheet's mean alpha; 0 on unlit interiors.
     lift: f32,
     // The authored depth in yards: the column of a bed that is not known, and on ADT water the
@@ -5360,8 +5367,10 @@ fn water_body_optics(
     let t_turb = exp(-tau_t);
     o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);
     o.w_in = select(1.0, 1.0 - t_turb, o.known);
+    // The ramp reads the swatch at the depth the artists coloured, by the swatch's own turbidity.
+    let tau_ramp = bi.sig_ramp * o.l_opt;
     let look = water_reflect.look.body.look;
-    let x0 = select(1.0 - exp(-look.x * tau_t), 1.0, below);
+    let x0 = select(1.0 - exp(-look.x * tau_ramp), 1.0, below);
     let fw = fwidth(x0 * 3.0);
     o.x = saturate(mix(x0, band_soft(x0, fw), look.y) + wake_push);
     o.a_lin = albedo_ramp(bi.s, bi.m, bi.d, o.x);
@@ -5558,6 +5567,9 @@ const WV_SUN_VIS: u32 = 29u;
 const WV_FOAM_LIGHT: u32 = 30u;
 // The surface's fog: the share that stays in r, the fog colour's green and blue in g and b.
 const WV_FOG: u32 = 31u;
+// The pixel's split: r the reflectance, g the in-scatter's weight, b the bed's luma transmittance
+// (the reflection's, the body's and the bed's shares are r, (1 − r)·g and (1 − r)·b), raw.
+const WV_BODY_SPLIT: u32 = 32u;
 
 fn water_view_id() -> u32 {
     return u32(water_reflect.flags.y + 0.5);
@@ -9075,6 +9087,8 @@ fn stylised_water(
         return vec4<f32>(water_enc(body_light.in_scatter), 1.0);
     } else if (view_id == WV_ALBEDO) {
         return vec4<f32>(optics.a_g, 1.0);
+    } else if (view_id == WV_BODY_SPLIT) {
+        return vec4<f32>(f_surf, optics.w_in, luma709(optics.t_bed), 1.0);
     } else if (view_id == WV_GRADE) {
         let keep = select(1.0, grade_keep(grade_rho(surf.rho_a, 0.0)), eye_above);
         return vec4<f32>(surf.rho_a, probe_k, keep, 1.0);
@@ -9442,6 +9456,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         let r63 = swatch_row(body_shallow, body_deep, 63.0, false).rgb;
         let dc = water_reflect.look.body.spare.y;
         let sig = select(water_reflect.look.body.sig_river, water_reflect.look.body.sig_ocean, ocean);
+        let sig_ramp = select(water_reflect.look.body.e_sky_foam.w, water_reflect.look.body.e_sun_foam.w, ocean);
         let unlit = w.path.x > 1.5;
         let bi = BodyIn(
             r0,
@@ -9449,6 +9464,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             mix(r0, r63, dc),
             sig.xyz,
             sig.w,
+            sig_ramp,
             select(water_reflect.look.body.look.w * w.anim.x, 0.0, unlit),
             depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
             unlit,
