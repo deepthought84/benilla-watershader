@@ -337,7 +337,9 @@ struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
     // occlusion this frame (1 on, with water on screen the floor can serve), z the body's
     // visibility rays traced this frame (1 on Medium and High with plane water on screen); y and
-    // z written by the render world; w spare.
+    // z written by the render world; w the render scale (the world camera's target over the
+    // window, in pixels; 0 reads as 1), by which the trains and the caustic ripples fade on the
+    // output pixel.
     quality: vec4<f32>,
     // x the reflection's grazing ceiling (1 = none), y the glint weight in linear light, z a glow
     // excess forced onto every water pixel, w spare.
@@ -2105,8 +2107,11 @@ const WU_CAU_RHO_MAX: f32 = 1.6;
 const WU_CAU_CURV: f32 = 0.57735;
 /// How much deeper the coarse set focuses than the fine one (its ripples' length over theirs).
 const WU_CAU_COARSE: f32 = 3.3;
-/// The footprint over which the net resolves to its mean, yards.
-const WU_CAU_FP_YD: vec2<f32> = vec2<f32>(0.08, 0.35);
+/// A ripple's wavelength in output pixels between which it fades out of the net: the net's lines
+/// are a tenth of the ripple wide, so a ripple under 8 px would alias to speckle, and one at 16 px
+/// draws whole. Each ripple fades by its own wavelength, the fine set's first, and the net's
+/// focus follows what is left ([`wu_cwave`], [`wu_caustic_lens`]).
+const WU_CAU_RIPPLE_PX: vec2<f32> = vec2<f32>(8.0, 16.0);
 /// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
 const WU_CAU_TURB: f32 = 0.6;
 /// The eye's adaptation under water: the bed lies behind yards of in-scatter that flatten it, and
@@ -2122,37 +2127,42 @@ fn wu_caustic_uv(x: vec2<f32>, drift: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(r.x * x.x + r.y * x.y, -r.y * x.x + r.x * x.y) / WU_CAU_TILE_YD + drift;
 }
 
-/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus: `mn` its cycles a tile
-/// on the lattice, `m` its cycles in the clock's period, `p0` its phase; its curvature
-/// `WU_CAU_CURV` along its world heading.
-fn wu_cwave(uv: vec2<f32>, phi: f32, mn: vec2<f32>, m: f32, p0: f32) -> vec3<f32> {
+/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus, and in `w` the square
+/// of what the footprint `fp` (yards an output pixel on the bed) keeps of it: `mn` its cycles a
+/// tile on the lattice, `m` its cycles in the clock's period, `p0` its phase; its curvature
+/// `WU_CAU_CURV` along its world heading, faded as its wavelength nears the pixel
+/// ([`WU_CAU_RIPPLE_PX`]).
+fn wu_cwave(uv: vec2<f32>, phi: f32, mn: vec2<f32>, m: f32, p0: f32, fp: f32) -> vec4<f32> {
     let r = WU_CAU_ROT;
     let d = normalize(vec2<f32>(r.x * mn.x - r.y * mn.y, r.y * mn.x + r.x * mn.y));
-    let w = WU_CAU_CURV * vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y);
-    return -sin(WU_TAU * fract(dot(uv, mn) - m * phi + p0)) * w;
+    let lambda = WU_CAU_TILE_YD / length(mn);
+    let k = smoothstep(WU_CAU_RIPPLE_PX.x, WU_CAU_RIPPLE_PX.y, lambda / max(fp, 1e-5));
+    let w = WU_CAU_CURV * k * vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y);
+    return vec4<f32>(-sin(WU_TAU * fract(dot(uv, mn) - m * phi + p0)) * w, k * k);
 }
 
-/// The fine set's Hessian at lattice point `uv`, per unit focus (ripples of 1.0-0.3 yd); `phi` the
-/// weather clock's phase.
-fn wu_caustic_hessian(uv: vec2<f32>, phi: f32) -> vec3<f32> {
-    var h = wu_cwave(uv, phi, vec2<f32>(2.0, -3.0), 40.0, 0.0000);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, 5.0), 45.0, 0.6180);
-    h += wu_cwave(uv, phi, vec2<f32>(-4.0, -4.0), 50.0, 0.2361);
-    h += wu_cwave(uv, phi, vec2<f32>(7.0, 0.0), 56.0, 0.8541);
-    h += wu_cwave(uv, phi, vec2<f32>(-7.0, 6.0), 63.0, 0.4721);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, -12.0), 71.0, 0.0902);
-    return h;
+/// The fine set's Hessian at lattice point `uv`, per unit focus (ripples of 1.0-0.3 yd), and in
+/// `w` the mean square of what the footprint `fp` keeps of its ripples; `phi` the weather clock's
+/// phase.
+fn wu_caustic_hessian(uv: vec2<f32>, phi: f32, fp: f32) -> vec4<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(2.0, -3.0), 40.0, 0.0000, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 5.0), 45.0, 0.6180, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-4.0, -4.0), 50.0, 0.2361, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(7.0, 0.0), 56.0, 0.8541, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-7.0, 6.0), 63.0, 0.4721, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, -12.0), 71.0, 0.0902, fp);
+    return vec4<f32>(h.xyz, h.w / 6.0);
 }
 
 /// The coarse set's (ripples of 3.6-1.6 yd, slower, as longer waves run).
-fn wu_caustic_hessian_coarse(uv: vec2<f32>, phi: f32) -> vec3<f32> {
-    var h = wu_cwave(uv, phi, vec2<f32>(1.0, 0.0), 21.0, 0.3820);
-    h += wu_cwave(uv, phi, vec2<f32>(2.0, 1.0), 30.0, 0.7639);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, 2.0), 32.0, 0.1459);
-    h += wu_cwave(uv, phi, vec2<f32>(0.0, 1.0), 22.0, 0.5279);
-    h += wu_cwave(uv, phi, vec2<f32>(-1.0, 1.0), 25.0, 0.9098);
-    h += wu_cwave(uv, phi, vec2<f32>(-2.0, 1.0), 33.0, 0.2918);
-    return h;
+fn wu_caustic_hessian_coarse(uv: vec2<f32>, phi: f32, fp: f32) -> vec4<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(1.0, 0.0), 21.0, 0.3820, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(2.0, 1.0), 30.0, 0.7639, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 2.0), 32.0, 0.1459, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(0.0, 1.0), 22.0, 0.5279, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-1.0, 1.0), 25.0, 0.9098, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-2.0, 1.0), 33.0, 0.2918, fp);
+    return vec4<f32>(h.xyz, h.w / 6.0);
 }
 
 /// The regularised intensity's mean over the pattern at focus ratio `rho` (path over
@@ -2164,36 +2174,40 @@ fn wu_caustic_mean(rho: f32) -> f32 {
     return (0.989 + 2.1614 * r2 - 0.1102 * r3) / (1.0 - 0.1993 * r2 + 0.6322 * r3);
 }
 
-/// The caustic of the Hessian `h` (per unit focus) at focus ratio `rho`, mean 1.
-fn wu_caustic_lens(h: vec3<f32>, rho: f32) -> f32 {
+/// The caustic of the Hessian `h` (per unit focus, `w` the mean square its ripples keep) at focus
+/// ratio `rho`, mean 1: a set whose ripples the footprint has faded is the whole set at a shallower
+/// focus, `rho` times the rms it keeps, so its mean is read there; a set faded out is 1 everywhere.
+fn wu_caustic_lens(h: vec4<f32>, rho: f32) -> f32 {
     let jxx = 1.0 + rho * h.x;
     let jzz = 1.0 + rho * h.y;
     let jxz = rho * h.z;
     let det = jxx * jzz - jxz * jxz;
-    return inverseSqrt(det * det + WU_CAU_EPS * WU_CAU_EPS) / wu_caustic_mean(rho);
+    return inverseSqrt(det * det + WU_CAU_EPS * WU_CAU_EPS) / wu_caustic_mean(rho * sqrt(h.w));
 }
 
-/// Both sets' net at lattice point `uv` down a path of `path` yards, mean 1: the fine net sharp in
-/// the first yard or two, handing over to the coarse net, which focuses `WU_CAU_COARSE` times
-/// deeper, as the bed falls away.
-fn wu_caustic_at(uv: vec2<f32>, path: f32, phi: f32) -> f32 {
+/// Both sets' net at lattice point `uv` down a path of `path` yards, seen through a footprint of
+/// `fp` yards an output pixel on the bed, mean 1: the fine net sharp in the first yard or two,
+/// handing over to the coarse net, which focuses `WU_CAU_COARSE` times deeper, as the bed falls
+/// away; each ripple fades as the footprint nears it, the fine set's first.
+fn wu_caustic_at(uv: vec2<f32>, path: f32, phi: f32, fp: f32) -> f32 {
     let wf = 1.0 - smoothstep(1.0, 3.5, path);
     let wc = smoothstep(0.4, 2.0, path);
     var c = 1.0;
     if (wf > 0.0) {
         let rho = min(path / WU_CAU_FOCUS_YD, WU_CAU_RHO_MAX);
-        c += wf * (wu_caustic_lens(wu_caustic_hessian(uv, phi), rho) - 1.0);
+        c += wf * (wu_caustic_lens(wu_caustic_hessian(uv, phi, fp), rho) - 1.0);
     }
     if (wc > 0.0) {
         let rho = min(path / (WU_CAU_FOCUS_YD * WU_CAU_COARSE), WU_CAU_RHO_MAX);
-        c += wc * (wu_caustic_lens(wu_caustic_hessian_coarse(uv, phi), rho) - 1.0);
+        c += wc * (wu_caustic_lens(wu_caustic_hessian_coarse(uv, phi, fp), rho) - 1.0);
     }
     return c;
 }
 
 /// The net, mean 1, on the bed point whose refracted sun ray entered the surface at `entry` (world
-/// XZ) and ran `path` yards down to it: on the octave's lattice at its `drift`, carried along
-/// `flow` (world XZ yards a second) by the two-phase flow map at phase `ph0` as the octave is.
+/// XZ) and ran `path` yards down to it, seen through `fp` yards an output pixel on the bed: on the
+/// octave's lattice at its `drift`, carried along `flow` (world XZ yards a second) by the
+/// two-phase flow map at phase `ph0` as the octave is.
 fn wu_caustic_net(
     entry: vec2<f32>,
     path: f32,
@@ -2201,30 +2215,31 @@ fn wu_caustic_net(
     drift: vec2<f32>,
     flow: vec2<f32>,
     ph0: f32,
+    fp: f32,
 ) -> f32 {
     if (dot(flow, flow) < 1e-4) {
-        return wu_caustic_at(wu_caustic_uv(entry, drift), path, phi);
+        return wu_caustic_at(wu_caustic_uv(entry, drift), path, phi, fp);
     }
     // Two phases half a period apart, blended so the net's variance holds through the restart.
     let ph1 = fract(ph0 + 0.5);
     let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
     let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) * WU_CAU_TILE_YD;
-    let a = wu_caustic_at(wu_caustic_uv(entry - flow * (ph0 * WU_CAU_FLOW_PERIOD_S), drift), path, phi)
+    let a = wu_caustic_at(wu_caustic_uv(entry - flow * (ph0 * WU_CAU_FLOW_PERIOD_S), drift), path, phi, fp)
         - 1.0;
     let b = wu_caustic_at(
         wu_caustic_uv(entry - flow * (ph1 * WU_CAU_FLOW_PERIOD_S) + apart, drift),
         path,
         phi,
+        fp,
     ) - 1.0;
     return 1.0 + (a * w0 + b * (1.0 - w0)) * inverseSqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
 }
 
 /// The net's contrast kept over a path of `path` yards through water of turbidity `sig_turb` per
-/// yard, seen through a footprint of `fp` yards.
-fn wu_caustic_keep(path: f32, sig_turb: f32, fp: f32) -> f32 {
+/// yard; the footprint fades the net's ripples one by one ([`wu_cwave`]).
+fn wu_caustic_keep(path: f32, sig_turb: f32) -> f32 {
     return (1.0 - smoothstep(WU_CAU_FADE_YD.x, WU_CAU_FADE_YD.y, path))
-        * exp(-sig_turb * path * WU_CAU_TURB)
-        * (1.0 - smoothstep(WU_CAU_FP_YD.x, WU_CAU_FP_YD.y, fp));
+        * exp(-sig_turb * path * WU_CAU_TURB);
 }
 
 /// The lighting sun's direct share of the bed's light under its shadow `lit` (1 lit): the sun's
@@ -2339,14 +2354,17 @@ fn wu_post(
                 if (depth > 0.0 && s.y > 0.02) {
                     let path = depth / max(s.y, 0.2);
                     let facing = smoothstep(0.05, 0.5, dot(nr, s));
-                    let amp = wu_caustic_keep(path, u.fog_wet.w, t_d * u.cam_fwd.w)
+                    let amp = wu_caustic_keep(path, u.fog_wet.w)
                         * wu_sun_share(lit * facing, u.sun_dry.w, u.sky_horizon.w, u.sky_zenith.w)
                         * u.fog_dry.w * WU_CAU_UNDER_GAIN;
                     if (amp >= 1.0 / 256.0) {
                         let entry = p.xz + s.xz * path;
+                        // The footprint on the bed: an output pixel's angle over the distance,
+                        // stretched by the ray's grazing on the bed.
+                        let fp = t_d * u.cam_fwd.w / max(abs(dot(rd, nr)), 0.1);
                         // No current from below: the eye's body has none on the CPU.
                         let c = wu_caustic_net(entry, path, u.sun_refr.w,
-                            vec2<f32>(u.cam_right.w, u.cam_up.w), vec2<f32>(0.0), 0.0);
+                            vec2<f32>(u.cam_right.w, u.cam_up.w), vec2<f32>(0.0), 0.0, fp);
                         lin = lin * wu_caustic_gain(c, amp);
                     }
                 }
@@ -4317,12 +4335,38 @@ fn s2_thin_from() -> i32 {
 #endif
 #endif
 }
-/// The pixel filter on q = (px / λ)²: a train keeps (1 − S2_FILTER·q)³ of its slope, the cubic
-/// that follows a Gaussian pixel of σ = 0.5 px, exp(−4.93 q) (0.63 at 3 px against 0.58, 0.78 at
-/// 4 px against 0.73, 0.31 at 2 px against 0.29), and is gone at 1.14 px; no transcendental.
+/// The pixel filter on q = (px / λ)², px the footprint on the internal render: a train keeps
+/// (1 − S2_FILTER·q)³ of its slope, the cubic that follows a Gaussian pixel of σ = 0.5 px,
+/// exp(−4.93 q) (0.63 at 3 px against 0.58, 0.78 at 4 px against 0.73, 0.31 at 2 px against
+/// 0.29), and is gone at 1.14 px; no transcendental.
 const S2_FILTER: f32 = 1.3;
-/// The band cut on q: a band whose longest train is under a pixel is gone with every shorter one.
-const S2_CUT_Q: f32 = 1.0;
+/// The shading cut on q_out = (px_out / λ)², px_out the footprint on the output pixel (the
+/// internal one over the render scale, [`s2_out_scale2`]): a train is whole at 8 output px of
+/// wavelength (q 1/64) and gone at 4 (q 1/16), its slope variance in the roughness from there. A
+/// train's slope is shaded through Fresnel, the mirror read and the glint, none of them linear,
+/// so a train resolved by the pixel grid still beats with it below about 4 px (a crosshatch over
+/// Booty Bay's mid water, Westfall's shelf); the pixel filter alone kept 0.31 of a train at 2
+/// internal px, 1 output px at render scale 2. The Stokes harmonic at λ/2 and the Gerstner warp
+/// are cut by their own wavelength ([`s2_keep`]).
+const S2_NYQ_Q: vec2<f32> = vec2<f32>(0.015625, 0.0625);
+/// The band cut on q_out: a band whose longest train is under 4 output px is gone with every
+/// shorter one.
+const S2_CUT_Q: f32 = 0.0625;
+
+/// The square of the output pixel over the internal one: the render scale (`look.quality.w`, the
+/// world camera's target over the window, 2 at render scale 2; 0 reads as 1), squared. The view
+/// uniform's `mip_bias` cannot say: it is 0 at and above native.
+fn s2_out_scale2() -> f32 {
+    let s = max(water_reflect.look.quality.w, 1.0);
+    return s * s;
+}
+
+/// What a train of q = (px / λ)² on the internal render keeps of its slope: the pixel filter on the
+/// internal footprint and the Nyquist cut on the output one (`so2` the render scale squared).
+fn s2_keep(q: f32, so2: f32) -> f32 {
+    let t = saturate(1.0 - S2_FILTER * q);
+    return t * t * t * (1.0 - smoothstep(S2_NYQ_Q.x, S2_NYQ_Q.y, q * so2));
+}
 /// The resolved low band the reflections slide by: a band whose longest train spans 10 px along
 /// the footprint's major axis (q = 1/100) slides them whole, one of 6 px (q = 1/36) not at all.
 const S2_LO_Q: vec2<f32> = vec2<f32>(1.0 / 36.0, 56.25);
@@ -4355,6 +4399,7 @@ fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
     let dm = maj2 - min2;
     var dead = false;
     let thin_from = s2_thin_from();
+    let so2 = s2_out_scale2();
     for (var b = 0; b < S2_BANDS; b = b + 1) {
         let bv = water_reflect.preview.bands[3 * b];
         let bl = water_reflect.preview.bands[3 * b + 1];
@@ -4369,9 +4414,10 @@ fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
         let band_var = gw * gw * bv.x + gw * gs * bv.y + gs * gs * bv.z;
         f.full += band_var;
         let tensor = water_reflect.preview.bands[3 * b + 2].xyz;
-        // The band's longest train along the major axis: q = (px / λ)².
+        // The band's longest train along the major axis: q = (px / λ)², on the output pixel for
+        // the cut.
         let q_band = maj2 / bl.x;
-        dead = dead || (q_band > S2_CUT_Q);
+        dead = dead || (q_band * so2 > S2_CUT_Q);
         if (dead) {
             f.lost += tensor * band_var;
             continue;
@@ -4391,21 +4437,25 @@ fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
             let bb = water_reflect.preview.trains[3 * i + 1];
             let c = water_reflect.preview.trains[3 * i + 2];
             let amp = a.w * gw + bb.x * gs;
-            // The footprint along the train over its wavelength, squared.
+            // The footprint along the train over its wavelength, squared; the Stokes harmonic
+            // runs at half the wavelength, so its q is four times the train's.
             let e = dot(px.e, c.xy);
             let q = (min2 + e * e * dm) * c.z;
-            let t = saturate(1.0 - S2_FILTER * q);
-            let keep = t * t * t;
-            // The train's slope variance as α²: what the filter drops joins the roughness.
-            let var1 = amp * amp * c.w;
-            band_lost += var1 * (1.0 - keep * keep);
+            let keep = s2_keep(q, so2);
+            let keep2 = s2_keep(4.0 * q, so2);
+            // The train's slope variance as α², the harmonic's with it (`c.w` is 1 + St²): what the
+            // filter drops of each joins the roughness.
+            let st = bb.z;
+            let var1 = amp * amp;
+            band_lost += var1 * ((1.0 - keep * keep) + st * st * (1.0 - keep2 * keep2));
             if (keep > 1e-3) {
                 let th = TAU * fract(dot(a.xy, xz) - a.z);
                 let cs = cos(th);
-                band_slope -= c.xy * (amp * keep * (cs + bb.z * (2.0 * cs * cs - 1.0)));
+                band_slope -= c.xy * (amp * (keep * cs + st * keep2 * (2.0 * cs * cs - 1.0)));
                 if (has_q) {
-                    // h = a·sin θ: the water under this point came from Q·a·cos θ up the train.
-                    xz -= c.xy * (bb.y * amp * cs);
+                    // h = a·sin θ: the water under this point came from Q·a·cos θ up the train,
+                    // as far as the train itself is drawn.
+                    xz -= c.xy * (bb.y * amp * cs * keep);
                 }
             }
         }
@@ -7633,8 +7683,9 @@ fn nwg_sun_share(lit: f32, vis: vec4<f32>) -> f32 {
 /// point the lighting sun's refracted ray through the bed `sb.bed` entered the surface, `z` yards
 /// above it (`BodyOptics::z`), on the visible ripple octave's drift and carried along `flow` as
 /// that octave is. Its contrast is the sun's direct share under the MCSH shadow at the bed and the
-/// body's sun visibility `vis.b`, faded with the path, the kind's turbidity `sig_turb` and the
-/// footprint.
+/// body's sun visibility `vis.b`, faded with the path and the kind's turbidity `sig_turb`; its
+/// ripples fade by the bed's footprint `fr` (yards an internal pixel on the bed, not the
+/// surface's: the bed lies farther, and at a grazing view much farther), in output pixels.
 fn nwg_caustic_gain(
     world_pos: vec3<f32>,
     sb: SceneBehind,
@@ -7655,16 +7706,16 @@ fn nwg_caustic_gain(
     let t = refract(travel, vec3<f32>(0.0, 1.0, 0.0), INV_IOR);
     let path = max(z, 0.0) / max(-t.y, 0.2);
     // Round 3: on the footprint's long axis mostly, so a grazing shelf fades instead of aliasing
-    // into speckle (the geometric mean let Westfall's far shelf crawl).
-    let fp = mix(sqrt(fr.major * fr.minor), fr.major, 0.75);
+    // into speckle (the geometric mean let Westfall's far shelf crawl); on the output pixel.
+    let fp = mix(sqrt(fr.major * fr.minor), fr.major, 0.75) * sqrt(s2_out_scale2());
     let lit = select(1.0, lighting_sun_mcsh(sb.bed, 0.0), bi.adt) * vis.b;
-    let amp = wu_caustic_keep(path, sig_turb, fp) * nwg_sun_share(lit, vis)
+    let amp = wu_caustic_keep(path, sig_turb) * nwg_sun_share(lit, vis)
         * water_reflect.preview.gains.x;
     if (amp < 1.0 / 256.0) {
         return 1.0;
     }
     let c = wu_caustic_net(sb.bed.xz - t.xz * path, path, nwg_phase(), pv_octave_drift(3), flow,
-        water_reflect.cycle.x);
+        water_reflect.cycle.x, fp);
     return wu_caustic_gain(c, amp);
 }
 
@@ -8267,6 +8318,12 @@ fn stylised_water(
     let pv_lx = length(pv_dp_dx.xz);
     let pv_ly = length(pv_dp_dy.xz);
     let pv_fr = NwgFrame(max(max(pv_lx, pv_ly), 1e-6), max(min(pv_lx, pv_ly), 1e-6));
+    // The bed's footprint, for the caustic net: the bed behind the pixel lies farther than the
+    // surface, at a grazing view much farther (read where the bed is known; at its silhouettes the
+    // derivative is large and the net fades, which is what an edge wants).
+    let pv_bed_dx = length(dpdx(sb.bed.xz));
+    let pv_bed_dy = length(dpdy(sb.bed.xz));
+    let pv_fr_bed = NwgFrame(max(max(pv_bed_dx, pv_bed_dy), 1e-6), max(min(pv_bed_dx, pv_bed_dy), 1e-6));
 #endif
 #ifndef WATER_REFRACT
     // The snapshot under this pixel, read once: the composite's bed and the remainder's subtrahend.
@@ -8387,7 +8444,7 @@ fn stylised_water(
 #ifdef WATER_REFRACT
     let held = body_hold(
         water_bed(water_snapshot_px(frag_coord), optics.bed_uv_r, optics.accept)
-            * nwg_caustic_gain(world_pos, sb, optics.z, flow, bi.sig_turb, vis, bi, pv_fr),
+            * nwg_caustic_gain(world_pos, sb, optics.z, flow, bi.sig_turb, vis, bi, pv_fr_bed),
         optics.t_bed,
         optics.w_in,
     );

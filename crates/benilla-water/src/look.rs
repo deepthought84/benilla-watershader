@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::render::camera::MipBias;
+use bevy::window::PrimaryWindow;
 
 use crate::body::{body_lanes, BodyLook, BODY_FLOATS};
 use crate::lighting::WowLighting;
@@ -288,6 +289,10 @@ pub(crate) struct LookInputs<'a> {
     pub(crate) loss: &'a [[f32; 4]],
     /// The body rows ([`body_lanes`]); `None` leaves them 0.
     pub(crate) body: Option<&'a [f32; BODY_FLOATS]>,
+    /// The render scale: the world camera's target over the window, in pixels (2 at render scale
+    /// 2); the shader reads 0 as 1. The wave trains and the caustic ripples fade by the output
+    /// pixel, which the view uniform does not know (`mip_bias` is 0 above native).
+    pub(crate) render_scale: f32,
 }
 
 /// The ripple's loss table and the inputs it was tabulated from, so a frame rebuilds it only when
@@ -319,6 +324,8 @@ pub(crate) struct LookSources<'w, 's> {
     ripple: Option<Res<'w, RippleStats>>,
     aniso: Res<'w, RippleAniso>,
     bias: Query<'w, 's, &'static MipBias, With<WorldCamera>>,
+    camera: Query<'w, 's, &'static Camera, With<WorldCamera>>,
+    window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     shadow: Res<'w, WaterShadowWindow>,
     loss: Local<'s, LossTable>,
 }
@@ -330,12 +337,21 @@ impl LookSources<'_, '_> {
         let ripple = self.ripple.as_deref().copied().unwrap_or_default();
         let bias = self.bias.iter().next().map_or(0.0, |b| b.0);
         let body = body_lanes(light, dome, &self.look.body, self.shadow.lanes());
+        let target = self
+            .camera
+            .iter()
+            .next()
+            .and_then(Camera::physical_target_size);
+        let render_scale = target
+            .zip(self.window.iter().next())
+            .map_or(1.0, |(t, w)| t.x as f32 / w.physical_width().max(1) as f32);
         let inputs = LookInputs {
             tier: self.quality.tier(),
             ripple,
             aniso: self.aniso.0,
             loss: self.loss.rows(&ripple, bias, self.look.feature_fade),
             body: Some(&body),
+            render_scale,
         };
         look_lanes(&self.look, &inputs)
     }
@@ -397,8 +413,11 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
     let mut row = |at: usize, v: [f32; 4]| {
         lanes[at - LOOK_LANES.start..][..4].copy_from_slice(&v);
     };
-    // The tier is a copy for the debug views: the shader branches on its def.
-    row(LOOK_QUALITY, [f32::from(inputs.tier), 0.0, 0.0, 0.0]);
+    // The tier is a copy for the debug views: the shader branches on its def; `w` the render scale.
+    row(
+        LOOK_QUALITY,
+        [f32::from(inputs.tier), 0.0, 0.0, inputs.render_scale],
+    );
     row(
         LOOK_COMPOSITE,
         [
@@ -478,6 +497,18 @@ mod tests {
             high[LOOK_QUALITY - LOOK_LANES.start],
             2.0,
             "the tier's copy"
+        );
+        let scaled = look_lanes(
+            &WaterLook::default(),
+            &LookInputs {
+                render_scale: 2.0,
+                ..LookInputs::default()
+            },
+        );
+        assert_eq!(
+            scaled[LOOK_QUALITY + 3 - LOOK_LANES.start],
+            2.0,
+            "the render scale in quality.w"
         );
         let [graze, glint, glow, _] = row(LOOK_COMPOSITE);
         assert_eq!((graze, glow), (0.45, 0.0));

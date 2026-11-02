@@ -1224,8 +1224,11 @@ const WU_CAU_RHO_MAX: f32 = 1.6;
 const WU_CAU_CURV: f32 = 0.57735;
 /// How much deeper the coarse set focuses than the fine one (its ripples' length over theirs).
 const WU_CAU_COARSE: f32 = 3.3;
-/// The footprint over which the net resolves to its mean, yards.
-const WU_CAU_FP_YD: vec2<f32> = vec2<f32>(0.08, 0.35);
+/// A ripple's wavelength in output pixels between which it fades out of the net: the net's lines
+/// are a tenth of the ripple wide, so a ripple under 8 px would alias to speckle, and one at 16 px
+/// draws whole. Each ripple fades by its own wavelength, the fine set's first, and the net's
+/// focus follows what is left ([`wu_cwave`], [`wu_caustic_lens`]).
+const WU_CAU_RIPPLE_PX: vec2<f32> = vec2<f32>(8.0, 16.0);
 /// How fast turbidity scatters the net away, per unit of the kind's turbidity per yard.
 const WU_CAU_TURB: f32 = 0.6;
 /// The eye's adaptation under water: the bed lies behind yards of in-scatter that flatten it, and
@@ -1241,37 +1244,42 @@ fn wu_caustic_uv(x: vec2<f32>, drift: vec2<f32>) -> vec2<f32> {
     return vec2<f32>(r.x * x.x + r.y * x.y, -r.y * x.x + r.x * x.y) / WU_CAU_TILE_YD + drift;
 }
 
-/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus: `mn` its cycles a tile
-/// on the lattice, `m` its cycles in the clock's period, `p0` its phase; its curvature
-/// `WU_CAU_CURV` along its world heading.
-fn wu_cwave(uv: vec2<f32>, phi: f32, mn: vec2<f32>, m: f32, p0: f32) -> vec3<f32> {
+/// One ripple's share of the Hessian, `(h_xx, h_zz, h_xz)` per unit focus, and in `w` the square
+/// of what the footprint `fp` (yards an output pixel on the bed) keeps of it: `mn` its cycles a
+/// tile on the lattice, `m` its cycles in the clock's period, `p0` its phase; its curvature
+/// `WU_CAU_CURV` along its world heading, faded as its wavelength nears the pixel
+/// ([`WU_CAU_RIPPLE_PX`]).
+fn wu_cwave(uv: vec2<f32>, phi: f32, mn: vec2<f32>, m: f32, p0: f32, fp: f32) -> vec4<f32> {
     let r = WU_CAU_ROT;
     let d = normalize(vec2<f32>(r.x * mn.x - r.y * mn.y, r.y * mn.x + r.x * mn.y));
-    let w = WU_CAU_CURV * vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y);
-    return -sin(WU_TAU * fract(dot(uv, mn) - m * phi + p0)) * w;
+    let lambda = WU_CAU_TILE_YD / length(mn);
+    let k = smoothstep(WU_CAU_RIPPLE_PX.x, WU_CAU_RIPPLE_PX.y, lambda / max(fp, 1e-5));
+    let w = WU_CAU_CURV * k * vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y);
+    return vec4<f32>(-sin(WU_TAU * fract(dot(uv, mn) - m * phi + p0)) * w, k * k);
 }
 
-/// The fine set's Hessian at lattice point `uv`, per unit focus (ripples of 1.0-0.3 yd); `phi` the
-/// weather clock's phase.
-fn wu_caustic_hessian(uv: vec2<f32>, phi: f32) -> vec3<f32> {
-    var h = wu_cwave(uv, phi, vec2<f32>(2.0, -3.0), 40.0, 0.0000);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, 5.0), 45.0, 0.6180);
-    h += wu_cwave(uv, phi, vec2<f32>(-4.0, -4.0), 50.0, 0.2361);
-    h += wu_cwave(uv, phi, vec2<f32>(7.0, 0.0), 56.0, 0.8541);
-    h += wu_cwave(uv, phi, vec2<f32>(-7.0, 6.0), 63.0, 0.4721);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, -12.0), 71.0, 0.0902);
-    return h;
+/// The fine set's Hessian at lattice point `uv`, per unit focus (ripples of 1.0-0.3 yd), and in
+/// `w` the mean square of what the footprint `fp` keeps of its ripples; `phi` the weather clock's
+/// phase.
+fn wu_caustic_hessian(uv: vec2<f32>, phi: f32, fp: f32) -> vec4<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(2.0, -3.0), 40.0, 0.0000, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 5.0), 45.0, 0.6180, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-4.0, -4.0), 50.0, 0.2361, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(7.0, 0.0), 56.0, 0.8541, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-7.0, 6.0), 63.0, 0.4721, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, -12.0), 71.0, 0.0902, fp);
+    return vec4<f32>(h.xyz, h.w / 6.0);
 }
 
 /// The coarse set's (ripples of 3.6-1.6 yd, slower, as longer waves run).
-fn wu_caustic_hessian_coarse(uv: vec2<f32>, phi: f32) -> vec3<f32> {
-    var h = wu_cwave(uv, phi, vec2<f32>(1.0, 0.0), 21.0, 0.3820);
-    h += wu_cwave(uv, phi, vec2<f32>(2.0, 1.0), 30.0, 0.7639);
-    h += wu_cwave(uv, phi, vec2<f32>(1.0, 2.0), 32.0, 0.1459);
-    h += wu_cwave(uv, phi, vec2<f32>(0.0, 1.0), 22.0, 0.5279);
-    h += wu_cwave(uv, phi, vec2<f32>(-1.0, 1.0), 25.0, 0.9098);
-    h += wu_cwave(uv, phi, vec2<f32>(-2.0, 1.0), 33.0, 0.2918);
-    return h;
+fn wu_caustic_hessian_coarse(uv: vec2<f32>, phi: f32, fp: f32) -> vec4<f32> {
+    var h = wu_cwave(uv, phi, vec2<f32>(1.0, 0.0), 21.0, 0.3820, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(2.0, 1.0), 30.0, 0.7639, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(1.0, 2.0), 32.0, 0.1459, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(0.0, 1.0), 22.0, 0.5279, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-1.0, 1.0), 25.0, 0.9098, fp);
+    h += wu_cwave(uv, phi, vec2<f32>(-2.0, 1.0), 33.0, 0.2918, fp);
+    return vec4<f32>(h.xyz, h.w / 6.0);
 }
 
 /// The regularised intensity's mean over the pattern at focus ratio `rho` (path over
@@ -1283,36 +1291,40 @@ fn wu_caustic_mean(rho: f32) -> f32 {
     return (0.989 + 2.1614 * r2 - 0.1102 * r3) / (1.0 - 0.1993 * r2 + 0.6322 * r3);
 }
 
-/// The caustic of the Hessian `h` (per unit focus) at focus ratio `rho`, mean 1.
-fn wu_caustic_lens(h: vec3<f32>, rho: f32) -> f32 {
+/// The caustic of the Hessian `h` (per unit focus, `w` the mean square its ripples keep) at focus
+/// ratio `rho`, mean 1: a set whose ripples the footprint has faded is the whole set at a shallower
+/// focus, `rho` times the rms it keeps, so its mean is read there; a set faded out is 1 everywhere.
+fn wu_caustic_lens(h: vec4<f32>, rho: f32) -> f32 {
     let jxx = 1.0 + rho * h.x;
     let jzz = 1.0 + rho * h.y;
     let jxz = rho * h.z;
     let det = jxx * jzz - jxz * jxz;
-    return inverseSqrt(det * det + WU_CAU_EPS * WU_CAU_EPS) / wu_caustic_mean(rho);
+    return inverseSqrt(det * det + WU_CAU_EPS * WU_CAU_EPS) / wu_caustic_mean(rho * sqrt(h.w));
 }
 
-/// Both sets' net at lattice point `uv` down a path of `path` yards, mean 1: the fine net sharp in
-/// the first yard or two, handing over to the coarse net, which focuses `WU_CAU_COARSE` times
-/// deeper, as the bed falls away.
-fn wu_caustic_at(uv: vec2<f32>, path: f32, phi: f32) -> f32 {
+/// Both sets' net at lattice point `uv` down a path of `path` yards, seen through a footprint of
+/// `fp` yards an output pixel on the bed, mean 1: the fine net sharp in the first yard or two,
+/// handing over to the coarse net, which focuses `WU_CAU_COARSE` times deeper, as the bed falls
+/// away; each ripple fades as the footprint nears it, the fine set's first.
+fn wu_caustic_at(uv: vec2<f32>, path: f32, phi: f32, fp: f32) -> f32 {
     let wf = 1.0 - smoothstep(1.0, 3.5, path);
     let wc = smoothstep(0.4, 2.0, path);
     var c = 1.0;
     if (wf > 0.0) {
         let rho = min(path / WU_CAU_FOCUS_YD, WU_CAU_RHO_MAX);
-        c += wf * (wu_caustic_lens(wu_caustic_hessian(uv, phi), rho) - 1.0);
+        c += wf * (wu_caustic_lens(wu_caustic_hessian(uv, phi, fp), rho) - 1.0);
     }
     if (wc > 0.0) {
         let rho = min(path / (WU_CAU_FOCUS_YD * WU_CAU_COARSE), WU_CAU_RHO_MAX);
-        c += wc * (wu_caustic_lens(wu_caustic_hessian_coarse(uv, phi), rho) - 1.0);
+        c += wc * (wu_caustic_lens(wu_caustic_hessian_coarse(uv, phi, fp), rho) - 1.0);
     }
     return c;
 }
 
 /// The net, mean 1, on the bed point whose refracted sun ray entered the surface at `entry` (world
-/// XZ) and ran `path` yards down to it: on the octave's lattice at its `drift`, carried along
-/// `flow` (world XZ yards a second) by the two-phase flow map at phase `ph0` as the octave is.
+/// XZ) and ran `path` yards down to it, seen through `fp` yards an output pixel on the bed: on the
+/// octave's lattice at its `drift`, carried along `flow` (world XZ yards a second) by the
+/// two-phase flow map at phase `ph0` as the octave is.
 fn wu_caustic_net(
     entry: vec2<f32>,
     path: f32,
@@ -1320,30 +1332,31 @@ fn wu_caustic_net(
     drift: vec2<f32>,
     flow: vec2<f32>,
     ph0: f32,
+    fp: f32,
 ) -> f32 {
     if (dot(flow, flow) < 1e-4) {
-        return wu_caustic_at(wu_caustic_uv(entry, drift), path, phi);
+        return wu_caustic_at(wu_caustic_uv(entry, drift), path, phi, fp);
     }
     // Two phases half a period apart, blended so the net's variance holds through the restart.
     let ph1 = fract(ph0 + 0.5);
     let w0 = 1.0 - abs(2.0 * ph0 - 1.0);
     let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) * WU_CAU_TILE_YD;
-    let a = wu_caustic_at(wu_caustic_uv(entry - flow * (ph0 * WU_CAU_FLOW_PERIOD_S), drift), path, phi)
+    let a = wu_caustic_at(wu_caustic_uv(entry - flow * (ph0 * WU_CAU_FLOW_PERIOD_S), drift), path, phi, fp)
         - 1.0;
     let b = wu_caustic_at(
         wu_caustic_uv(entry - flow * (ph1 * WU_CAU_FLOW_PERIOD_S) + apart, drift),
         path,
         phi,
+        fp,
     ) - 1.0;
     return 1.0 + (a * w0 + b * (1.0 - w0)) * inverseSqrt(w0 * w0 + (1.0 - w0) * (1.0 - w0));
 }
 
 /// The net's contrast kept over a path of `path` yards through water of turbidity `sig_turb` per
-/// yard, seen through a footprint of `fp` yards.
-fn wu_caustic_keep(path: f32, sig_turb: f32, fp: f32) -> f32 {
+/// yard; the footprint fades the net's ripples one by one ([`wu_cwave`]).
+fn wu_caustic_keep(path: f32, sig_turb: f32) -> f32 {
     return (1.0 - smoothstep(WU_CAU_FADE_YD.x, WU_CAU_FADE_YD.y, path))
-        * exp(-sig_turb * path * WU_CAU_TURB)
-        * (1.0 - smoothstep(WU_CAU_FP_YD.x, WU_CAU_FP_YD.y, fp));
+        * exp(-sig_turb * path * WU_CAU_TURB);
 }
 
 /// The lighting sun's direct share of the bed's light under its shadow `lit` (1 lit): the sun's
@@ -1458,14 +1471,17 @@ fn wu_post(
                 if (depth > 0.0 && s.y > 0.02) {
                     let path = depth / max(s.y, 0.2);
                     let facing = smoothstep(0.05, 0.5, dot(nr, s));
-                    let amp = wu_caustic_keep(path, u.fog_wet.w, t_d * u.cam_fwd.w)
+                    let amp = wu_caustic_keep(path, u.fog_wet.w)
                         * wu_sun_share(lit * facing, u.sun_dry.w, u.sky_horizon.w, u.sky_zenith.w)
                         * u.fog_dry.w * WU_CAU_UNDER_GAIN;
                     if (amp >= 1.0 / 256.0) {
                         let entry = p.xz + s.xz * path;
+                        // The footprint on the bed: an output pixel's angle over the distance,
+                        // stretched by the ray's grazing on the bed.
+                        let fp = t_d * u.cam_fwd.w / max(abs(dot(rd, nr)), 0.1);
                         // No current from below: the eye's body has none on the CPU.
                         let c = wu_caustic_net(entry, path, u.sun_refr.w,
-                            vec2<f32>(u.cam_right.w, u.cam_up.w), vec2<f32>(0.0), 0.0);
+                            vec2<f32>(u.cam_right.w, u.cam_up.w), vec2<f32>(0.0), 0.0, fp);
                         lin = lin * wu_caustic_gain(c, amp);
                     }
                 }
