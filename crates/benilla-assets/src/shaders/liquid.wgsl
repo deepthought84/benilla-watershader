@@ -93,8 +93,9 @@ const PROBE_TAPS_MAX: i32 = 3;
 // The second planar mirror's capture, for a second water height in view; `water_reflect.mirror2`.
 @group(#{MATERIAL_BIND_GROUP}) @binding(110) var reflection_tex2: texture_2d<f32>;
 
-// The live wave field (`benilla_world::liquid::ripple_sim`) — a window of simulated water carried
-// along with the viewer. R/G = surface slope, B = the foam the disturbance has whipped up.
+// The live wave field (`benilla_water`'s `ripple_sim`) — a window of simulated water carried
+// along with the viewer, the one source of every wave a body makes. R/G = surface slope, B = the
+// height, A = the foam the water has whipped up, ageing where it was made.
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var wake_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(109) var wake_samp: sampler;
 
@@ -226,28 +227,6 @@ struct WaterBody {
     e_sun_foam: vec4<f32>,
 };
 
-/// The wake's rows, written beside the wave field's window by `benilla_water`'s `ripple_sim`; the
-/// preview block's `wake` (`benilla_water`'s `preview`).
-struct WakeLanes {
-    // x the feature bits (`WU_*`), y the wake clock in seconds reduced by `WU_CLOCK_PERIOD`, z the
-    // live wave field's share kept inside a swimmer's wedge, w the share of the field's height the
-    // body's depth ramp keeps.
-    cfg: vec4<f32>,
-    // The circle every live wake and ring lies in: xy its centre (world XZ), z its radius squared,
-    // w 1 when anything is live.
-    bound: vec4<f32>,
-    // Three rows per swimmer (`WU_SWIMMERS`): xyz the bow point, its y the water surface under it,
-    // w the strength (0 an empty slot); then xy the unit heading in world XZ, z the body's speed in
-    // yd/s, w its half width at the waterline in yards; then x the speed its waves were made at
-    // (held while the body slows, so the pattern keeps its wavelength instead of shrinking onto a
-    // stopping swimmer), y the waves' share left (1 under way, easing to 0 after a stop), zw spare.
-    swimmer: array<vec4<f32>, 12>,
-    // Two rows per ring (`WU_RINGS_MAX`): xy the centre (world XZ), z the age in seconds, w the
-    // strength (0 an empty slot); then x the source's radius in yards, y the decay time in
-    // seconds, z the splash foam it leaves (0-1), w spare.
-    ring: array<vec4<f32>, 16>,
-};
-
 /// The eye-below rows, written by `benilla_water`'s `under` lanes every frame: the member `under`
 /// in the preview block, and the improved underwater combine's uniform (`ffx_glow.wgsl`).
 struct UnderLanes {
@@ -317,8 +296,6 @@ struct WaterPreview {
     drift: array<vec4<f32>, 3>,
     // Eight fall lines, two rows each.
     falls: array<vec4<f32>, 16>,
-    // The swimmers' and rings' rows.
-    wake: WakeLanes,
     // The view from below the surface.
     under: UnderLanes,
     // Room for shader-only iteration.
@@ -859,23 +836,17 @@ const SHORE_EXACT_TRUST: f32 = 0.75;
 
 const WAKE_EDGE_FADE: f32 = 0.08;
 
-/// How white a simulated wake's crest goes. Below the shoreline foam's own level: a wake is
-/// aerated water, a breaking waterline is foam sitting on top of it.
-const WAKE_FOAM_LEVEL: f32 = 0.14;
+/// How white the wave field's foam goes without the preview's lace (the field's foam channel is
+/// coverage, 0-1, laid where the simulated water broke and ageing there). Below the shoreline
+/// foam's own level: a wake is aerated water, a breaking waterline is foam sitting on top of it.
+const WAKE_FOAM_LEVEL: f32 = 0.5;
 
-/// The wake slope at which foam starts, and how fast it arrives after that.
-///
-/// The floor is high and the level low because the reference is much subtler than it first seems:
-/// in the 1.14.2 footage a swimmer's trail is almost entirely a TONAL streak — the water simply a
-/// shade different along the track — with white only in a fleck at the body itself. Most of what
-/// reads as a wake there is not foam at all, which is why the body-depth term below carries the
-/// trail and this only tips the crest nearest the swimmer. Derived from the SLOPE
-/// rather than carried in its own channel: a surface only aerates where it is steep, the slope is
-/// the quantity with the range to say so (the curvature this first used peaks twenty times smaller
-/// than the height and vanished into the bottom of a byte), and taking it from the same two
-/// channels that bend the normal means the white always lands on the face the light does.
-const WAKE_FOAM_FLOOR: f32 = 0.80;
-const WAKE_FOAM_GAIN: f32 = 2.6;
+/// The wave field's slope on the normal: the field encodes `s/√(1+s²)` of `s` = 8 × its slope
+/// (`ripple_sim`'s `ENC_SLOPE`: a swimmer's Kelvin arms run 0.005-0.09 of slope, the trough's face
+/// at the body 0.3), so what is read here is eight times the water's slope, soft-limited, and this
+/// is the look's gain over that: the arms stand against the ambient ripple's tilt and read where
+/// they are, not only at the body.
+const WAKE_SLOPE_GAIN: f32 = 1.2;
 
 /// How far the wake's own height moves the body along the depth ramp. A trough is less water
 /// between the eye and the bed and a crest is more, and reading it that way is what puts a wake on
@@ -1165,19 +1136,14 @@ fn pv_to_shore(shore: f32, shore_offset: vec2<f32>) -> f32 {
 // ---- wu law: begin ----------------------------------------------------------------------------
 // ---- the switches -------------------------------------------------------------------------------
 
-/// One bit per preview feature, `WOW_PREVIEW_WAKE_UNDERWATER`'s names in order.
-const WU_KELVIN: u32 = 1u;
-const WU_BOW: u32 = 2u;
-const WU_COLLAR: u32 = 4u;
-const WU_TRAIL: u32 = 8u;
-const WU_RINGS: u32 = 16u;
+/// One bit per preview feature, `WOW_PREVIEW_WAKE_UNDERWATER`'s names in order (bits 1-16 were the
+/// analytic wake's, which the wave field replaced; the underside's bits keep their places).
 const WU_WINDOW: u32 = 32u;
 const WU_TINT: u32 = 64u;
 const WU_CAUSTICS: u32 = 128u;
 const WU_SHAFTS: u32 = 256u;
 const WU_WATERLINE: u32 = 512u;
 const WU_CAUSTICS_ABOVE: u32 = 1024u;
-const WU_BODY_CUT: u32 = 2048u;
 
 /// Whether the bits lane `bits` (an integer held in a float) has feature `b`.
 fn wu_has(bits: f32, b: u32) -> bool {
@@ -1198,50 +1164,14 @@ const WU_F0: f32 = 0.02;
 const WU_LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
 /// Distance standing in for "nothing along the ray", yards.
 const WU_FAR: f32 = 100000.0;
-/// The wake's and the underwater clocks' periods, seconds; every time term turns a whole number
-/// of times in its period, so neither clock's wrap shows.
-const WU_CLOCK_PERIOD: f32 = 64.0;
+/// The underwater clock's period, seconds; every time term turns a whole number of times in it,
+/// so its wrap never shows.
 const UW_CLOCK_PERIOD: f32 = 256.0;
 
-/// The slots the lanes hold.
-const WU_SWIMMERS: u32 = 4u;
-const WU_RINGS_MAX: u32 = 8u;
-
-/// A swimmer makes waves from this speed and its wake is whole from the second, yd/s.
-const WU_SPEED_MIN: f32 = 0.6;
-const WU_SPEED_FULL: f32 = 3.0;
-/// The body's pressure patch: its σ over the half width at the waterline, about a third of the
-/// body's length, the scale that narrows the wake at swim speed (to about 11° at 4.72 yd/s).
-const WU_PATCH_SIGMA: f32 = 2.0;
-/// The Kelvin field's steepest crest at `WU_KELVIN_REF_YD` (above the ambient ripple's tilt there,
-/// or the arms vanish into it), its decay length behind the bow and its reach (inside the wave
-/// field's 24-yard half window, faded over its last 30%), yards.
-const WU_KELVIN_SLOPE: f32 = 0.8;
-const WU_KELVIN_REF_YD: f32 = 3.0;
-const WU_KELVIN_DECAY: f32 = 14.0;
-const WU_KELVIN_REACH: f32 = 22.0;
-/// The transverse system's gain over the divergent one's (1 physical): at swim speed the patch
-/// spectrum leaves them faint, and a little more lets the wedge's inside read.
-const WU_KELVIN_TRANSVERSE: f32 = 2.4;
-/// tan and cos of the Kelvin cusp's polar angle, 19.47° (tan = 1/(2√2)).
-const WU_CUSP_TAN: f32 = 0.35355339;
-const WU_CUSP_COS: f32 = 0.94280904;
-/// The crest profile e^{q(cos φ − 1)}: its sharpness, its mean (e^{−q}·I0(q)), its steepest
-/// slope.
-const WU_CREST_Q: f32 = 1.1;
-const WU_CREST_MEAN: f32 = 0.4414;
-const WU_CREST_SLOPE: f32 = 0.57;
-/// How far the crests carry past the cusp line, in units of the Airy width (r/K²)^(1/3).
-const WU_FEATHER: f32 = 1.16;
-/// The bow wave's gain, and its crest's apex ahead of the bow point in head units.
-const WU_BOW_GAIN: f32 = 0.55;
-const WU_BOW_APEX: f32 = 0.015;
-/// The kicked trail's bubble lace: lookups a yard (big cells 0.29 yd, small bubbles 0.11 yd), the
-/// stage's life in seconds (a sheet at 0, lace by about half of it, islands by 0.8), how much older
-/// the trail's edges are per (lateral / spread)², and the lace's peak opacity.
+/// The wake's bubble lace: lookups a yard (big cells 0.29 yd, small bubbles 0.11 yd) and its peak
+/// opacity. The foam's stage (a sheet fresh, lace by about half its life, islands by 0.8) is the
+/// wave field's own ageing of it, read from the field's foam channel.
 const WU_LACE_SCALE: f32 = 4.0;
-const WU_LACE_LIFE: f32 = 2.2;
-const WU_LACE_EDGE_AGE: f32 = 0.8;
 const WU_LACE_LEVEL: f32 = 0.7;
 /// The holes' radii in cell units on a fresh sheet (x) and their growth to a spent one (y): the big
 /// cells, then the small bubbles between them.
@@ -1249,15 +1179,10 @@ const WU_LACE_RA: vec2<f32> = vec2<f32>(0.16, 0.46);
 const WU_LACE_RB: vec2<f32> = vec2<f32>(0.16, 0.30);
 /// A film's opacity against a Plateau border's.
 const WU_LACE_FILM: f32 = 0.5;
-/// The steepest normal tilt the summed wake may give.
-const WU_SLOPE_MAX: f32 = 0.85;
-/// A fragment takes a swimmer's wake only within this height of the swimmer's water, yards.
-const WU_SURFACE_MATCH: f32 = 1.0;
-/// The collar's strength on a swimmer at rest, against one under way.
-const WU_COLLAR_REST: f32 = 0.35;
-/// A ring's slope at its packet, per unit of strength (about 0.14 half a yard out from a hand at
-/// strength 0.8, against an ambient ripple tilt of 0.3 to 0.7 near the eye).
-const WU_RING_SLOPE: f32 = 3.2;
+/// The foam channel's coverage at which the lace is whole, and the aerated water's share under it
+/// at that coverage.
+const WU_LACE_FULL: f32 = 0.25;
+const WU_AER_SHARE: f32 = 0.55;
 
 /// Snell's window: its gain over the n² radiance the air's light gains entering the water, the
 /// land haze's share at its rim, the sun's halo and disc, and the transmitted glint's weight.
@@ -1407,176 +1332,11 @@ fn wu_ceiling(c: vec3<f32>, knee: f32, top: f32, floor_share: f32) -> vec3<f32> 
     return max(o, vec3<f32>(dot(o, WU_LUMA) * floor_share));
 }
 
-// ---- the wake (INT-1/2/4/5) ---------------------------------------------------------------------
-
-/// What the wake adds at a fragment.
-struct WuWake {
-    // The height's gradient in world XZ; the normal's horizontal part is its negative.
-    grad: vec2<f32>,
-    // The height, yards.
-    h: f32,
-    // Foam coverage, 0-1: collar, bow crest, kicked trail, splash rings.
-    foam: f32,
-    // The aerated water's share under the foam, 0-1.
-    aer: f32,
-    // The share of the live wave field kept here.
-    keep: f32,
-};
-
-fn wu_wake_none() -> WuWake {
-    return WuWake(vec2<f32>(0.0), 0.0, 0.0, 0.0, 1.0);
-}
-
-/// Two wakes on one fragment: the waves add, the foams and aerations take the larger, the wave
-/// field keeps the smaller share.
-fn wu_wake_add(a: WuWake, b: WuWake) -> WuWake {
-    return WuWake(
-        a.grad + b.grad,
-        a.h + b.h,
-        max(a.foam, b.foam),
-        max(a.aer, b.aer),
-        min(a.keep, b.keep),
-    );
-}
-
-/// The summed wake's normal tilt −∇h, held under `WU_SLOPE_MAX` so no crest tips past it.
-fn wu_wake_tilt(w: WuWake) -> vec2<f32> {
-    let m = length(w.grad);
-    return -w.grad * min(1.0, WU_SLOPE_MAX / max(m, 1e-6));
-}
-
-/// The far field of a pressure patch moving at `u` yd/s over deep water, by stationary phase
-/// (Kelvin's ship wake): both wave systems that meet a point inside the 19.47° wedge, the crests
-/// fixed to the swimmer, on a peaked profile so they read as thin bright lines. `lat` is the offset
-/// across the track and `back` the distance behind the source, yards; `sig2` the patch's (σ/2)²,
-/// `fp` the pixel's footprint. Returns the height and its derivatives across and behind, unscaled
-/// ([`wu_kelvin_norm`]). Waves shorter than about three pixels fade out; past the cusp the crests
-/// carry on as feathers over an Airy width.
-fn wu_kelvin(lat: f32, back: f32, u: f32, sig2: f32, fp: f32) -> vec3<f32> {
-    if (back < 0.05 || u < WU_SPEED_MIN) {
-        return vec3<f32>(0.0);
-    }
-    // K = g/U², the transverse wavenumber: 2πU²/g is 13 yd at swim speed.
-    let kw = WU_G / (u * u);
-    let y = abs(lat);
-    let sy = select(1.0, -1.0, lat < 0.0);
-    let r = max(sqrt(lat * lat + back * back), 0.5);
-    var tau = y / back;
-    var out_d = 0.0;
-    if (tau > WU_CUSP_TAN) {
-        out_d = (y - WU_CUSP_TAN * back) * WU_CUSP_COS;
-        tau = WU_CUSP_TAN;
-    }
-    // tan φ = T/(1 + 2T²) has two roots T = tan θ: the transverse (θ < 35.26°) and the divergent.
-    let disc = sqrt(max(1.0 - 8.0 * tau * tau, 1e-12));
-    let ca = inverseSqrt(1.0 + tau * tau);
-    let sa = tau * ca;
-    // The cusp's caustic softened over its Airy scale, so the arms are crests and not beads.
-    let eps = 2.4 * pow(kw * r, -0.33333333);
-    let near = inverseSqrt(max(r, 1.0) / WU_KELVIN_REF_YD);
-    var acc = vec3<f32>(0.0);
-    for (var j = 0; j < 2; j = j + 1) {
-        let transverse = j == 0;
-        let t = select(
-            min((1.0 + disc) / (4.0 * tau + 1e-4), 40.0),
-            2.0 * tau / (1.0 + disc),
-            transverse,
-        );
-        let sec2 = 1.0 + t * t;
-        let c = inverseSqrt(sec2);
-        let s = t * c;
-        let k = kw * sec2;
-        // The phase's second derivative over θ, which sets the stationary-phase amplitude.
-        let f2 = sec2 * (c * ca + s * sa) * (1.0 - 2.0 * t * t);
-        var amp = sec2 * sec2 * exp(-k * k * sig2) * inverseSqrt(sqrt(f2 * f2 + eps * eps));
-        amp = amp * (1.0 - smoothstep(0.22, 0.45, fp * k / WU_TAU));
-        amp = amp * select(1.0, WU_KELVIN_TRANSVERSE, transverse);
-        let ph = k * (back * c + y * s) + select(-0.78539816, 0.78539816, transverse);
-        let ex = exp(WU_CREST_Q * (cos(ph) - 1.0));
-        let g = -WU_CREST_Q * sin(ph) * ex;
-        acc = acc + amp * vec3<f32>(ex - WU_CREST_MEAN, g * k * s * sy, g * k * c);
-    }
-    let band = WU_FEATHER * pow(r / (kw * kw), 0.33333333);
-    let fade = exp(-pow(max(out_d / band, 1e-6), 1.3)) * smoothstep(0.1, 1.1, back);
-    return acc * (fade * near);
-}
-
-/// The scale that brings [`wu_kelvin`]'s steepest crest near a slope of 1 at `WU_KELVIN_REF_YD`:
-/// over its divergent waves' spectral peak (sec²θ·e^{−k²(σ/2)²} at sec⁴θ = 1/(2K²(σ/2)²), the
-/// transverse wave's at a slow source), their wavenumber there and the crest profile's slope.
-fn wu_kelvin_norm(u: f32, sig2: f32) -> f32 {
-    let kw = WU_G / max(u * u, 1e-3);
-    let sec2 = max(inverseSqrt(2.0 * kw * kw * sig2), 1.0);
-    let k = kw * sec2;
-    let peak = sec2 * exp(-k * k * sig2);
-    return 1.0 / max(peak * k * WU_CREST_SLOPE, 1e-4);
-}
-
-/// The bow wave in head units (half a shoulder span is 0.285), `q` = (across, ahead) of the bow
-/// point: a crest wrapped round the head as a hyperbola opening at about 32° with a trough inside
-/// it, both gone within a body length. Returns the height (head units) and the crest's share.
-fn wu_bow(q: vec2<f32>) -> vec2<f32> {
-    let xb = WU_BOW_APEX - q.y;
-    let y = abs(q.x);
-    let yy = y / 0.19;
-    let sq = sqrt(1.0 + yy * yy);
-    let xc = 0.30 * (sq - 1.0) - 0.05;
-    let sl = 0.30 * yy / (0.19 * sq);
-    // Signed distance to the crest line, positive ahead of and outside it.
-    let d = (xc - xb) * inverseSqrt(1.0 + sl * sl);
-    let behind = max(xb, 0.0);
-    let along = sqrt(y * y + behind * behind);
-    let wd = 0.05 + 0.06 * along;
-    let cr = exp(-d * d / (wd * wd * select(1.0, 0.45, d > 0.0)));
-    let dt = d + 1.9 * wd;
-    let tr = exp(-dt * dt / (2.0 * wd * wd));
-    let a = 0.055 * exp(-along / 0.42);
-    return vec2<f32>(a * (cr - 0.8 * tr), cr * exp(-along / 0.45));
-}
-
-/// Distance from `q` (across, ahead; yards from the bow point) to the swimmer's footprint at the
-/// waterline: a capsule from the head back to the hips, `hw` its half width at the head, tapering.
-fn wu_body_dist(q: vec2<f32>, hw: f32) -> f32 {
-    let head = -0.9 * hw;
-    let hips = -3.2 * hw;
-    let t = clamp((q.y - head) / (hips - head), 0.0, 1.0);
-    let p = vec2<f32>(q.x, q.y - mix(head, hips, t));
-    return length(p) - hw * mix(1.0, 0.7, t);
-}
-
-/// The foam collar at the body's waterline: a thin broken cream band just outside the footprint,
-/// wider at the head where the bow piles water up. `dc` the footprint distance and `aa` the
-/// antialias width (yards), `front` 1 at the head and 0 at the hips, `brk` a cell-border break-up
-/// in [0, 1], `wob` the band's wobble in [−0.5, 0.5].
-fn wu_collar(dc: f32, hw: f32, front: f32, brk: f32, wob: f32, aa: f32) -> f32 {
-    // The sketch's widths are metres on a 0.356 m shoulder; here they scale with the body.
-    let bs = hw / 0.356;
-    // Round 2: a crescent piled at the head that fades along the flanks, and filled inward over
-    // a body's width instead of an outline (a body covers the inside; with none, no lasso).
-    // Round 3: it runs on down the flanks, thinning, to the hips where the trail begins (round 2's
-    // crescent ended at the shoulders and floated ahead of the trail as a detached C).
-    let cw = (0.035 + 0.10 * front + 0.03 * wob) * bs;
-    let band = 1.0 - smoothstep(cw - aa - 0.01, cw, dc);
-    return band * mix(0.45, 1.0, brk) * smoothstep(-0.8 * hw, 0.0, dc) * mix(0.55, 1.0, smoothstep(0.1, 0.7, front));
-}
-
-/// The kicked trail's coverage behind a swimmer, the sketch's law in its metres: `lat` across and
-/// `b` behind the kick's origin, `age` seconds since the water was kicked, `n1` and `n2` two value
-/// noises in world space. The churn just behind the feet, then a trail that widens with √age and
-/// thins over 0.8 s and 3 s.
-fn wu_trail_cover(lat: f32, b: f32, age: f32, n1: f32, n2: f32) -> f32 {
-    let churn = smoothstep(0.6, 1.0, b) * (1.0 - smoothstep(1.2, 2.0, b))
-        * (1.0 - smoothstep(0.18, 0.45, lat));
-    // Round 2: the trail spreads into the wedge as it ages (about five times over its life),
-    // and the churn behind the feet is short, so the band does not keep the body's width.
-    // Round 3: it opens into the wedge faster, breaks into islands sooner and is gone by about
-    // 3 s (round 2's kept one width and brightness to the reeds and read as a rope).
-    let latn = lat / (0.14 + 0.9 * sqrt(age));
-    var cov = (0.26 * exp(-age / 0.5) + 0.1 * exp(-age / 1.6))
-        * (1.0 - smoothstep(0.35, 1.1, latn + 0.55 * (n1 - 0.5)));
-    cov = max(cov, churn * 0.42) * smoothstep(-0.1, 0.25, b) * (0.45 + 1.1 * n2 * n2);
-    return cov * (1.0 - smoothstep(1.6, 3.0, age));
-}
+// ---- the wake's foam (INT-1/2/4/5) ---------------------------------------------------------------
+//
+// The waves themselves are the live wave field's (`benilla_water`'s `ripple_sim`), sampled once in
+// `fragment` and added to the surface's slope: nothing here is drawn around a body. The field's
+// foam channel says where the water broke and how long ago; this gives it texture.
 
 /// Foam as a raft of bubbles (round 4; round 3's web of Worley borders read as cracked glass): a
 /// sheet with round holes at two sizes that grow with the foam's stage `g` (0 fresh, 1 spent), so a
@@ -1596,204 +1356,6 @@ fn wu_foam_lace(p: vec2<f32>, g_in: f32, dens: f32, aa: f32) -> f32 {
     a = a * smoothstep(0.30, 0.52, wu_vnoise(q * 0.55 + vec2<f32>(17.0)) * 0.8 + 0.1 + 0.45 * (1.0 - g));
     a = mix(a, pow(max(1.0 - g, 1e-4), 1.6) * 0.7, smoothstep(0.12, 0.35, aa));
     return a * WU_LACE_LEVEL * dens;
-}
-
-/// One swimmer's wake at `xz`: the Kelvin field, the bow wave, the collar and the kicked trail,
-/// from its three lane rows `a`, `b` and `c` ([`WakeLanes::swimmer`]). `surf_y` is the fragment's
-/// surface height, `fp` its footprint and `aa` its antialias width in yards, `cfg` the wake's
-/// switch row. The trail and the collar's break-up read world space, so foam stays where it was
-/// made while the waves ride with the swimmer.
-///
-/// The Kelvin field runs on the waves' own speed `c.x` and share `c.y`, not the body's speed: the
-/// pattern's wavelength is 2πU²/g, so a field drawn from a speed easing to zero shrank from 13 yd
-/// to a hand's width over the second after a swimmer stopped, its crossing crests a lattice of
-/// cells over the whole wedge. The waves a body made keep the wavelength it made them at; here
-/// they hold it and fade.
-fn wu_swimmer(
-    xz: vec2<f32>,
-    surf_y: f32,
-    fp: f32,
-    aa: f32,
-    a: vec4<f32>,
-    b: vec4<f32>,
-    c: vec4<f32>,
-    cfg: vec4<f32>,
-) -> WuWake {
-    var o = wu_wake_none();
-    let bits = cfg.x;
-    let fwd = b.xy;
-    let side = vec2<f32>(fwd.y, -fwd.x);
-    let d = xz - a.xz;
-    // (across, ahead) of the bow point.
-    let q = vec2<f32>(dot(d, side), dot(d, fwd));
-    let back = -q.y;
-    let u = b.z;
-    let hw = max(b.w, 0.1);
-    if (abs(surf_y - a.y) > WU_SURFACE_MATCH
-        || q.y > 4.0 * hw + 1.0
-        || back > WU_KELVIN_REACH
-        || abs(q.x) > 1.5 + 0.5 * max(back, 0.0)) {
-        return o;
-    }
-    let st = a.w;
-    let ramp = smoothstep(WU_SPEED_MIN, WU_SPEED_FULL, u);
-    let ph = WU_TAU * cfg.y / WU_CLOCK_PERIOD;
-    // Gradient in (across, ahead).
-    var grad = vec2<f32>(0.0);
-    var h = 0.0;
-
-    if (wu_has(bits, WU_KELVIN) && back > 0.05 && c.y > 0.001) {
-        let uw = max(c.x, u);
-        let sig = WU_PATCH_SIGMA * hw;
-        let sig2 = 0.25 * sig * sig;
-        let gain = st * c.y * smoothstep(WU_SPEED_MIN, WU_SPEED_FULL, uw) * WU_KELVIN_SLOPE
-            * wu_kelvin_norm(uw, sig2)
-            * exp(-back / WU_KELVIN_DECAY)
-            * (1.0 - smoothstep(0.7 * WU_KELVIN_REACH, WU_KELVIN_REACH, back));
-        let kv = wu_kelvin(q.x, back, uw, sig2, fp) * gain;
-        h = h + kv.x;
-        grad = grad + vec2<f32>(kv.y, -kv.z);
-    }
-
-    var crest = 0.0;
-    if (wu_has(bits, WU_BOW)) {
-        let sl = 0.285 / hw;
-        let ql = q * sl;
-        if (ql.y > -3.5 && ql.y < 1.5 && abs(ql.x) < 2.4) {
-            let e = 0.015;
-            let b0 = wu_bow(ql);
-            let bx = wu_bow(ql + vec2<f32>(e, 0.0));
-            let bz = wu_bow(ql + vec2<f32>(0.0, e));
-            // The crest is 0.05 head units wide; past a pixel it becomes roughness, not a line.
-            let keep = (1.0 - smoothstep(0.5, 1.5, fp * sl / 0.05)) * st * ramp * WU_BOW_GAIN;
-            h = h + b0.x / sl * keep;
-            // Slopes are the same in head units and yards.
-            grad = grad + vec2<f32>(bx.x - b0.x, bz.x - b0.x) / e * keep;
-            crest = b0.y * st * ramp;
-        }
-    }
-
-    var foam = 0.0;
-    var aer = 0.0;
-    if (wu_has(bits, WU_COLLAR)) {
-        let dc = wu_body_dist(q, hw);
-        if (dc < 0.6 * hw + 0.1) {
-            let front = smoothstep(-1.6 * hw, 0.4 * hw, q.y);
-            let ang = atan2(q.x, q.y + 0.9 * hw);
-            // Whole turns of the angle, so the wobble meets itself behind the head.
-            let wob = 0.35 * sin(ang * 5.0 + ph * 19.0) + 0.15 * sin(ang * 11.0 - ph * 31.0);
-            // Round bubbles at two sizes (8 lookups a yard), drifting slowly round the clock.
-            let pc = xz * 8.0 + 0.6 * vec2<f32>(wu_vnoise(xz * 4.0), wu_vnoise(xz * 4.0 + vec2<f32>(5.2)))
-                + 0.35 * vec2<f32>(sin(ph * 7.0), cos(ph * 7.0));
-            let brk = smoothstep(-0.02, 0.06, wu_bubbles(pc, 0.30, 0.26));
-            let rest = mix(WU_COLLAR_REST, 1.0, ramp);
-            foam = max(foam, wu_collar(dc, hw, front, brk, wob, aa) * st * rest);
-        }
-    }
-    if (crest > 0.01) {
-        // Two still noises crossfaded by the clock: the crest's foam breathes and never pops.
-        let n = mix(
-            wu_vnoise(xz * 8.2),
-            wu_vnoise(xz * 8.2 + vec2<f32>(7.3)),
-            0.5 + 0.5 * sin(ph * 23.0),
-        );
-        foam = max(foam, smoothstep(0.45, 0.75, crest * (0.7 + 0.6 * n)));
-    }
-    if (wu_has(bits, WU_TRAIL) && u > WU_SPEED_MIN) {
-        // Sketch metres for this body, measured from the kick's origin 0.73 m behind the head.
-        let bs = hw / 0.356;
-        // Round 3: the kick's origin at the hips, 0.45 m behind the head, so the trail meets
-        // the collar's flanks.
-        let bk = back / bs - 0.45;
-        let age = max(back - 0.45 * bs, 0.0) / u;
-        if (bk > 0.05 && age < 4.5) {
-            let n1 = wu_vnoise(xz * 1.92 + vec2<f32>(3.0));
-            let n2 = wu_vnoise(xz * 1.28 + vec2<f32>(9.0));
-            let lat = abs(q.x) / bs;
-            let cov = wu_trail_cover(lat, bk, age, n1, n2) * st * ramp;
-            aer = max(aer, saturate(cov * 1.9) * 0.62);
-            if (cov > 0.02) {
-                // Round 4: the lace's stage from the water's age (its edges older, so the band
-                // frays instead of ending on a line), its density from the trail's cover.
-                let latn = lat / (0.14 + 0.9 * sqrt(age));
-                let g = age / WU_LACE_LIFE + WU_LACE_EDGE_AGE * latn * latn + 0.3 * (n1 - 0.5);
-                let s = WU_LACE_SCALE;
-                let lace = wu_foam_lace(xz * s, g, smoothstep(0.02, 0.30, cov), fp * s * 1.5 + 0.015);
-                foam = max(foam, lace);
-            }
-        }
-    }
-
-    o.grad = grad.x * side + grad.y * fwd;
-    o.h = h;
-    o.foam = foam;
-    o.aer = aer;
-    // The wave field stands back inside the wedge, where this draws the swimmer's own waves.
-    let wedge = (1.0 - smoothstep(0.0, 1.5, abs(q.x) - 0.25 * max(back, 0.0) - 1.0))
-        * (1.0 - smoothstep(0.6 * WU_KELVIN_REACH, WU_KELVIN_REACH, back));
-    o.keep = mix(1.0, cfg.z, wedge * st * ramp);
-    return o;
-}
-
-/// The waves from one impulse at the surface (Cauchy–Poisson): at range `r` and age τ the local
-/// wavenumber is k = g·τ²/(4r²), so crests are born at the centre and run outward at twice the
-/// packet's speed. `a` the source's radius sets the packet, `decay` its life, `fp` the footprint.
-/// Returns the height in units of `a` and its gradient (world XZ, `dq` from the centre).
-fn wu_ring(dq: vec2<f32>, age: f32, a: f32, decay: f32, fp: f32) -> vec3<f32> {
-    let r = length(dq) + 1e-3;
-    let tau = age + 0.12;
-    let k = WU_G * tau * tau / (4.0 * r * r);
-    let ka = k * a;
-    var env = ka * ka * exp(-ka * ka) * exp(-age / decay) / (1.0 + r / (6.0 * a));
-    env = env * (1.0 - smoothstep(0.22, 0.45, fp * k / WU_TAU));
-    let ph = k * r;
-    return env * vec3<f32>(cos(ph), sin(ph) * k * dq / r);
-}
-
-/// The splash an impulse leaves: a broken foam ring spreading from the source and a short-lived
-/// core, gone within a second. `r` the range and `a` the source's radius (yards), `brk` the ring's
-/// angular break-up and `core_n` the core's, in [0, 1].
-fn wu_ring_foam(r: f32, age: f32, a: f32, brk: f32, core_n: f32) -> f32 {
-    // The sketch's hand is 0.07 yd; larger sources spread wider foam.
-    let s = sqrt(max(a, 0.01) / 0.07);
-    // Round 2: a ring that spreads to over a yard and lasts two seconds, wide enough to read.
-    // Round 3: the ring is the wave's to draw (refraction and reflection through its slope); its
-    // foam is a faint broken thread that is gone in under a second, not a chalk arc.
-    let rad = (0.10 + 0.60 * sqrt(age)) * s;
-    let life = 1.0 - smoothstep(0.15, 0.8, age);
-    let ring = (1.0 - smoothstep(0.015 * s, 0.05 * s, abs(r - rad))) * life
-        * smoothstep(0.45, 0.7, brk) * 0.3;
-    let core = (1.0 - smoothstep(rad * 0.2, rad * 0.8, r)) * (1.0 - smoothstep(0.05, 0.35, age))
-        * smoothstep(0.3, 0.5, core_n);
-    return max(ring, core * 0.9);
-}
-
-/// One ring event's waves and splash at `xz`, from its two lane rows `ra` and `rb`
-/// ([`WakeLanes::ring`]); nothing past the packet's reach.
-fn wu_ring_event(xz: vec2<f32>, fp: f32, ra: vec4<f32>, rb: vec4<f32>) -> WuWake {
-    var o = wu_wake_none();
-    let dq = xz - ra.xy;
-    let r = length(dq);
-    let age = ra.z;
-    let a = max(rb.x, 0.02);
-    // The packet sits where k·a ≈ 1: r = τ·√(g·a/4).
-    let reach = 0.5 + 2.5 * (age + 0.12) * sqrt(WU_G * a * 0.25);
-    if (r > reach) {
-        return o;
-    }
-    let rv = wu_ring(dq, age, a, max(rb.y, 0.1), fp);
-    let g = ra.w * WU_RING_SLOPE * a;
-    o.h = rv.x * g;
-    o.grad = rv.yz * g;
-    if (rb.z > 0.0 && age < 0.9) {
-        // The break-up reads the ring's direction, not its angle, so it has no seam behind.
-        let dirn = dq / max(r, 1e-4);
-        let seed = fract(ra.xy * 0.37);
-        let brk = wu_vnoise(dirn * 2.6 + vec2<f32>(age * 2.0, 0.0) + seed * 17.0);
-        let core_n = wu_vnoise(dq * (25.0 / sqrt(a / 0.07)) + seed * 29.0);
-        o.foam = wu_ring_foam(r, age, a, brk, core_n) * rb.z;
-    }
-    return o;
 }
 
 // ---- the underside, seen from below (UW-1) ------------------------------------------------------
@@ -5490,40 +5052,7 @@ fn light_release(h: vec3<u32>) -> LightHeld {
 }
 
 #ifdef WATER_PREVIEW
-// ---- the preview's wake and underside glue (wake-underwater) -----------------------------------
-
-/// Every live swimmer's and ring's wake at `xz` on a surface at height `surf_y`
-/// (`preview.wake`), summed; nothing outside the lanes' bounding circle. `fp` the pixel's
-/// footprint, yards.
-fn wake_at(xz: vec2<f32>, surf_y: f32, fp: f32) -> WuWake {
-    var acc = wu_wake_none();
-    let cfg = water_reflect.preview.wake.cfg;
-    let bound = water_reflect.preview.wake.bound;
-    let d = xz - bound.xy;
-    if (bound.w < 0.5 || dot(d, d) > bound.z) {
-        return acc;
-    }
-    let aa = 1.5 * fp;
-    for (var i = 0u; i < WU_SWIMMERS; i = i + 1u) {
-        let a = water_reflect.preview.wake.swimmer[3u * i];
-        if (a.w <= 0.0) {
-            continue;
-        }
-        let b = water_reflect.preview.wake.swimmer[3u * i + 1u];
-        let c = water_reflect.preview.wake.swimmer[3u * i + 2u];
-        acc = wu_wake_add(acc, wu_swimmer(xz, surf_y, fp, aa, a, b, c, cfg));
-    }
-    if (wu_has(cfg.x, WU_RINGS)) {
-        for (var i = 0u; i < WU_RINGS_MAX; i = i + 1u) {
-            let ra = water_reflect.preview.wake.ring[2u * i];
-            if (ra.w <= 0.0) {
-                continue;
-            }
-            acc = wu_wake_add(acc, wu_ring_event(xz, fp, ra, water_reflect.preview.wake.ring[2u * i + 1u]));
-        }
-    }
-    return acc;
-}
+// ---- the preview's underside glue (wake-underwater) ---------------------------------------------
 
 /// The underside's output ([`wu_underside`]): Snell's window over the internal mirror, the mirror
 /// the in-scatter along the reflected ray (no screen-space reflection: it reads no colour off the
@@ -8345,10 +7874,10 @@ fn stylised_water(
     // ---- the live wave field ----------------------------------------------------------------
     //
     // The ambient ripple is a texture of waves. This is water that has actually been pushed on: a
-    // height field integrated on the CPU under the 2-D wave equation, with every swimmer in range a
-    // moving source in it (`benilla_world::liquid::ripple_sim`). What arrives here is its slope,
-    // and it is simply added to the ambient ripple's — a wake is not a decal drawn over the water,
-    // it is the water being a different shape.
+    // height field integrated on the CPU under deep-water dispersion, with every body in or under
+    // the water a moving pressure on it (`benilla_water`'s `ripple_sim`). What arrives here is its
+    // slope, and it is simply added to the ambient ripple's — a wake is not a decal drawn over the
+    // water, it is the water being a different shape; the foam is where that water broke.
     //
     // Sampled UNCONDITIONALLY, with the window handled afterwards: a `textureSample` inside an `if`
     // is non-uniform control flow, its implicit derivatives are undefined there, and WGSL rejects
@@ -8371,19 +7900,33 @@ fn stylised_water(
     let sim_w = min(water_reflect.sim.w, 1.0)
         * inside
         * smoothstep(0.0, WAKE_EDGE_FADE, sim_edge);
-    let wake_slope = (sim_tex.rg * 2.0 - 1.0) * sim_w;
+    let wake_slope = (sim_tex.rg * 2.0 - 1.0) * (sim_w * WAKE_SLOPE_GAIN);
     // The wave's own height, signed — how much water the disturbance has put under this pixel.
     let wake_height = (sim_tex.b * 2.0 - 1.0) * sim_w;
-    let wake_foam = saturate((length(wake_slope) - WAKE_FOAM_FLOOR) * WAKE_FOAM_GAIN);
+    // The foam the field laid where its water broke, ageing in place: coverage, 0-1.
+    let wake_foam = sim_tex.a * sim_w;
 
     // The surface: the ripple octaves through their mips, the wake, and the roughness the mips
     // removed ([`water_surface`]).
 #ifdef WATER_PREVIEW
     // `waves`: the wind's field around the same octaves ([`water_surface_wg`]); a uniform branch,
     // so both arms' implicit-LOD taps stay legal.
-    // `wake`: every live swimmer's and ring's analytic wake over the field ([`wake_at`]);
+    // `wake_foam`: the field's foam as a raft of bubbles, its stage the foam's age (a sheet
+    // fresh, islands spent), and the aerated water under it ([`wu_foam_lace`]);
     // `rivers`/`falls`: the current's and the falls' slope and roughness ([`rivers_falls`]).
-    let wk = wake_at(xz, world_pos.y, pv_fr.major);
+    var wk_foam = 0.0;
+    var wk_aer = 0.0;
+    if (wake_foam > 0.004 && pv_on(PV_WAKE_FOAM)) {
+        let stage = 1.0 - saturate(wake_foam / WU_LACE_FULL);
+        let dens = smoothstep(0.01, WU_LACE_FULL, wake_foam);
+        wk_foam = wu_foam_lace(
+            xz * WU_LACE_SCALE,
+            stage,
+            dens,
+            pv_fr.major * WU_LACE_SCALE * 1.5 + 0.015,
+        );
+        wk_aer = WU_AER_SHARE * smoothstep(0.02, WU_LACE_FULL, wake_foam);
+    }
     let rf = rivers_falls(RfIn(
         world_pos,
         flow,
@@ -8395,7 +7938,7 @@ fn stylised_water(
         pv_dp_dx,
         pv_dp_dy,
     ));
-    let pv_slope = wake_slope * wk.keep + wu_wake_tilt(wk) + rf.slope;
+    let pv_slope = wake_slope + rf.slope;
     var surf: WaterSurface;
     if (pv_on(PV_WAVES) && pv_surface2()) {
         surf = water_surface_s2(xz, flow, pv_slope, wg_wave_kind(flow, shore, sb, tilt));
@@ -8408,7 +7951,7 @@ fn stylised_water(
     surf = nwg_weather_surface(surface_roughen(surf, rf.add2), xz, pv_fr);
     // Held across the tiers to the composite in five words.
     let rf_held = rf_hold(rf);
-    let wk_held = pack2x16float(vec2<f32>(wk.foam, wk.aer));
+    let wk_held = pack2x16float(vec2<f32>(wk_foam, wk_aer));
 #else
     let surf = water_surface(xz, flow, wake_slope);
 #endif
@@ -8431,13 +7974,7 @@ fn stylised_water(
 #endif
 
     // The wake rides the body's column with the world's own bathymetry — see [`WAKE_BODY_DEPTH`].
-#ifdef WATER_PREVIEW
-    // `wake`: the body's depth push cut, the analytic wake reading through the normal instead.
-    let wake_push = wake_height * WAKE_BODY_DEPTH
-        * select(1.0, water_reflect.preview.wake.cfg.w, pv_on(PV_WAKE));
-#else
     let wake_push = wake_height * WAKE_BODY_DEPTH;
-#endif
     // The sun's bearing, taken flat — see [`BODY_RIPPLE_SHADE`]. The epsilon is for the frame at
     // startup before the lanes are written, and for the instant the sun crosses the zenith.
     let sun_xz = normalize(water_reflect.sun.xz + vec2<f32>(1e-4, 1e-4));
@@ -9002,11 +8539,11 @@ fn stylised_water(
     // same surface to be white, and adding them blows out where a swimmer crosses a waterline —
     // which is precisely where a player spends their time in the water.
 #ifdef WATER_PREVIEW
-    // `wake_foam`: the collar, bow crest, trail lace and splash rings beside them.
+    // `wake_foam`: the wave field's foam as lace beside them.
     let wk_late = unpack2x16float(wk_held);
     let foam = max(
         max(max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL), sc.foam),
-        max(wake_foam * WAKE_FOAM_LEVEL, wk_late.x),
+        wk_late.x,
     );
     let rf_late = rf_release(rf_held);
     // `window`: the underside seen from below, Snell's window over the internal mirror. Every
@@ -9057,12 +8594,12 @@ fn stylised_water(
             // The current at 2 yd/s full scale: 0.5 + flow/4 in rg, the speed in b.
             v = vec3<f32>(vec2<f32>(0.5) + 0.25 * flow, saturate(length(flow) * 0.5));
         } else if (view_id == WV_FOAM) {
-            // Each foam's coverage as mixed above: the shore's line and bubbles in r, the wake's
-            // in b; g is the contact foam's, which this look does not draw.
+            // Each foam's coverage as mixed above: the shore's line and bubbles in r, the wave
+            // field's in b; g is the contact foam's, which this look does not draw.
             v = vec3<f32>(
                 max(line * FOAM_LINE_LEVEL, bubbles * FOAM_BUBBLE_LEVEL),
                 0.0,
-                wake_foam * WAKE_FOAM_LEVEL,
+                wake_foam,
             );
         } else if (view_id == WV_THICKNESS) {
             // What is behind the pixel, yards / 8: r the view-Z gap, g the vertical column, b the
@@ -9234,7 +8771,7 @@ fn stylised_water(
     // `shore`: the edge's coverage with the swash's draw-back, then the wet bed, film and rim.
     layer = layer_cover(layer, sc.cover);
     layer = sc_layer(layer, sc, f_surf, refl_out, spec_all);
-    // `wake_foam`: the kicked water's bubble cloud, the body paled toward foam, under the foam.
+    // `wake_foam`: the aerated water under the field's foam, the body paled toward foam.
     if (wk_late.y > 0.0) {
         let aer_l = fog_diffuse(
             mix(light.in_scatter * 1.25, water_dec(PV_FOAM_ALBEDO) * pv_foam_tone(light.foam), WU_AER_MILK),

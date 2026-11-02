@@ -46,7 +46,7 @@ use benilla_world::liquid::{
     RippleAniso, WaterChunkInfo, WaterIndex, WaterMapRef, WaterPassImages, WaterPassSet,
     WaterPipelineCaps, WaterQuality, WaterStyle, UNMIRRORED_RENDER_LAYER,
 };
-use benilla_world::{dev_state, lighting, sky, sun, view, water_fx, world_unit};
+use benilla_world::{dev_state, lighting, sky, sun, view, world_unit};
 
 /// The Improved Water plugin. Add it beside the engine's `WorldPlugins`; `cache_dir` is where each
 /// map's classification is cached (the state folder), `None` to keep nothing.

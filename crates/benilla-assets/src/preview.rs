@@ -10,9 +10,12 @@
 //!   `CAUSTICS_GAIN`, `LIGHTS_GAIN`, `SPARKLES_GAIN`, `RIVER_FOAM_GAIN`, `RIVER_MIST_GAIN` (1),
 //!   `FORCE_RAIN` and `FORCE_SNOW` (0..1 over the zone weather), `RIVER_SLOW` (1: the rivers' slow
 //!   tier, flecks drifting in trails on water under the whitewater's speeds), `SWIMMER` (yards: a
-//!   phantom swimmer that far ahead of the camera, for a still capture of the wake) and, in a
-//!   capture only, `SWIMMER_PASS` (seconds: the phantom swims a fixed straight line instead, passing
-//!   that point then, so a burst shows its wake form and age in place). `SURFACE2` (1: the
+//!   phantom swimmer that far ahead of the camera, a body for the wave field; captures only) with
+//!   `SWIMMER_PASS` (seconds: the phantom swims a fixed straight line instead, passing that point
+//!   then, so a burst shows its wake form and age in place), `SWIMMER_STOP` (seconds: it halts
+//!   there), `SWIMMER_TURN` (degrees a second: from its pass it turns a quarter turn at that rate)
+//!   and `SWIMMER_DEPTH` (yards it swims under its floating depth); `WAKE_FOAM_GAIN` (1: the wave
+//!   field's foam, its breaking rate and its strokes', `ripple_sim`). `SURFACE2` (1: the
 //!   dispersive wave field, `benilla_water`'s `surface2`, draws the surface under `waves`; 0 the
 //!   five ripple octaves, for an A/B), `SURFACE2_GAIN` and `SURFACE2_SWELL` (1: its steepness
 //!   and its swell's), `SURFACE2_THIN` (the band Medium sums every other train from, 1-based:
@@ -64,11 +67,13 @@ pub const SURF: u32 = 1 << 5;
 pub const RIVERS: u32 = 1 << 6;
 /// RIV-4: plunge pools at the feet of the falls found at runtime.
 pub const FALLS: u32 = 1 << 7;
-/// INT-1/2/4: a Kelvin wake and a bow wave behind every swimmer, the body's trench cut.
+/// INT-1/4: every body's waves are the wave field's (`benilla_water`'s `ripple_sim`), which
+/// runs on the stylised lane whatever the preview; this bit is kept for the lever's name.
 pub const WAKE: u32 = 1 << 8;
-/// INT-2/4: the swimmer's foam collar, bow crest and kicked trail over milky water.
+/// INT-2/4: the wave field's foam (where its water broke, ageing in place) as bubble lace over
+/// milky water.
 pub const WAKE_FOAM: u32 = 1 << 9;
-/// INT-2/5: impulse rings for strokes, entry and exit.
+/// INT-2/5: the strokes' kicks on the wave field, which it turns into rings.
 pub const RINGS: u32 = 1 << 10;
 /// UW-1: Snell's window over the internal mirror, seen from below.
 pub const WINDOW: u32 = 1 << 11;

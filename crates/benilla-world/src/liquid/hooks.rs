@@ -212,7 +212,7 @@ pub const LOOK_SHORE_KIND: usize = LOOK_SHORE + 4;
 /// [`PREVIEW_ROWS`] `vec4`s, zero where the preview or a feature of it is off.
 pub const PREVIEW_LANES: std::ops::Range<usize> = LOOK_LANES.end..LOOK_LANES.end + 4 * PREVIEW_ROWS;
 /// The preview block's rows.
-pub const PREVIEW_ROWS: usize = 81 + 3 * S2_TRAINS + 3 * S2_BANDS;
+pub const PREVIEW_ROWS: usize = 51 + 3 * S2_TRAINS + 3 * S2_BANDS;
 /// `mask`: x the feature bits (`benilla_assets::preview`), y the rough reflection's cone share,
 /// z 1 − the rivers' slow tier's gain (`WOW_PREVIEW_RIVER_SLOW`; zero runs it), w 1 while the
 /// dispersive surface draws (`WOW_PREVIEW_SURFACE2`).
@@ -236,17 +236,15 @@ pub const PV_CAP: usize = PV_MASK + 28;
 pub const PV_DRIFT: usize = PV_MASK + 32;
 /// `falls`: eight fall lines, two rows each.
 pub const PV_FALLS: usize = PV_MASK + 44;
-/// `wake`: the swimmers' (three rows each) and rings' rows.
-pub const PV_WAKE: usize = PV_MASK + 108;
 /// `under`: the view from below the surface.
-pub const PV_UNDER: usize = PV_MASK + 228;
+pub const PV_UNDER: usize = PV_MASK + 108;
 /// `spare`: room for shader-only iteration.
-pub const PV_SPARE: usize = PV_MASK + 292;
+pub const PV_SPARE: usize = PV_MASK + 172;
 /// `trains`: the dispersive surface's wave trains (`benilla_water`'s `surface2`), three rows each:
 /// (k·d / 2π in cycles a yard, the phase in cycles, the wind sea's slope amplitude), (the swell's
 /// slope amplitude, Q·λ/2π of the orbital displacement, the Stokes share, –), (the direction, 1/λ²,
 /// 1 + St²).
-pub const PV_TRAINS: usize = PV_MASK + 324;
+pub const PV_TRAINS: usize = PV_MASK + 204;
 /// `bands`: the trains' bands, longest first, three rows each: the band's slope variance sums at
 /// unit gains (wind sea², 2·wind sea·swell, swell², the kind gain's share), (its longest wavelength
 /// squared, its first train, its trains, –), and its direction tensor (xx, zz, xz, –) of trace 1.

@@ -19,6 +19,7 @@ benilla-formats = { path = "../benilla-formats", default-features = false }
 benilla-world = { path = "../benilla-world", default-features = false }
 bevy.workspace = true
 bytemuck = { version = "1", features = ["derive"] }
+rustfft = "6"
 
 [dev-dependencies]
 # The whole-map dump example: zones and terrain heights beside the classification.
