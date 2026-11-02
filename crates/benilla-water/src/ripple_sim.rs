@@ -488,6 +488,8 @@ pub(crate) fn drive_ripple_sim(
     mut was: Local<EntityHashMap<Vec3>>,
     // Fractions of a pulse owed to each unit, from distance travelled and from time standing still.
     mut credit: Local<EntityHashMap<f32>>,
+    // The phantom swimmer's body (captures only), a source like the avatar.
+    phantom: Res<super::preview_rows::PhantomBody>,
 ) {
     // x/y = the window's lower corner, z = 1/extent, w = strength.
     let mut params = [0.0f32; 4];
@@ -566,6 +568,14 @@ pub(crate) fn drive_ripple_sim(
                 Vec2::new(body.x, body.z) - Vec2::new(prev.x, prev.z)
             });
         fire(&mut sim, Entity::PLACEHOLDER, body, step, viewer.height);
+    }
+    if let Some((body, height)) = phantom.0 {
+        let key = super::preview_rows::PHANTOM;
+        seen.push(key);
+        let step = was.insert(key, body).map_or(Vec2::ZERO, |prev| {
+            Vec2::new(body.x, body.z) - Vec2::new(prev.x, prev.z)
+        });
+        fire(&mut sim, key, body, step, height);
     }
     for (entity, transform, unit) in &units {
         if !unit.wades {

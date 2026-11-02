@@ -236,10 +236,12 @@ struct WakeLanes {
     // The circle every live wake and ring lies in: xy its centre (world XZ), z its radius squared,
     // w 1 when anything is live.
     bound: vec4<f32>,
-    // Two rows per swimmer (`WU_SWIMMERS`): xyz the bow point, its y the water surface under it,
-    // w the strength (0 an empty slot); then xy the unit heading in world XZ, z the speed in yd/s,
-    // w the body's half width at the waterline in yards.
-    swimmer: array<vec4<f32>, 8>,
+    // Three rows per swimmer (`WU_SWIMMERS`): xyz the bow point, its y the water surface under it,
+    // w the strength (0 an empty slot); then xy the unit heading in world XZ, z the body's speed in
+    // yd/s, w its half width at the waterline in yards; then x the speed its waves were made at
+    // (held while the body slows, so the pattern keeps its wavelength instead of shrinking onto a
+    // stopping swimmer), y the waves' share left (1 under way, easing to 0 after a stop), zw spare.
+    swimmer: array<vec4<f32>, 12>,
     // Two rows per ring (`WU_RINGS_MAX`): xy the centre (world XZ), z the age in seconds, w the
     // strength (0 an empty slot); then x the source's radius in yards, y the decay time in
     // seconds, z the splash foam it leaves (0-1), w spare.
@@ -1597,10 +1599,16 @@ fn wu_foam_lace(p: vec2<f32>, g_in: f32, dens: f32, aa: f32) -> f32 {
 }
 
 /// One swimmer's wake at `xz`: the Kelvin field, the bow wave, the collar and the kicked trail,
-/// from its two lane rows `a` and `b` ([`WakeLanes::swimmer`]). `surf_y` is the fragment's surface
-/// height, `fp` its footprint and `aa` its antialias width in yards, `cfg` the wake's switch row.
-/// The trail and the collar's break-up read world space, so foam stays where it was made while the
-/// waves ride with the swimmer.
+/// from its three lane rows `a`, `b` and `c` ([`WakeLanes::swimmer`]). `surf_y` is the fragment's
+/// surface height, `fp` its footprint and `aa` its antialias width in yards, `cfg` the wake's
+/// switch row. The trail and the collar's break-up read world space, so foam stays where it was
+/// made while the waves ride with the swimmer.
+///
+/// The Kelvin field runs on the waves' own speed `c.x` and share `c.y`, not the body's speed: the
+/// pattern's wavelength is 2πU²/g, so a field drawn from a speed easing to zero shrank from 13 yd
+/// to a hand's width over the second after a swimmer stopped, its crossing crests a lattice of
+/// cells over the whole wedge. The waves a body made keep the wavelength it made them at; here
+/// they hold it and fade.
 fn wu_swimmer(
     xz: vec2<f32>,
     surf_y: f32,
@@ -1608,6 +1616,7 @@ fn wu_swimmer(
     aa: f32,
     a: vec4<f32>,
     b: vec4<f32>,
+    c: vec4<f32>,
     cfg: vec4<f32>,
 ) -> WuWake {
     var o = wu_wake_none();
@@ -1633,13 +1642,15 @@ fn wu_swimmer(
     var grad = vec2<f32>(0.0);
     var h = 0.0;
 
-    if (wu_has(bits, WU_KELVIN) && back > 0.05) {
+    if (wu_has(bits, WU_KELVIN) && back > 0.05 && c.y > 0.001) {
+        let uw = max(c.x, u);
         let sig = WU_PATCH_SIGMA * hw;
         let sig2 = 0.25 * sig * sig;
-        let gain = st * ramp * WU_KELVIN_SLOPE * wu_kelvin_norm(u, sig2)
+        let gain = st * c.y * smoothstep(WU_SPEED_MIN, WU_SPEED_FULL, uw) * WU_KELVIN_SLOPE
+            * wu_kelvin_norm(uw, sig2)
             * exp(-back / WU_KELVIN_DECAY)
             * (1.0 - smoothstep(0.7 * WU_KELVIN_REACH, WU_KELVIN_REACH, back));
-        let kv = wu_kelvin(q.x, back, u, sig2, fp) * gain;
+        let kv = wu_kelvin(q.x, back, uw, sig2, fp) * gain;
         h = h + kv.x;
         grad = grad + vec2<f32>(kv.y, -kv.z);
     }
@@ -5494,12 +5505,13 @@ fn wake_at(xz: vec2<f32>, surf_y: f32, fp: f32) -> WuWake {
     }
     let aa = 1.5 * fp;
     for (var i = 0u; i < WU_SWIMMERS; i = i + 1u) {
-        let a = water_reflect.preview.wake.swimmer[2u * i];
+        let a = water_reflect.preview.wake.swimmer[3u * i];
         if (a.w <= 0.0) {
             continue;
         }
-        let b = water_reflect.preview.wake.swimmer[2u * i + 1u];
-        acc = wu_wake_add(acc, wu_swimmer(xz, surf_y, fp, aa, a, b, cfg));
+        let b = water_reflect.preview.wake.swimmer[3u * i + 1u];
+        let c = water_reflect.preview.wake.swimmer[3u * i + 2u];
+        acc = wu_wake_add(acc, wu_swimmer(xz, surf_y, fp, aa, a, b, c, cfg));
     }
     if (wu_has(cfg.x, WU_RINGS)) {
         for (var i = 0u; i < WU_RINGS_MAX; i = i + 1u) {

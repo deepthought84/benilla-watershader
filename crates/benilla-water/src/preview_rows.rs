@@ -84,6 +84,32 @@ const EASE_OUT: f32 = 0.6;
 const STROKE_YD: f32 = 2.4;
 /// The swim speed the phantom swimmer crosses the view at, yd/s.
 const SWIM_SPEED: f32 = 4.72;
+/// A swimmer's waves keep the speed they were made at: it follows the body's at once when the body
+/// quickens, relaxes toward it over `WAVE_RELAX` seconds while the body holds between `WAVE_HOLD`
+/// of it and it, and under that share holds while the waves fade out over `WAVE_FADE` seconds;
+/// the pattern takes the body's speed again once they have gone. Without the hold the Kelvin
+/// field, whose wavelength is 2πU²/g, was redrawn from the body's easing speed and shrank onto a
+/// stopping swimmer as a lattice of fine cells. (A test against the previous frame's speed is no
+/// hold: an exponential release loses two percent a frame and passes any per-frame tolerance.)
+const WAVE_HOLD: f32 = 0.7;
+const WAVE_RELAX: f32 = 3.0;
+const WAVE_FADE: f32 = 0.5;
+/// The phantom swimmer's height and how deep its body floats, yards: a human's, at the reference
+/// gate's full strength.
+const PHANTOM_HEIGHT: f32 = 2.03;
+const PHANTOM_FLOAT: f32 = 1.52;
+
+/// The phantom swimmer's key in the trackers (the avatar's is `Entity::PLACEHOLDER`).
+pub(crate) const PHANTOM: Entity = match Entity::from_raw_u32(u32::MAX - 1) {
+    Some(e) => e,
+    None => unreachable!(),
+};
+
+/// The phantom swimmer's body this frame, for the wave simulation to push on as it pushes on the
+/// avatar's: its position (Bevy) and height. `None` unless the phantom swims its line
+/// (`$WOW_PREVIEW_SWIMMER_PASS`, captures only).
+#[derive(Resource, Default)]
+pub(crate) struct PhantomBody(pub(crate) Option<(Vec3, f32)>);
 
 /// One tracked swimmer.
 struct WakeTrack {
@@ -94,6 +120,9 @@ struct WakeTrack {
     in_water: bool,
     credit: f32,
     side: f32,
+    /// The speed its waves were made at and their share left ([`WAVE_HOLD`]).
+    wave_u: f32,
+    wave: f32,
 }
 
 /// The wake's state across frames.
@@ -109,14 +138,14 @@ struct WakeState {
 
 /// The phantom swimmer's straight line (`$WOW_PREVIEW_SWIMMER_PASS`, captures only): `anchor` the
 /// point it passes at `pass` seconds of virtual time, `heading` its course, `t` the virtual time so
-/// far, and its stroke credit and side.
+/// far, and `stop` the time it halts where it is (`$WOW_PREVIEW_SWIMMER_STOP`; none, it swims on),
+/// so a burst shows the water settle after a swimmer.
 struct PhantomSwim {
     anchor: Vec2,
     heading: Vec2,
     pass: f32,
     t: f32,
-    credit: f32,
-    side: f32,
+    stop: Option<f32>,
 }
 
 /// `$WOW_PREVIEW_SWIMMER_PASS=<s>`, read once: the phantom swims a fixed line through the world,
@@ -131,6 +160,15 @@ fn phantom_pass() -> Option<f32> {
     })
 }
 
+/// `$WOW_PREVIEW_SWIMMER_STOP=<s>`, read once: the virtual time the phantom halts at.
+fn phantom_stop() -> Option<f32> {
+    static STOP: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *STOP.get_or_init(|| {
+        let stop = lever::number("SWIMMER_STOP", -1.0, 0.0, 3600.0);
+        (stop >= 0.0).then_some(stop)
+    })
+}
+
 impl WakeState {
     fn ring(&mut self, at: Vec2, radius: f32, decay: f32, strength: f32, foam: f32) {
         self.rings[self.next] = [at.x, at.y, 0.0, strength, radius, decay, foam, 0.0];
@@ -138,9 +176,9 @@ impl WakeState {
     }
 }
 
-/// One slot's rows: the bow point on its surface and its strength, then heading, speed and half
-/// width.
-type Slot = ([f32; 4], [f32; 4]);
+/// One slot's rows: the bow point on its surface and its strength; heading, speed and half width;
+/// the waves' speed and share.
+type Slot = ([f32; 4], [f32; 4], [f32; 4]);
 
 /// The surface height under a Bevy point, and its depth below it (surface minus the point).
 fn surface_under(
@@ -171,10 +209,12 @@ fn drive_wake_lanes(
     index: Res<WaterIndex>,
     mut st: Local<WakeState>,
     mut lanes: ResMut<PreviewLanes>,
+    mut phantom_body: ResMut<PhantomBody>,
 ) {
     let base = at(PV_WAKE);
-    let rows = &mut lanes.0[base..base + 104];
+    let rows = &mut lanes.0[base..base + 120];
     rows.fill(0.0);
+    phantom_body.0 = None;
     let bits = wu_bits() & (WU_KELVIN | WU_BOW | WU_COLLAR | WU_TRAIL | WU_RINGS | WU_BODY_CUT);
     if !style.is_stylised() || bits == 0 {
         return;
@@ -192,6 +232,41 @@ fn drive_wake_lanes(
             subjects.push((e, t.translation, u.height, u.scale));
         }
     }
+    // The phantom swimmer on its fixed line (`$WOW_PREVIEW_SWIMMER_PASS`): a body like the
+    // avatar's, tracked, stroking and stopping as one, and the wave field's to push on.
+    static PHANTOM_YD: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    let phantom = *PHANTOM_YD.get_or_init(|| lever::number("SWIMMER", 0.0, 0.0, 200.0));
+    let cam_frame = cam.single().ok().map(|t| {
+        let fwd = Vec2::new(t.forward().x, t.forward().z).normalize_or(Vec2::Y);
+        let right = Vec2::new(-fwd.y, fwd.x);
+        let c = t.translation();
+        (c, fwd, right)
+    });
+    if let (true, Some(pass), Some((c, fwd, right))) = (phantom > 0.0, phantom_pass(), cam_frame) {
+        let ahead = Vec2::new(c.x, c.z) + fwd * phantom;
+        let sw = st.swim.get_or_insert(PhantomSwim {
+            anchor: ahead,
+            heading: -right,
+            pass,
+            t: 0.0,
+            stop: phantom_stop(),
+        });
+        // Laid from the view as the clock starts, after the scene's still settle.
+        if sw.t == 0.0 {
+            sw.anchor = ahead;
+            sw.heading = -right;
+        }
+        sw.t += dt;
+        let along = sw.stop.map_or(sw.t, |stop| sw.t.min(stop));
+        let at2 = sw.anchor + sw.heading * (SWIM_SPEED * (along - sw.pass));
+        if let Some((surface_wow, _)) =
+            surface_under(&index, &water, Vec3::new(at2.x, c.y + 50.0, at2.y))
+        {
+            let body = Vec3::new(at2.x, surface_wow - PHANTOM_FLOAT, at2.y);
+            subjects.push((PHANTOM, body, PHANTOM_HEIGHT, 1.0));
+            phantom_body.0 = Some((body, PHANTOM_HEIGHT));
+        }
+    }
     let mut live: Vec<(f32, Slot)> = Vec::new();
     let mut seen: Vec<Entity> = Vec::new();
     for (entity, p, height, scale) in subjects {
@@ -206,6 +281,8 @@ fn drive_wake_lanes(
             in_water: reach.is_some(),
             credit: 0.0,
             side: 1.0,
+            wave_u: 0.0,
+            wave: 0.0,
         });
         let step = Vec2::new(p.x - track.last.x, p.z - track.last.z);
         track.last = p;
@@ -227,6 +304,24 @@ fn drive_wake_lanes(
                 SPEED_RELEASE
             };
             track.speed += (v - track.speed) * (1.0 - (-dt / tau).exp());
+            // The waves' speed follows the body's up at once and down only slowly; when the body
+            // slows past `WAVE_HOLD` of it the waves keep their speed and fade, and take the
+            // body's again once gone.
+            if track.speed >= track.wave_u {
+                track.wave_u = track.speed;
+            } else if track.speed >= WAVE_HOLD * track.wave_u {
+                track.wave_u += (track.speed - track.wave_u) * (dt / WAVE_RELAX).min(1.0);
+            }
+            let want = if track.speed >= WAVE_HOLD * track.wave_u {
+                1.0
+            } else {
+                0.0
+            };
+            let ease = if want > track.wave { EASE_IN } else { WAVE_FADE };
+            track.wave += (want - track.wave) * (dt / ease).min(1.0);
+            if track.wave < 0.02 {
+                track.wave_u = track.speed;
+            }
             let target = reach.unwrap_or(0.0);
             let ease = if target > track.strength {
                 EASE_IN
@@ -262,6 +357,7 @@ fn drive_wake_lanes(
             }
         }
         let (heading, speed, strength) = (track.heading, track.speed, track.strength);
+        let (wave_u, wave) = (track.wave_u, track.wave);
         if let (Some(at), true) = (stroke, bits & WU_RINGS != 0) {
             st.ring(at.0, 0.07 * s, 2.5, at.1, 0.7);
         }
@@ -276,80 +372,48 @@ fn drive_wake_lanes(
         live.push((
             if entity == Entity::PLACEHOLDER {
                 -1.0
+            } else if entity == PHANTOM {
+                -2.0
             } else {
                 d
             },
             (
                 [bow.x, surface_wow, bow.y, strength],
                 [heading.x, heading.y, speed, hw],
+                [wave_u, wave, 0.0, 0.0],
             ),
         ));
     }
     st.tracks.retain(|e, _| seen.contains(e));
 
-    // The phantom swimmer, ahead of the camera on the water there; with a pass time, on its fixed
-    // line from there instead, its strokes rings it leaves behind as it swims.
-    static PHANTOM: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    let phantom = *PHANTOM.get_or_init(|| lever::number("SWIMMER", 0.0, 0.0, 200.0));
-    if phantom > 0.0 {
-        if let Ok(t) = cam.single() {
-            let fwd = Vec2::new(t.forward().x, t.forward().z).normalize_or(Vec2::Y);
-            let right = Vec2::new(-fwd.y, fwd.x);
-            let c = t.translation();
-            let ahead = Vec2::new(c.x, c.z) + fwd * phantom;
-            let swim = phantom_pass().map(|pass| {
-                let sw = st.swim.get_or_insert(PhantomSwim {
-                    anchor: ahead,
-                    heading: -right,
-                    pass,
-                    t: 0.0,
-                    credit: 0.0,
-                    side: 1.0,
-                });
-                // Laid from the view as the clock starts, after the scene's still settle.
-                if sw.t == 0.0 {
-                    sw.anchor = ahead;
-                    sw.heading = -right;
-                }
-                sw.t += dt;
-                sw.credit += SWIM_SPEED * dt / STROKE_YD;
+    // The still phantom (`$WOW_PREVIEW_SWIMMER` without a pass time): ahead of the camera on the
+    // water there, under way at swim speed with its last three strokes behind it, for a still
+    // capture of the wake.
+    if let (true, None, Some((c, fwd, right))) = (phantom > 0.0, phantom_pass(), cam_frame) {
+        let at2 = Vec2::new(c.x, c.z) + fwd * phantom;
+        let heading = -right;
+        if let Some((surface_wow, _)) =
+            surface_under(&index, &water, Vec3::new(at2.x, c.y + 50.0, at2.y))
+        {
+            live.insert(
+                0,
                 (
-                    sw.anchor + sw.heading * (SWIM_SPEED * (sw.t - sw.pass)),
-                    sw.heading,
-                )
-            });
-            let (at2, heading) = swim.unwrap_or((ahead, -right));
-            if let Some((surface_wow, _)) =
-                surface_under(&index, &water, Vec3::new(at2.x, c.y + 50.0, at2.y))
-            {
-                live.insert(
-                    0,
+                    -2.0,
                     (
-                        -2.0,
-                        (
-                            [at2.x, surface_wow, at2.y, 1.0],
-                            [heading.x, heading.y, SWIM_SPEED, 0.32],
-                        ),
+                        [at2.x, surface_wow, at2.y, 1.0],
+                        [heading.x, heading.y, SWIM_SPEED, 0.32],
+                        [SWIM_SPEED, 1.0, 0.0, 0.0],
                     ),
-                );
+                ),
+            );
+            if bits & WU_RINGS != 0 {
                 let side = Vec2::new(heading.y, -heading.x);
-                if let (Some(sw), true) = (st.swim.as_mut(), bits & WU_RINGS != 0) {
-                    // A stroke per `STROKE_YD` swum, on alternating sides behind the bow.
-                    if sw.credit >= 1.0 {
-                        sw.credit = (sw.credit - 1.0).min(1.0);
-                        sw.side = -sw.side;
-                        let p = at2 - heading * 0.9 + side * (0.35 * sw.side);
-                        st.ring(p, 0.07, 2.5, 0.8, 0.7);
-                    }
-                } else if bits & WU_RINGS != 0 {
-                    // Its last three strokes, aged by the swim speed.
-                    for k in 1..=3 {
-                        let back = STROKE_YD * k as f32 - 1.5;
-                        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
-                        let p = at2 - heading * (0.9 + back) + side * (0.35 * sign);
-                        let i = RINGS - k;
-                        st.rings[i] = [p.x, p.y, back / SWIM_SPEED, 0.8, 0.07, 2.5, 0.7, 0.0];
-                    }
+                for k in 1..=3 {
+                    let back = STROKE_YD * k as f32 - 1.5;
+                    let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+                    let p = at2 - heading * (0.9 + back) + side * (0.35 * sign);
+                    let i = RINGS - k;
+                    st.rings[i] = [p.x, p.y, back / SWIM_SPEED, 0.8, 0.07, 2.5, 0.7, 0.0];
                 }
             }
         }
@@ -371,7 +435,7 @@ fn drive_wake_lanes(
     let centre = cam_at.map_or(Vec2::ZERO, |c| Vec2::new(c.x, c.z));
     let mut reach2: f32 = 0.0;
     let mut any = false;
-    for (_, (a, _)) in &live {
+    for (_, (a, _, _)) in &live {
         reach2 = reach2.max(Vec2::new(a[0], a[2]).distance(centre) + 26.0);
         any = true;
     }
@@ -393,12 +457,13 @@ fn drive_wake_lanes(
         reach2 * reach2,
         if any { 1.0 } else { 0.0 },
     ]);
-    for (i, (_, (a, b))) in live.iter().enumerate() {
-        rows[8 + 8 * i..12 + 8 * i].copy_from_slice(a);
-        rows[12 + 8 * i..16 + 8 * i].copy_from_slice(b);
+    for (i, (_, (a, b, c))) in live.iter().enumerate() {
+        rows[8 + 12 * i..12 + 12 * i].copy_from_slice(a);
+        rows[12 + 12 * i..16 + 12 * i].copy_from_slice(b);
+        rows[16 + 12 * i..20 + 12 * i].copy_from_slice(c);
     }
     for (i, r) in st.rings.iter().enumerate() {
-        rows[40 + 8 * i..48 + 8 * i].copy_from_slice(r);
+        rows[56 + 8 * i..64 + 8 * i].copy_from_slice(r);
     }
 }
 
@@ -1442,6 +1507,7 @@ fn drive_fall_lanes(
 }
 
 pub(super) fn register(app: &mut App) {
+    app.init_resource::<PhantomBody>();
     app.add_systems(
         PostUpdate,
         (
