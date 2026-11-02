@@ -5179,7 +5179,7 @@ fn grade_apply(ab: vec4<f32>, r: vec3<f32>) -> vec3<f32> {
 // `w_in = 1 − exp(−σ_turb·L)` of it, along `L`, the refracted view ray's length from the surface
 // down to the bed's depth plus the way down to the bed along the refracted lighting sun, the depth
 // on ADT water at most the authored column's. σ_turb is the turbidity the image loses: the
-// clarity's share of the swatch's (a quarter on a clear kind at the default, all of it on a swamp).
+// clarity's share of the swatch's (a sixteenth on a clear kind at the default, all of it on a swamp).
 // The colour is the zone's swatch ramp (`look.body`'s rows from Light.dbc) read at the optical
 // depth of the swatch's own turbidity `σ_ramp`, in three soft bands, so the ramp reads the colour
 // the artists set for the depth whatever the clarity. `benilla_water::body` derives every σ from

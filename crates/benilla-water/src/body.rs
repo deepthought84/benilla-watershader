@@ -49,8 +49,10 @@ pub const TURB_REF: f32 = 0.2377;
 pub const MODAL_SHALLOW_ALPHA: [f32; 2] = [0.5, 0.75];
 
 /// The clarity at which the turbidity the image loses is the swatch's whole turbidity: the look
-/// before the clarity pass. The default clarity of 1 halves it twice ([`turb_keep`]).
-pub const CLARITY_SWATCH: f32 = 0.5;
+/// before the clarity pass. The default clarity of 1 quarters it twice ([`turb_keep`]): the first
+/// clarity pass set this at 0.5 (a quarter of the swatch's), and the owner wanted the clear water
+/// clearer still, the bed readable to mid depth, so the default is now what its lever gave at 2.
+pub const CLARITY_SWATCH: f32 = 0.25;
 
 /// The murk (a kind's turbidity over [`TURB_REF`]) between which the clarity's reach fades from
 /// whole to none: a lake, a harbour or a coast at the modal alpha (murk 1 to 1.6: Loch Modan's,
@@ -78,8 +80,9 @@ pub struct BodyLook {
     /// The turbidity's scale, river then ocean.
     pub turb_scale: [f32; 2],
     /// How clear the clear kinds are: the share of the swatch's turbidity the image loses is
-    /// `(CLARITY_SWATCH / clarity)²` ([`turb_keep`]), so 0.5 is the swatch's whole turbidity, 1
-    /// (the default) a quarter of it and 2 a sixteenth. The swatch's turbidity still paces the
+    /// `(CLARITY_SWATCH / clarity)²` ([`turb_keep`]), so 0.25 is the swatch's whole turbidity, 0.5
+    /// a quarter of it (the first clarity pass's default), 1 (the default) a sixteenth and 2 a
+    /// 64th (absorption alone from there). The swatch's turbidity still paces the
     /// colour ramp, and a swamp's keeps the image whatever the clarity (`$WOW_WATER_CLARITY`).
     pub clarity: f32,
     /// The swatch ramp's rate against the turbidity.
@@ -278,9 +281,11 @@ pub fn kind_optics(
 /// The share of a kind's turbidity the image loses, by its `murk` (its turbidity over
 /// [`TURB_REF`]) at `clarity`: the swatch's turbidity is a scattering coefficient, and most of
 /// what clear water scatters goes forward within the pixel and takes nothing from the bed's image,
-/// so a clear kind loses only `(CLARITY_SWATCH / clarity)²` of it (a quarter at the default
-/// clarity of 1, as a Jerlov coastal water loses about a quarter of its scattering to the
-/// backward half), and a kind as murky as a swamp, whose suspension scatters wide, all of it;
+/// so a clear kind loses only `(CLARITY_SWATCH / clarity)²` of it (a sixteenth at the default
+/// clarity of 1: a Jerlov coastal water loses about a quarter of its scattering to the backward
+/// half, and the image loses a quarter of that again, since what scatters back within the bed's
+/// own pixel is the bed's light still), and a kind as murky as a swamp, whose suspension scatters
+/// wide, all of it;
 /// between [`CLEAR_MURK`]'s ends the share fades from the one to the other. 1 at
 /// [`CLARITY_SWATCH`] or below, whatever the murk.
 pub fn turb_keep(murk: f32, clarity: f32) -> f32 {
@@ -636,24 +641,25 @@ mod tests {
     }
 
     /// The clarity: at the swatch's clarity the image loses the swatch's whole turbidity; at the
-    /// default a clear kind loses a quarter of it and a swamp all of it, and the ramp's turbidity
-    /// is the swatch's at every clarity; at 2 a clear kind loses a sixteenth; below the swatch's
-    /// clarity nothing murkier happens.
+    /// default a clear kind loses a sixteenth of it and a swamp all of it, and the ramp's
+    /// turbidity is the swatch's at every clarity; at 0.5 a clear kind loses a quarter (the first
+    /// clarity pass's default), at 2 a 64th; below the swatch's clarity nothing murkier happens.
     #[test]
     fn the_clarity_clears_the_clear_kinds_and_leaves_the_swamp() {
         assert_eq!(turb_keep(1.0, CLARITY_SWATCH), 1.0);
         assert_eq!(turb_keep(4.0, CLARITY_SWATCH), 1.0);
         assert_eq!(turb_keep(1.0, 0.1), 1.0);
-        assert!((turb_keep(0.7, 1.0) - 0.25).abs() < 1e-6);
-        assert!((turb_keep(1.0, 1.0) - 0.25).abs() < 1e-6);
-        assert!((turb_keep(1.0, 2.0) - 0.0625).abs() < 1e-6);
+        assert!((turb_keep(0.7, 1.0) - 0.0625).abs() < 1e-6);
+        assert!((turb_keep(1.0, 1.0) - 0.0625).abs() < 1e-6);
+        assert!((turb_keep(1.0, 0.5) - 0.25).abs() < 1e-6);
+        assert!((turb_keep(1.0, 2.0) - 1.0 / 64.0).abs() < 1e-6);
         assert_eq!(turb_keep(4.1, 1.0), 1.0);
         assert_eq!(turb_keep(4.1, 2.0), 1.0);
-        assert!((turb_keep(1.6, 1.0) - 0.25).abs() < 0.01);
+        assert!((turb_keep(1.6, 1.0) - 0.0625).abs() < 0.02);
         let mid = turb_keep(2.25, 1.0);
-        assert!((0.5..0.75).contains(&mid), "{mid}");
+        assert!((0.5..0.6).contains(&mid), "{mid}");
         let b = |c: [f32; 3]| c.map(|x| x / 255.0);
-        for clarity in [0.5, 1.0, 2.0] {
+        for clarity in [0.25, 0.5, 1.0, 2.0] {
             let look = BodyLook {
                 clarity,
                 ..BodyLook::default()

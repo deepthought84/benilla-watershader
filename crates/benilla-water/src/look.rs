@@ -142,9 +142,9 @@ fn grazing_limit() -> f32 {
 /// the three bands pull the ramp (0 unbanded), `$WOW_WATER_TURB=<0-4>` the turbidity's scale on
 /// both kinds, `$WOW_WATER_REFRACT=<0-8>` the refraction's strength (1 physical), or
 /// `$WOW_WATER_PROBE_REFOG=0|1` and `$WOW_WATER_FLOOR_REFOG=0|1` whether the probe's and the floor
-/// occluder's fog are re-based to the mirror's, or `$WOW_WATER_CLARITY=<0.5-8>` how clear the clear
-/// kinds are (`BodyLook::clarity`: 1 the default, 0.5 the look before the clarity pass, 2 very
-/// clear); each read once, to measure it.
+/// occluder's fog are re-based to the mirror's, or `$WOW_WATER_CLARITY=<0.25-8>` how clear the
+/// clear kinds are (`BodyLook::clarity`: 1 the default, 0.5 the first clarity pass's default, 0.25
+/// the look before it); each read once, to measure it.
 fn body_look() -> BodyLook {
     struct Forced {
         ceiling: Option<f32>,
