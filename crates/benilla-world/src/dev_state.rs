@@ -108,6 +108,11 @@ pub struct WaterDebug {
     /// soft edge instead of the hard cut where the surface meets the ground. On by default;
     /// `$WOW_WATER_SOFT_SHORE=0` turns it off at boot.
     pub soft_shore: bool,
+    /// Take the Improved Water's reflectance per pixel on the resolved wave normal, averaged over
+    /// the slope variance the surface no longer resolves, under the gloss's level (the panel's
+    /// "lively reflection", read each frame): the reflection varies wave to wave instead of lying
+    /// as one coat. On by default; `$WOW_WATER_LIVELY=0` turns it off at boot.
+    pub lively: bool,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -133,6 +138,7 @@ impl Default for WaterDebug {
             brightness: env_ranged("WOW_WATER_BRIGHTNESS", 0.5, 1.5),
             caustics: env_ranged("WOW_PREVIEW_CAUSTICS_GAIN", 0.0, 3.0),
             soft_shore: env_switch("WOW_WATER_SOFT_SHORE"),
+            lively: env_switch("WOW_WATER_LIVELY"),
             view: water_view_from_env(),
         }
     }

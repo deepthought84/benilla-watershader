@@ -643,6 +643,10 @@ fn debug_panel_ui(
                                 "the water fades in over its first third of a yard of depth, \
                                  the wet bed and wet line with it (off: the hard cut)",
                             );
+                            ui.checkbox(&mut wa.lively, "lively reflection").on_hover_text(
+                                "the reflection's strength per wave, toward the eye or away, \
+                                 averaged smoothly at distance (off: one level under the gloss)",
+                            );
                             ui.add(
                                 egui::Slider::new(&mut wa.transparency, 0.0..=2.0)
                                     .fixed_decimals(2)

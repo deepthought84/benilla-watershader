@@ -300,7 +300,8 @@ struct WaterPreview {
     // The view from below the surface.
     under: UnderLanes,
     // The owner's look switches, each 1 where its switch is off (the debug panel's water section):
-    // x the soft shoreline ([`sc_soft_edge`]), yzw spare.
+    // x the soft shoreline ([`sc_soft_edge`]), y the lively reflection ([`pv_fresnel_lively`]), zw
+    // spare.
     looks: vec4<f32>,
     // Room for shader-only iteration.
     spare: array<vec4<f32>, 7>,
@@ -4700,6 +4701,48 @@ fn pv_fresnel(n_dot_v: f32, alpha: f32) -> f32 {
     let loss = 0.34 * smoothstep(a0 + 0.004, a0 + 0.07, alpha);
     return max(saturate(schlick * (1.0 - loss)), water_fresnel(n_dot_v, alpha));
 }
+
+/// Whether the lively reflection is on (`preview.looks.y` 0, the default).
+fn pv_lively() -> bool {
+    return water_reflect.preview.looks.y < 0.5;
+}
+
+/// [`pv_fresnel`] averaged over the unresolved facets: the cosine `mu` spread by `sig`, its
+/// standard deviation across the lobe, by the two-point Gauss-Hermite rule (exact for a cubic in
+/// `mu`).
+fn pv_fresnel_lobe(mu: f32, sig: f32, alpha: f32) -> f32 {
+    return 0.5 * (pv_fresnel(mu - sig, alpha) + pv_fresnel(mu + sig, alpha));
+}
+
+/// The lively reflection (`preview.looks.y`): the reflectance per pixel on the resolved wave normal
+/// `n`, averaged over the lobe of the slope variance the surface no longer resolves, under the
+/// gloss's grazing `ceiling` as a level rather than a clip. The clip held every far pixel whose
+/// law passed the ceiling to the ceiling itself, one coat whatever the waves did; here the pixel's
+/// reflectance is scaled by the ceiling over the mean surface's (`flat_n`, the same lobe), so a
+/// wave's face turned toward the eye shows the body and its back the sky at every distance, and the
+/// far water's mean stays at the ceiling. The lobe is the roughness tensor `a2` over the bare calm
+/// α0, as [`rough_lobe`] counts it (GGX α², half of it a slope variance per axis), along the view's
+/// bearing, where it moves the cosine: `σ_μ = |v_xz|·√(α²_along / 2)`; where the mips have taken
+/// the waves it widens, and the far field averages smoothly instead of flickering.
+fn pv_fresnel_lively(
+    n: vec3<f32>,
+    flat_n: vec3<f32>,
+    to_view: vec3<f32>,
+    a2: vec3<f32>,
+    alpha: f32,
+    ceiling: f32,
+) -> f32 {
+    let b = to_view.xz;
+    let bl = length(b);
+    let t = select(vec2<f32>(1.0, 0.0), b / max(bl, 1e-6), bl > 1e-4);
+    let a0 = water_reflect.look.surf.x;
+    let along = max(a2.x * t.x * t.x + a2.y * t.y * t.y + 2.0 * a2.z * t.x * t.y - a0 * a0, 0.0);
+    let sig = bl * sqrt(0.5 * along);
+    let f_px = pv_fresnel_lobe(dot(n, to_view), sig, alpha);
+    let f_mean = pv_fresnel_lobe(dot(flat_n, to_view), sig, alpha);
+    let level = min(1.0, ceiling / max(f_mean, 1e-4));
+    return clamp(f_px * level, F0_WATER, 0.95);
+}
 #endif
 
 // ---- the reflection's grading (REF-13) ----------------------------------------------------------
@@ -8161,6 +8204,11 @@ fn stylised_water(
         // Under the gloss's grazing ceiling (`look.composite.w`): the law's 0.9 at the horizon
         // reads as lacquer.
         pv_f = min(pv_fresnel(pv_nv, surf.alpha), water_reflect.look.composite.w);
+        // The lively reflection: per pixel on the resolved wave normal against the sheet's level,
+        // averaged over the unresolved lobe ([`pv_fresnel_lively`]); a falling sheet keeps its own.
+        if (pv_lively() && rf.sheet <= 0.0) {
+            pv_f = pv_fresnel_lively(n, flat_n, to_view, surf.a2, surf.alpha, water_reflect.look.composite.w);
+        }
     }
     let f_surf = pv_f;
 #else

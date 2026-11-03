@@ -125,7 +125,10 @@ pub(super) fn drive_preview(
     row(PV_GAINS, gains);
     // The owner's look switches, live from the debug panel, each lane 1 where its switch is off.
     let off = |on: bool| f32::from(u8::from(!on));
-    row(PV_LOOKS, [off(dev.water.soft_shore), 0.0, 0.0, 0.0]);
+    row(
+        PV_LOOKS,
+        [off(dev.water.soft_shore), off(dev.water.lively), 0.0, 0.0],
+    );
     row(
         PV_CLOCKS,
         [

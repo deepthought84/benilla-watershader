@@ -239,7 +239,7 @@ pub const PV_FALLS: usize = PV_MASK + 44;
 /// `under`: the view from below the surface.
 pub const PV_UNDER: usize = PV_MASK + 108;
 /// `looks`: the owner's look switches, each lane 1 where its switch is off (so an unwritten lane
-/// is on): x the soft shoreline, yzw spare.
+/// is on): x the soft shoreline, y the lively reflection, zw spare.
 pub const PV_LOOKS: usize = PV_MASK + 172;
 /// `spare`: room for shader-only iteration.
 pub const PV_SPARE: usize = PV_MASK + 176;
