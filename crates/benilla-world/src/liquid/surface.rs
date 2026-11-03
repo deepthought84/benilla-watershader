@@ -5,6 +5,7 @@
 //! (frame 0, scroll 0). Day and night follow server time.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
@@ -169,8 +170,8 @@ pub(crate) fn spawn_liquids<'a>(
     };
     // One lattice for the whole tile: a chunk cannot tell where its water ends from itself alone.
     let batch: Vec<&LiquidMesh> = liquids.collect();
-    let lattice = WetLattice::build(batch.iter().copied());
-    let shoreline = Shoreline::build(&batch, chunks);
+    let lattice = WetLattice::build(batch.iter().copied()).map(Arc::new);
+    let shoreline = Shoreline::build(&batch, chunks).map(Arc::new);
     for lq in batch {
         // The scene fog (the ADT passes submit none and draw under the scene submit `0x66ff20`),
         // and never a scroll, though ADT magma is nibble 6: its kernel zeroes the v-translate.
@@ -180,17 +181,20 @@ pub(crate) fn spawn_liquids<'a>(
         let info = wet_footprint(lq, &Transform::IDENTITY, LiquidSource::AdtChunk)
             .with_planes(planar.map(|p| p.planes(lq)));
         let foam = !lq.kind.is_fullbright(); // white surf is a water thing
+        let coarse = meshes.add(liquid_bevy_mesh(
+            lq,
+            None,
+            lattice.as_deref(),
+            planar.map(|p| &**p),
+            true,
+            shoreline.as_deref(),
+        ));
+        let fine = (!lq.kind.is_fullbright())
+            .then(|| LiquidFine::new(lq, coarse.clone(), &lattice, &shoreline, planar));
         entities.push(
             commands
                 .spawn((
-                    Mesh3d(meshes.add(liquid_bevy_mesh(
-                        lq,
-                        None,
-                        lattice.as_ref(),
-                        planar.map(|p| &**p),
-                        true,
-                        shoreline.as_ref(),
-                    ))),
+                    Mesh3d(coarse),
                     MeshMaterial3d(material),
                     Transform::IDENTITY,
                     LiquidSurface,
@@ -213,6 +217,11 @@ pub(crate) fn spawn_liquids<'a>(
                 .entity(*entities.last().expect("just pushed"))
                 .insert(FoamPatch);
         }
+        if let Some(fine) = fine.flatten() {
+            commands
+                .entity(*entities.last().expect("just pushed"))
+                .insert(fine);
+        }
         if let Some(p) = planar {
             commands
                 .entity(*entities.last().expect("just pushed"))
@@ -223,6 +232,113 @@ pub(crate) fn spawn_liquids<'a>(
             commands
                 .entity(*entities.last().expect("just pushed"))
                 .insert((collider, RigidBody::Static, liquid_layers()));
+        }
+    }
+}
+
+/// The fine ring's open cells are split this many ways a side, half a yard, for the Improved
+/// Water's surface height (`liquid.wgsl`'s `pv_surface_height`), which the 4.17 yd lattice cannot
+/// carry: the waterline cells' own [`SHORE_CELL_SUB`], so no edge of a risen surface has a vertex
+/// its neighbour lacks (a T-junction there opens a crack the sky shows through).
+const FINE_RING_SUB: usize = SHORE_CELL_SUB;
+/// A chunk takes its fine mesh when its nearest point comes this near the eye, horizontally, and
+/// gives it back past [`FINE_RING_OUT`]. The shader's height is gone by 56 yd, so a chunk drawn
+/// coarse is always flat and the two meshes meet without a crack.
+const FINE_RING_IN: f32 = 64.0;
+const FINE_RING_OUT: f32 = 80.0;
+/// The fine meshes built in one frame at most: a camera cut spreads its ring over a few frames.
+const FINE_RING_BUILDS: usize = 6;
+
+/// What an ADT surface needs to build its fine mesh on demand, and the two meshes: the Improved
+/// Water's surface height draws the chunks near the eye on a yard grid ([`FINE_RING_SUB`]), the far
+/// ones on the reference's lattice, unchanged.
+#[derive(Component)]
+pub(crate) struct LiquidFine {
+    lq: LiquidMesh,
+    lattice: Option<Arc<WetLattice>>,
+    shoreline: Option<Arc<Shoreline>>,
+    planar: Option<Arc<dyn WaterClasses>>,
+    coarse: Handle<Mesh>,
+    fine: Option<Handle<Mesh>>,
+    // The wet cells' bounds in Bevy XZ, for the distance to the eye.
+    lo: Vec2,
+    hi: Vec2,
+}
+
+impl LiquidFine {
+    /// `None` for a surface with no wet cell.
+    fn new(
+        lq: &LiquidMesh,
+        coarse: Handle<Mesh>,
+        lattice: &Option<Arc<WetLattice>>,
+        shoreline: &Option<Arc<Shoreline>>,
+        planar: Option<&Arc<dyn WaterClasses>>,
+    ) -> Option<Self> {
+        let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+        for p in lq.positions.iter().filter(|p| p[2].abs() < 1.0e8) {
+            let b = wow_to_bevy(*p);
+            lo = lo.min(Vec2::new(b.x, b.z));
+            hi = hi.max(Vec2::new(b.x, b.z));
+        }
+        (lo.x <= hi.x).then(|| Self {
+            lq: lq.clone(),
+            lattice: lattice.clone(),
+            shoreline: shoreline.clone(),
+            planar: planar.cloned(),
+            coarse,
+            fine: None,
+            lo,
+            hi,
+        })
+    }
+
+    /// Horizontal yards from `eye` (Bevy XZ) to the surface's nearest point.
+    fn distance(&self, eye: Vec2) -> f32 {
+        (eye.clamp(self.lo, self.hi) - eye).length()
+    }
+}
+
+/// The fine ring: while the Improved Water's surface height is on, each ADT surface within
+/// [`FINE_RING_IN`] of the eye draws its fine mesh, built on demand, and one past
+/// [`FINE_RING_OUT`] its coarse one again, the fine one dropped.
+pub(super) fn swap_fine_liquids(
+    eye: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
+    dev: Option<Res<crate::dev_state::DebugState>>,
+    style: Res<super::WaterStyle>,
+    mut surfaces: Query<(&mut Mesh3d, &mut LiquidFine)>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let on = *style == super::WaterStyle::Stylised
+        && dev.as_ref().is_some_and(|d| d.water.surface_height);
+    let eye = eye.iter().next().map(|t| t.translation());
+    let mut builds = 0;
+    for (mut mesh, mut fine) in &mut surfaces {
+        let d = eye.map_or(f32::MAX, |e| fine.distance(Vec2::new(e.x, e.z)));
+        let want = on && (d < FINE_RING_IN || (fine.fine.is_some() && d < FINE_RING_OUT));
+        if want {
+            if fine.fine.is_none() {
+                if builds >= FINE_RING_BUILDS {
+                    continue;
+                }
+                builds += 1;
+                let m = liquid_bevy_mesh_sub(
+                    &fine.lq,
+                    None,
+                    fine.lattice.as_deref(),
+                    fine.planar.as_deref(),
+                    true,
+                    fine.shoreline.as_deref(),
+                    FINE_RING_SUB,
+                );
+                fine.fine = Some(meshes.add(m));
+            }
+            let h = fine.fine.clone().expect("built above");
+            if mesh.0 != h {
+                mesh.0 = h;
+            }
+        } else if let Some(h) = fine.fine.take() {
+            mesh.0 = fine.coarse.clone();
+            meshes.remove(&h);
         }
     }
 }
@@ -676,6 +792,20 @@ fn liquid_bevy_mesh(
     bind_spots: bool,
     shoreline: Option<&Shoreline>,
 ) -> Mesh {
+    liquid_bevy_mesh_sub(lq, body_color, lattice, planar, bind_spots, shoreline, 1)
+}
+
+/// [`liquid_bevy_mesh`] with every open cell (one not on the waterline) split `open_sub` ways a
+/// side: the fine ring's mesh ([`LiquidFine`]) at [`FINE_RING_SUB`], the far one's at 1.
+fn liquid_bevy_mesh_sub(
+    lq: &LiquidMesh,
+    body_color: Option<[f32; 3]>,
+    lattice: Option<&WetLattice>,
+    planar: Option<&dyn WaterClasses>,
+    bind_spots: bool,
+    shoreline: Option<&Shoreline>,
+    open_sub: usize,
+) -> Mesh {
     let (cols, rows) = (lq.grid[0] as usize, lq.grid[1] as usize);
     let (xt, yt) = (cols.saturating_sub(1), rows.saturating_sub(1));
     let (mut sum, mut cnt) = (0.0_f32, 0_u32);
@@ -734,7 +864,7 @@ fn liquid_bevy_mesh(
             let sub = if dist(mid[0], mid[1]) < SHORE_CELL_REACH {
                 SHORE_CELL_SUB
             } else {
-                1
+                open_sub.max(1)
             };
             let corner = [
                 j * cols + i,

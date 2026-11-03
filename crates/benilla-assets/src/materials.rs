@@ -634,9 +634,9 @@ pub struct LiquidExt {
     #[sampler(101, visibility(fragment))]
     pub frames: Handle<Image>,
     /// The stylised look's generated ripple map (`benilla_world::liquid::ripple`): R/G a tiling
-    /// slope field, B its height.
-    #[texture(103, visibility(fragment))]
-    #[sampler(104, visibility(fragment))]
+    /// slope field, B its height. The vertex stage reads its height for the surface height.
+    #[texture(103, visibility(vertex, fragment))]
+    #[sampler(104, visibility(vertex, fragment))]
     pub ripples: Handle<Image>,
     /// The first planar mirror's capture (`benilla_world::liquid::reflect`), alpha as coverage.
     #[texture(105, visibility(fragment))]
@@ -646,9 +646,10 @@ pub struct LiquidExt {
     /// first one's sampler.
     #[texture(110, visibility(fragment))]
     pub reflection2: Handle<Image>,
-    /// The stylised look's live wave field (`benilla_world::liquid::ripple_sim`): R/G slope, B foam.
-    #[texture(108, visibility(fragment))]
-    #[sampler(109, visibility(fragment))]
+    /// The stylised look's live wave field (`benilla_world::liquid::ripple_sim`): R/G slope, B its
+    /// height, A foam; the vertex stage reads the height for the surface height.
+    #[texture(108, visibility(vertex, fragment))]
+    #[sampler(109, visibility(vertex, fragment))]
     pub wake: Handle<Image>,
     /// The opaque scene before transparents, in 10 bits (`benilla_water::scene_color`): the colour
     /// behind the water, the refracted bed, the floor march's occluder and the reflection's hit.
@@ -700,8 +701,9 @@ pub struct LiquidExt {
     #[texture(124, visibility(fragment))]
     pub reflection_chain2: Handle<Image>,
     /// The reflection's per-frame parameters (`benilla_world::liquid::reflect`), a buffer so the
-    /// per-frame write does not rebuild every liquid material's bind group.
-    #[storage(107, read_only, buffer, visibility(fragment))]
+    /// per-frame write does not rebuild every liquid material's bind group. The vertex stage reads
+    /// the preview's rows for the surface height.
+    #[storage(107, read_only, buffer, visibility(vertex, fragment))]
     pub reflect_buf: Buffer,
     /// The preview glow's accumulator (`WATER_GLOW_STORE`): the water's highlight excess per
     /// quarter-resolution texel, 16.16 fixed point, which FFXGlow's water downsample reads.
@@ -831,6 +833,12 @@ impl MaterialExtension for LiquidExt {
         if let Some(ds) = descriptor.depth_stencil.as_mut() {
             ds.bias.constant = 0;
         }
+        // The vertex stage takes the lane's defs too: the Improved Water's surface height
+        // (`pv_surface_height`) displaces the vertex under `WATER_PREVIEW`.
+        descriptor
+            .vertex
+            .shader_defs
+            .extend(key.bind_group_data.frag_defs().into_iter().map(Into::into));
         if let Some(f) = descriptor.fragment.as_mut() {
             f.shader_defs
                 .extend(key.bind_group_data.frag_defs().into_iter().map(Into::into));

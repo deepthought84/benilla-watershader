@@ -127,7 +127,12 @@ pub(super) fn drive_preview(
     let off = |on: bool| f32::from(u8::from(!on));
     row(
         PV_LOOKS,
-        [off(dev.water.soft_shore), off(dev.water.lively), 0.0, 0.0],
+        [
+            off(dev.water.soft_shore),
+            off(dev.water.lively),
+            off(dev.water.surface_height),
+            0.0,
+        ],
     );
     row(
         PV_CLOCKS,

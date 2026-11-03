@@ -300,8 +300,8 @@ struct WaterPreview {
     // The view from below the surface.
     under: UnderLanes,
     // The owner's look switches, each 1 where its switch is off (the debug panel's water section):
-    // x the soft shoreline ([`sc_soft_edge`]), y the lively reflection ([`pv_fresnel_lively`]), zw
-    // spare.
+    // x the soft shoreline ([`sc_soft_edge`]), y the lively reflection ([`pv_fresnel_lively`]), z
+    // the surface height ([`pv_surface_height`]), w spare.
     looks: vec4<f32>,
     // Room for shader-only iteration.
     spare: array<vec4<f32>, 7>,
@@ -490,6 +490,8 @@ struct LiquidVsOut {
     @location(10) planar: vec4<f32>,
     // The current (`ATTRIBUTE_WOW_FLOW`), world XZ yards a second; zero on still water.
     @location(11) flow: vec2<f32>,
+    // The surface height the vertex rose by, yards ([`pv_surface_height`]); 0 where it is off.
+    @location(12) height: f32,
 }
 
 // Sun sheen (`secondary`): the Blinn highlight `light_spec.rgb · (N·H)^shininess`.
@@ -8990,6 +8992,100 @@ fn stylised_water(
 }
 #endif // WATER_STYLISED
 
+#ifdef WATER_PREVIEW
+// ---- the surface height (the owner's switch `preview.looks.z`) ---------------------------------
+//
+// The water mesh rises and falls by the long waves of the wave field it is shaded with, so it has a
+// moving silhouette against a shore, a post or a hull. The height is the integral of the slopes the
+// fragment already draws, so the normal stays the displaced surface's and nothing is counted twice:
+// the swell trains and the two longest ripple octaves on the scrolled ripples (the map's B channel
+// is the height its R/G slopes were differenced from), the trains longer than `PV_HEIGHT_MIN_L` on
+// the dispersive surface; and the live wave field's own height near the player. Under the
+// fragment's sign: a slope `s` there is the normal `(s.x, 1, s.y)`, so the height is `−∫s`. Damped
+// on shallow beds and at the shore (never through the sand), on steep water and in a current's
+// falls, zero on WMO water; centred on the mean level, so the mirror plane stays the surface's.
+// The CPU draws a finer grid for the chunks near the eye (`benilla_world::liquid::surface`'s fine
+// ring); the height fades out inside it, so a coarse chunk is always flat.
+
+/// The height's reach, yards from the eye horizontally: whole within the first, gone by the second,
+/// inside the fine ring's (`FINE_RING_IN`, 64 yd to a chunk's nearest point).
+const PV_HEIGHT_NEAR: f32 = 34.0;
+const PV_HEIGHT_FAR: f32 = 56.0;
+/// The shortest dispersive train whose height is drawn, yards: the fine grid is about a yard.
+const PV_HEIGHT_MIN_L: f32 = 4.0;
+
+/// Whether the surface height is on (`preview.looks.z` 0, the default) and the waves draw.
+fn pv_surface_height_on() -> bool {
+    return water_reflect.preview.looks.z < 0.5 && pv_on(PV_WAVES);
+}
+
+/// One swell train's height ([`wg_train`]'s slope integrated): `amp·λ/2π·(cos θ + St/2·cos 2θ)`.
+fn pv_swell_height(xz: vec2<f32>, d: vec2<f32>, lambda: f32, amp: f32, phase: f32) -> f32 {
+    let th = TAU * fract(dot(xz, d) / lambda - phase);
+    return amp * lambda / TAU * (cos(th) + 0.5 * WG_SWELL_STOKES * cos(2.0 * th));
+}
+
+/// The surface height at `xz` on ADT water, yards: the wave field's long part and the wake, at the
+/// kind's gains under the mean gust, damped by the authored column `depth_yd`, the waterline's
+/// distance `shore`, the smooth normal's `up` and the current `flow`.
+fn pv_surface_height(xz: vec2<f32>, flow: vec2<f32>, shore: f32, depth_yd: f32, up: f32) -> f32 {
+    let wind = wg_wind();
+    let gw = sqrt(clamp(wind.z / WG_U_REF, 0.25, 3.0));
+    let speed = length(flow);
+    let river = smoothstep(0.05, 0.4, speed);
+    let kind = mix(select(WG_KIND_LAKE, WG_KIND_OCEAN, w.kind.y > 0.5), WG_KIND_RIVER, river);
+    let scale = water_reflect.probe_box_min.w;
+    let g_long = kind.x * gw * mix(0.95, 1.15, WG_GUST_MEAN);
+    let g_swell = kind.z * gw;
+    var h = 0.0;
+    if (pv_surface2()) {
+        // The trains longest first: h = amp·λ/2π·(sin θ + St/2·sin 2θ), the slope's integral.
+        for (var i = 0; i < S2_TRAINS; i = i + 1) {
+            let a = water_reflect.preview.trains[3 * i];
+            let bb = water_reflect.preview.trains[3 * i + 1];
+            let c = water_reflect.preview.trains[3 * i + 2];
+            let lambda = inverseSqrt(max(c.z, 1e-6));
+            if (lambda < PV_HEIGHT_MIN_L) {
+                break;
+            }
+            let amp = a.w * g_long + bb.x * g_swell;
+            let th = TAU * fract(dot(a.xy, xz) - a.z);
+            h = h + amp * lambda / TAU * (sin(th) + 0.5 * bb.z * sin(2.0 * th));
+        }
+        h = h * scale;
+    } else {
+        // The swell trains ([`wg_train`]): h = amp·λ/2π·(cos θ + St/2·cos 2θ).
+        let p = water_reflect.preview.swell;
+        h = pv_swell_height(xz, WG_SWELL_DIR0, WG_SWELL_LAMBDA.x, WG_SWELL_SLOPE.x * g_swell, p.x)
+            + pv_swell_height(xz, WG_SWELL_DIR1, WG_SWELL_LAMBDA.y, WG_SWELL_SLOPE.y * g_swell, p.y)
+            + pv_swell_height(xz, WG_SWELL_DIR2, WG_SWELL_LAMBDA.z, WG_SWELL_SLOPE.z * g_swell, p.z);
+        // The two still octaves ([`water_surface_wg`]'s o0, o1): the map's height times the slope's
+        // scale, a tile being 256 texels and its slope the height's central difference.
+        let rot0 = vec2<f32>(1.0, 0.0);
+        let rot1 = vec2<f32>(0.8572, 0.5150);
+        let t0 = 12.0 * 9.2;
+        let t1 = 12.0 * 3.4;
+        let b0 = textureSampleLevel(ripples, ripples_samp, octave_uv(xz, rot0, 1.0 / t0, pv_drift(0)), 1.0).b;
+        let b1 = textureSampleLevel(ripples, ripples_samp, octave_uv(xz, rot1, 1.0 / t1, pv_drift(1)), 1.0).b;
+        let k = NORMAL_STRENGTH * g_long;
+        h = h * scale - k * scale * (0.85 * (b0 - 0.5) * t0 + 1.0 * (b1 - 0.5) * t1) / 128.0;
+    }
+    // The wake: the field's height, yards (`ripple_sim`'s blue channel at 4 a yard).
+    let sim_uv = (xz - water_reflect.sim.xy) * water_reflect.sim.z;
+    if (all(sim_uv > vec2<f32>(0.0)) && all(sim_uv < vec2<f32>(1.0))) {
+        let edge = min(min(sim_uv.x, 1.0 - sim_uv.x), min(sim_uv.y, 1.0 - sim_uv.y));
+        let sim_w = min(water_reflect.sim.w, 1.0) * smoothstep(0.0, WAKE_EDGE_FADE, edge);
+        let wb = textureSampleLevel(wake_tex, wake_samp, sim_uv, 0.0).b;
+        h = h + 0.25 * (wb * 2.0 - 1.0) * sim_w;
+    }
+    // The damping: shallow beds and the shore, steep water, falls.
+    let damp = smoothstep(0.3, 2.5, depth_yd) * smoothstep(0.5, 5.0, shore)
+        * smoothstep(0.985, 0.998, up) * (1.0 - smoothstep(1.5, 3.0, speed));
+    // Never below the authored column's three quarters.
+    return clamp(h * damp, -0.75 * depth_yd, 0.75 * depth_yd + 1.0);
+}
+#endif
+
 // The vertex input — bevy 0.18's `forward_io::Vertex` fields at bevy's own shader locations, plus
 // the shore offset at 10 under `LIQUID_SHORE_OFFSET` (`LiquidExt::specialize` sets the def and
 // appends the attribute to the buffer layout when the mesh carries it). Declared here rather than
@@ -9079,6 +9175,31 @@ fn vertex(in: LiquidVertex) -> LiquidVsOut {
     ) * vec3<f32>(in.flow.x, 0.0, in.flow.y)).xz;
 #else
     out.flow = vec2<f32>(0.0);
+#endif
+    out.height = 0.0;
+#ifdef WATER_PREVIEW
+    // The surface height: on stylised ADT water (never magma, slime or a WMO's), near the eye.
+    if (pv_surface_height_on() && w.path.y > 0.5 && w.path.x < 0.5 && w.kind.x < 0.5) {
+        let reach = 1.0 - smoothstep(
+            PV_HEIGHT_NEAR,
+            PV_HEIGHT_FAR,
+            length(out.world_position.xz - view.world_position.xz),
+        );
+        if (reach > 0.0) {
+            let ocean = w.kind.y > 0.5;
+            let up = select(1.0, out.surface_normal.y, dot(out.surface_normal, out.surface_normal) > 0.25);
+            let h = reach * pv_surface_height(
+                out.world_position.xz,
+                out.flow,
+                out.shore,
+                clamp(out.depth, 0.0, 1.0) * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
+                up,
+            );
+            out.height = h;
+            out.world_position.y = out.world_position.y + h;
+            out.clip_position = position_world_to_clip(out.world_position.xyz);
+        }
+    }
 #endif
     out.secondary_vtx = sun_sheen(out.world_normal, out.world_position.xyz);
     // ADT surfaces carry no `MeshTag`, so they take the scene fog.
@@ -9201,6 +9322,22 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         // What stands behind this water pixel, from the complete linear depth (`liquid::hiz`): the
         // static world, entity-path models and units included.
         let sb = scene_behind(in.world_position.xyz, in.clip_position.xy);
+        // Every term reads the surface at its mean level; only the column behind it (above) and
+        // the depth test see the risen surface ([`pv_surface_height`]). The mean point is where this
+        // pixel's ray meets the mean level, not the risen point let down: across a crest's
+        // silhouette the risen points jump, and every footprint the terms take from screen
+        // derivatives would flash along the crest; the ray's point on the level moves smoothly.
+        var wp_mean = in.world_position.xyz;
+        if (in.height != 0.0) {
+            let eye = view.world_position.xyz;
+            let ray = in.world_position.xyz - eye;
+            let t = (in.world_position.y - in.height - eye.y) / ray.y;
+            wp_mean = select(
+                in.world_position.xyz - vec3<f32>(0.0, in.height, 0.0),
+                eye + ray * t,
+                abs(ray.y) > 1e-3 && t > 0.0 && t < 4.0,
+            );
+        }
         // The body's stops lie on the zone's own line from swatch row 0 toward row 63 (without the
         // ocean's ×0.9 tail): the deep stop at the deep ceiling, the mid stop at half of it, so the
         // three bands keep equal spans. A WMO exterior's pair is its deep river row twice, an
@@ -9229,7 +9366,7 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             w.path.x < 0.5,
         );
         return stylised_water(
-            in.world_position.xyz,
+            wp_mean,
             in.clip_position.xy,
             sb,
             in.shore,

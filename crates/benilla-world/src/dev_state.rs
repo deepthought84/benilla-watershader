@@ -113,6 +113,11 @@ pub struct WaterDebug {
     /// "lively reflection", read each frame): the reflection varies wave to wave instead of lying
     /// as one coat. On by default; `$WOW_WATER_LIVELY=0` turns it off at boot.
     pub lively: bool,
+    /// Displace the Improved Water's surface by the long waves of its wave field and the wake
+    /// near the eye, on a finer grid there (the panel's "surface height", read each frame): the
+    /// surface rises and falls and has a moving silhouette against the shore, posts and hulls. On
+    /// by default; `$WOW_WATER_SURFACE_HEIGHT=0` turns it off at boot.
+    pub surface_height: bool,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -139,6 +144,7 @@ impl Default for WaterDebug {
             caustics: env_ranged("WOW_PREVIEW_CAUSTICS_GAIN", 0.0, 3.0),
             soft_shore: env_switch("WOW_WATER_SOFT_SHORE"),
             lively: env_switch("WOW_WATER_LIVELY"),
+            surface_height: env_switch("WOW_WATER_SURFACE_HEIGHT"),
             view: water_view_from_env(),
         }
     }

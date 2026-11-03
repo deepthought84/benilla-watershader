@@ -647,6 +647,10 @@ fn debug_panel_ui(
                                 "the reflection's strength per wave, toward the eye or away, \
                                  averaged smoothly at distance (off: one level under the gloss)",
                             );
+                            ui.checkbox(&mut wa.surface_height, "surface height").on_hover_text(
+                                "the surface rises and falls with the long waves and the wake \
+                                 near the eye, on a finer grid there (off: a flat sheet)",
+                            );
                             ui.add(
                                 egui::Slider::new(&mut wa.transparency, 0.0..=2.0)
                                     .fixed_decimals(2)
