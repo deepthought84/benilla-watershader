@@ -4778,6 +4778,14 @@ struct BodyIn {
     // The authored depth in yards: the column of a bed that is not known, and on ADT water the
     // most water a known bed's light crosses.
     fallback_z: f32,
+    // What 1.12 draws at the authored depth V on ADT water: the swatch row it colours with, as a
+    // ramp coordinate (V over the deep ceiling, the ramp's deepest stop lying `dc` along the
+    // zone's line from row 0 to row 63), and the share of the pixel its alpha blend leaves to the
+    // bed, in linear light: the blend runs in gamma, so the water's colour holds `alpha(V)^2.2`
+    // of it and the bed the rest, `1 − alpha(V)^2.2`. 1 and 0 elsewhere (a WMO's byte is an
+    // opacity).
+    auth_x: f32,
+    auth_t: f32,
     // A WMO interior pool: lit by 1, as the reference draws it.
     unlit: bool,
     // ADT water, which the terrain's shadow covers.
@@ -4990,10 +4998,18 @@ fn water_body_optics(
     let t_turb = exp(-tau_t);
     o.t_bed = select(vec3<f32>(0.0), exp(-bi.sig_abs * o.l_opt) * t_turb, o.known);
     o.w_in = select(1.0, 1.0 - t_turb, o.known);
-    // The ramp reads the swatch at the depth the artists coloured, by the swatch's own turbidity.
+    // The authored clarity (owner rule 2A): a known bed passes at least what 1.12's alpha blend
+    // leaves it at the authored depth, in its own colours, so a coral bank the artists drew
+    // through 15 yd of sea stays readable where the clear water's absorption alone would close
+    // over it; the in-scatter gives up what the bed takes back.
+    o.t_bed = select(o.t_bed, max(o.t_bed, vec3<f32>(bi.auth_t)), o.known);
+    o.w_in = min(o.w_in, 1.0 - max(o.t_bed.r, max(o.t_bed.g, o.t_bed.b)));
+    // The ramp reads the swatch at the depth the artists coloured, by the swatch's own turbidity,
+    // and never deeper than the row 1.12 colours the authored depth with: the sea's byte runs to
+    // 148 yd, so a bank under 15 yd keeps the shallow rows the reference draws it with.
     let tau_ramp = bi.sig_ramp * o.l_opt;
     let look = water_reflect.look.body.look;
-    let x0 = select(1.0 - exp(-look.x * tau_ramp), 1.0, below);
+    let x0 = select(min(1.0 - exp(-look.x * tau_ramp), bi.auth_x), 1.0, below);
     let fw = fwidth(x0 * 3.0);
     o.x = saturate(mix(x0, band_soft(x0, fw), look.y) + wake_push);
     o.a_lin = albedo_ramp(bi.s, bi.m, bi.d, o.x);
@@ -9073,6 +9089,8 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             sig_ramp,
             select(water_reflect.look.body.look.w * w.anim.x, 0.0, unlit),
             depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
+            select(1.0, saturate(depth / max(dc, 1e-3)), w.path.x < 0.5),
+            select(0.0, 1.0 - pow(swatch_at(shallow, deep, depth, ocean).w, 2.2), w.path.x < 0.5),
             unlit,
             w.path.x < 0.5,
         );

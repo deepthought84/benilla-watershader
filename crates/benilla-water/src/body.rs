@@ -311,6 +311,46 @@ pub fn bed_transmittance(optics: &KindOptics, path: f32) -> [f32; 3] {
     optics.sigma_abs.map(|s| (-s * path).exp() * t_turb)
 }
 
+/// What 1.12 leaves of the pixel to a bed at authored depth `v` (the `V` its swatch is indexed
+/// by) on ADT water, in linear light, `liquid.wgsl`'s `BodyIn::auth_t`: its alpha blend runs in
+/// gamma, so the water's colour holds `alpha(V)^2.2` of the pixel and the bed the rest, the alpha
+/// the swatch's own ramp from the shallow alpha `alpha_shallow` to the deep `alpha_deep` (row
+/// `V·64`, linear between rows; the ocean's last row forced opaque). Owner rule 2A: the
+/// clarity follows the authored byte, so a known bed passes at least this share
+/// ([`authored_bed`]).
+pub fn authored_pass(v: f32, alpha_shallow: f32, alpha_deep: f32, ocean: bool) -> f32 {
+    let row = |i: f32| {
+        let (c0, c1) = (
+            (alpha_shallow * 255.0).floor(),
+            (alpha_deep * 255.0).floor(),
+        );
+        if ocean && i >= 63.0 {
+            1.0
+        } else {
+            (c0 + (i * (c1 - c0) / 64.0).floor()) / 255.0
+        }
+    };
+    let t = (v * 64.0 - 0.5).clamp(0.0, 63.0);
+    let i0 = t.floor();
+    let a = row(i0) + (row((i0 + 1.0).min(63.0)) - row(i0)) * (t - i0);
+    1.0 - a.powf(WATER_GAMMA)
+}
+
+/// A known bed's transmittance and in-scatter weight under the authored clarity,
+/// `liquid.wgsl`'s `water_body_optics`: the bed passes at least `auth_t` ([`authored_pass`]) in
+/// every channel, so it keeps its own colours, and the in-scatter gives up what the bed takes back.
+pub fn authored_bed(t_bed: [f32; 3], w_in: f32, auth_t: f32) -> ([f32; 3], f32) {
+    let t = t_bed.map(|c| c.max(auth_t));
+    (t, w_in.min(1.0 - t[0].max(t[1]).max(t[2])))
+}
+
+/// The deepest ramp coordinate 1.12 colours authored depth `v` with on ADT water,
+/// `liquid.wgsl`'s `BodyIn::auth_x`: the reference reads swatch row `V·64`, `V` of the way along
+/// the zone's line, and the stylised ramp's deepest stop lies `ceiling` along it.
+pub fn authored_ramp(v: f32, ceiling: f32) -> f32 {
+    (v / ceiling.max(1e-3)).clamp(0.0, 1.0)
+}
+
 /// The dome's irradiance on a level surface over π, linear: the cosine-weighted mean of its stops
 /// (`dome` as `benilla_world::sky::dome_uniforms` lays it out). The dawn and dusk warp only moves
 /// light between the mid rings, so it is left out.
@@ -980,6 +1020,11 @@ mod tests {
             "o.l_opt = min(o.l_view + z_path / mu_d, 4096.0);",
             "let tau_t = bi.sig_turb * o.l_opt;",
             "let tau_ramp = bi.sig_ramp * o.l_opt;",
+            "o.t_bed = select(o.t_bed, max(o.t_bed, vec3<f32>(bi.auth_t)), o.known);",
+            "o.w_in = min(o.w_in, 1.0 - max(o.t_bed.r, max(o.t_bed.g, o.t_bed.b)));",
+            "let x0 = select(min(1.0 - exp(-look.x * tau_ramp), bi.auth_x), 1.0, below);",
+            "select(1.0, saturate(depth / max(dc, 1e-3)), w.path.x < 0.5),",
+            "select(0.0, 1.0 - pow(swatch_at(shallow, deep, depth, ocean).w, 2.2), w.path.x < 0.5),",
             "depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),",
             "w.path.x < 0.5,",
         ] {
@@ -1203,5 +1248,36 @@ mod tests {
         let ocean = kind_optics(shallow, deep, alpha, true, &BodyLook::default());
         assert_eq!(row(9)[3], ocean.sigma_ramp);
         assert_eq!(row(1)[3], ocean.sigma_turb);
+    }
+
+    /// A coral bank under a tropical sea (Stranglethorn's swatch, 15 yd down, authored at byte
+    /// 25 of the ocean's 255): the clear water's absorption alone leaves the bed under a twentieth
+    /// of itself and the ramp at its deep stop, where 1.12's blend leaves it about two fifths of
+    /// the pixel in linear light, under its shallow rows. The authored clarity keeps both, in the bed's own colours; the open sea
+    /// (byte 255) and a deep river pass nothing and keep the deep stop.
+    #[test]
+    fn the_authored_clarity_keeps_a_bank_the_sea_draws_through() {
+        let (shallow, deep) = (
+            [90.0 / 255.0, 171.0 / 255.0, 140.0 / 255.0],
+            [28.0 / 255.0, 44.0 / 255.0, 44.0 / 255.0],
+        );
+        let look = BodyLook::default();
+        let sea = kind_optics(shallow, deep, 0.75, true, &look);
+        let v = 25.0 / 255.0;
+        let z_auth = v * AUTHORED_YD_PER_V[1];
+        let path = optical_path(15.0, z_auth, 0.8, 0.9, true);
+        let t = bed_transmittance(&sea, path);
+        assert!(luma(t) < 0.05, "{t:?}");
+        let pass = authored_pass(v, 0.75, 1.0, true);
+        assert!((0.38..0.45).contains(&pass), "{pass}");
+        let w_in = 1.0 - (-sea.sigma_turb * path).exp();
+        let (t2, w2) = authored_bed(t, w_in, pass);
+        assert!(t2.iter().all(|c| *c >= pass) && w2 + t2[0].max(t2[1]).max(t2[2]) <= 1.0 + 1e-6);
+        assert!(authored_ramp(v, look.deep_ceiling) < 0.15);
+        assert_eq!(authored_pass(1.0, 0.75, 1.0, true), 0.0);
+        assert_eq!(authored_ramp(1.0, look.deep_ceiling), 1.0);
+        assert!(authored_pass(1.0, 0.5, 1.0, false) < 0.02);
+        let (t3, w3) = authored_bed([0.3, 0.6, 0.7], 0.2, 0.0);
+        assert_eq!((t3, w3), ([0.3, 0.6, 0.7], 0.2));
     }
 }
