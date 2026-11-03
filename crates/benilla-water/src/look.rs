@@ -42,6 +42,55 @@ const GLINT_WEIGHT_LIN: f32 = 0.035_754_43;
 /// The reflectance's ceiling at grazing angles.
 const GRAZING_LIMIT: f32 = 0.45;
 
+/// The owner's gloss ([`gloss`]): 1 is the look before the gloss pass (the preview grade's grazing
+/// reflectance up to Schlick's 0.9, every reflection as sharp as the ripple resolves it, the glint
+/// and the sparkles at full gain), which read as lacquer; lower is less mirror, softer and dimmer.
+/// Chosen by look at the golden lakes and coasts (final/gloss/).
+const GLOSS_DEFAULT: f32 = 0.6;
+
+/// The gloss's grazing ceiling per unit below 1: 0.91 (above Schlick's 0.906 at the grade's
+/// grazing cosine of 0.02, so a gloss of 1 caps nothing) less this times `1 − gloss`.
+const GLOSS_GRAZE_SLOPE: f32 = 0.8;
+
+/// The gloss's roughness floor per unit below 1, GGX α² over the calm α0² ([`ALPHA_CALM`]² =
+/// 0.0030): at the default 0.6 the floor is 0.0056, so the calm surface's α goes 0.055 -> 0.093.
+const GLOSS_FLOOR2_SLOPE: f32 = 0.014;
+
+/// The owner's gloss, [`GLOSS_DEFAULT`], unless `$WOW_WATER_GLOSS=<0-1>` (read once; 1 the look
+/// before the gloss pass) sets it. It moves the preview grade's grazing ceiling
+/// ([`gloss_graze_cap`]), the surface's roughness floor ([`gloss_floor2`]) and the glint's and the
+/// sparkles' gains ([`gloss_glint`], [`gloss_sparkle`]) together.
+pub(crate) fn gloss() -> f32 {
+    static FORCED: OnceLock<Option<f32>> = OnceLock::new();
+    FORCED
+        .get_or_init(|| unit_lever("WOW_WATER_GLOSS"))
+        .unwrap_or(GLOSS_DEFAULT)
+}
+
+/// The preview grade's grazing reflectance ceiling at gloss `g`: none (1) at 1, 0.59 at 0.6.
+pub(crate) fn gloss_graze_cap(g: f32) -> f32 {
+    if g >= 1.0 {
+        1.0
+    } else {
+        (0.91 - GLOSS_GRAZE_SLOPE * (1.0 - g)).max(0.02)
+    }
+}
+
+/// The roughness floor at gloss `g`, GGX α² over the calm α0²: 0 at 1.
+pub(crate) fn gloss_floor2(g: f32) -> f32 {
+    GLOSS_FLOOR2_SLOPE * (1.0 - g).max(0.0)
+}
+
+/// The glint's gain at gloss `g`: 1 at 1, 0.76 at 0.6.
+pub(crate) fn gloss_glint(g: f32) -> f32 {
+    0.4 + 0.6 * g.min(1.0)
+}
+
+/// The sparkles' gain at gloss `g` (High only): `g`.
+pub(crate) fn gloss_sparkle(g: f32) -> f32 {
+    g.clamp(0.0, 1.0)
+}
+
 /// The reflection grading's strength `s`: near reflections (a shore's huts, a pier) soften to about
 /// the baseline's contrast, open-sky ones keep the linear composite's physical strength.
 const GRADE_STRENGTH: f32 = 0.8;
@@ -224,6 +273,9 @@ pub(crate) struct WaterLook {
     /// The glint lobes' weight in linear light: the gamma weight 0.22 raised to 2.2, so the peak
     /// over black is unchanged.
     pub(crate) glint_weight_lin: f32,
+    /// The owner's gloss ([`gloss`]): the preview grade's grazing ceiling, the roughness floor and
+    /// the glint's gain (the sparkles' in `preview`).
+    pub(crate) gloss: f32,
     /// A glow excess forced onto every water pixel, for testing the glow path; 0.
     pub(crate) glow_test: f32,
     /// The reflection grading's strength `s`, [`GRADE_STRENGTH`].
@@ -255,6 +307,7 @@ impl Default for WaterLook {
         Self {
             grazing_limit: grazing_limit(),
             glint_weight_lin: glint_weight_lin(),
+            gloss: gloss(),
             glow_test: 0.0,
             grade_strength: grade_strength(),
             grade_c_near: 0.2,
@@ -422,9 +475,9 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
         LOOK_COMPOSITE,
         [
             look.grazing_limit,
-            look.glint_weight_lin,
+            look.glint_weight_lin * gloss_glint(look.gloss),
             look.glow_test,
-            0.0,
+            gloss_graze_cap(look.gloss),
         ],
     );
     row(
@@ -446,7 +499,10 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
             look.feature_fade.1,
         ],
     );
-    row(LOOK_DETAIL, [look.painted_detail, 0.0, 0.0, 0.0]);
+    row(
+        LOOK_DETAIL,
+        [look.painted_detail, gloss_floor2(look.gloss), 0.0, 0.0],
+    );
     for (i, loss) in inputs.loss.iter().take(RIPPLE_LOSS_ROWS).enumerate() {
         row(LOOK_RIPPLE_LOSS + 4 * i, *loss);
     }
@@ -510,9 +566,15 @@ mod tests {
             2.0,
             "the render scale in quality.w"
         );
-        let [graze, glint, glow, _] = row(LOOK_COMPOSITE);
+        let [graze, glint, glow, pv_graze] = row(LOOK_COMPOSITE);
         assert_eq!((graze, glow), (0.45, 0.0));
-        assert!((glint - 0.0358).abs() < 1e-4, "{glint}");
+        let g = super::gloss();
+        assert!(
+            (glint - 0.0358 * super::gloss_glint(g)).abs() < 1e-4,
+            "{glint}"
+        );
+        assert_eq!(pv_graze, super::gloss_graze_cap(g));
+        assert_eq!(row(LOOK_DETAIL)[1], super::gloss_floor2(g));
         assert!(
             (super::GLINT_WEIGHT_LIN - 0.22f32.powf(2.2)).abs() < 1e-8,
             "the gamma weight 0.22 raised to the gamma"
@@ -720,5 +782,27 @@ mod tests {
             [1, 1, 4, 4],
             "Low, Medium, High, and a stale tier past High"
         );
+    }
+
+    /// A gloss of 1 is the look before the gloss pass: no grazing ceiling under the grade's
+    /// Schlick (0.906 at its grazing cosine), no roughness floor, full glint and sparkles; the
+    /// default lowers the grazing reflectance to about 0.6 and lifts the calm α to about 0.09.
+    #[test]
+    fn a_gloss_of_one_is_the_look_before() {
+        use super::{gloss_floor2, gloss_glint, gloss_graze_cap, gloss_sparkle, GLOSS_DEFAULT};
+        assert_eq!(gloss_graze_cap(1.0), 1.0);
+        assert!(0.91 > 0.02 + 0.98 * 0.98f32.powi(5));
+        assert_eq!(
+            (gloss_floor2(1.0), gloss_glint(1.0), gloss_sparkle(1.0)),
+            (0.0, 1.0, 1.0)
+        );
+        let g = GLOSS_DEFAULT;
+        assert!(
+            (0.55..=0.65).contains(&gloss_graze_cap(g)),
+            "{}",
+            gloss_graze_cap(g)
+        );
+        let a = (super::ALPHA_CALM.powi(2) + gloss_floor2(g)).sqrt();
+        assert!((0.08..0.1).contains(&a), "{a}");
     }
 }

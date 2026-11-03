@@ -321,7 +321,8 @@ struct WaterLook {
     // output pixel.
     quality: vec4<f32>,
     // x the reflection's grazing ceiling (1 = none), y the glint weight in linear light, z a glow
-    // excess forced onto every water pixel, w spare.
+    // excess forced onto every water pixel, w the preview grade's grazing ceiling (1 = none; the
+    // owner's gloss, `benilla_water::look::gloss_graze_cap`).
     composite: vec4<f32>,
     // The water's screen rectangle: min x, min y, max x, max y in physical pixels of the world
     // target, written by the render world.
@@ -331,7 +332,8 @@ struct WaterLook {
     surf: vec4<f32>,
     // x the reflection grading's strength, y its far share, z its near share, w spare.
     grade: vec4<f32>,
-    // x the painted detail's contrast, yzw spare.
+    // x the painted detail's contrast, y the gloss's roughness floor (GGX α² added to the calm
+    // α0², [`calm_alpha`]), zw spare.
     detail: vec4<f32>,
     // The slope variance the ripple octaves lose per axis over the pixel's footprint
     // (`ripple_loss_at`): row i holds every loss and the mips' share at row i's footprint, then at
@@ -1115,7 +1117,7 @@ fn surface_roughen(s: WaterSurface, add2: f32) -> WaterSurface {
     o.a2 = vec3<f32>(s.a2.x + add2, s.a2.y + add2, s.a2.z);
     o.alpha = sqrt(sqrt(max(o.a2.x * o.a2.y - o.a2.z * o.a2.z, 1e-12)));
     o.full2 = s.full2 + add2;
-    let a0 = water_reflect.look.surf.x;
+    let a0 = calm_alpha();
     o.rho_a = smoothstep(a0, max(sqrt(o.full2), a0 + 1e-4), o.alpha);
     return o;
 }
@@ -3401,7 +3403,7 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     // loss at the footprint alone, so on still water α holds still while the phases move. Along
     // the footprint's major axis A takes the whole loss; across it the finer mips an anisotropic
     // sampler's probes read lose less, and the fade is the same.
-    let a0 = water_reflect.look.surf.x;
+    let a0 = calm_alpha();
     let k2 = 2.0 * s.k * s.k;
     let maj = ripple_loss_at(px.log_maj + view.mip_bias);
     var mips_min = maj.y;
@@ -3429,6 +3431,17 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     s.full2 = alpha_full * alpha_full;
 #endif
     return s;
+}
+
+/// The calm surface's roughness as the surface builders take it: α0 (`look.surf.x`) with the
+/// owner's gloss floor (`look.detail.y`, `benilla_water::look::gloss_floor2`, 0 at a gloss of 1)
+/// added in α², a slope variance no surface resolves. It sits in the roughness tensor like the
+/// ripple's own loss, so the Fresnel's roughness, the reflections' blur ([`rough_lobe`] and
+/// [`surface_lost2`] count it as lost against the bare α0) and the glint's lobe all widen with
+/// it, and the unresolved share `rho_a` starts from it, so it adds no sparkles.
+fn calm_alpha() -> f32 {
+    let a0 = water_reflect.look.surf.x;
+    return sqrt(a0 * a0 + max(water_reflect.look.detail.y, 0.0));
 }
 
 /// The slope variance the surface no longer resolves, in GGX α² ([`WaterSurface::alpha`] over the
@@ -3836,7 +3849,7 @@ fn water_surface_wg(
     // The roughness tensor: the loss table's view-aligned loss at the gains, the capillary
     // octave's faded share and the wind's sub-pixel share, all shaped along the wind; the swell's
     // faded share along each train; the calm surface's α0.
-    let a0 = water_reflect.look.surf.x;
+    let a0 = calm_alpha();
     let k2 = 2.0 * s.k * s.k;
     let maj = ripple_loss_at(px.log_maj + view.mip_bias);
     var mips_min = maj.y;
@@ -4085,7 +4098,7 @@ fn water_surface_s2(
     ));
     // The roughness tensor: the calm surface's α0, every train's unresolved share along itself,
     // and the wind's sub-train share below the shortest train.
-    let a0 = water_reflect.look.surf.x;
+    let a0 = calm_alpha();
     let s2 = scale * scale;
     s.a2 = vec3<f32>(a0 * a0, a0 * a0, 0.0) + (f.lost + vec3<f32>(g.rough2, g.rough2, 0.0)) * s2;
     s.alpha = sqrt(sqrt(max(s.a2.x * s.a2.y - s.a2.z * s.a2.z, 1e-12)));
@@ -7396,7 +7409,7 @@ fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSur
     o.a2 = s.a2 + vec3<f32>(add, add, 0.0);
     o.alpha = sqrt(sqrt(max(o.a2.x * o.a2.y - o.a2.z * o.a2.z, 1e-12)));
     o.full2 = s.full2 + add;
-    let a0 = water_reflect.look.surf.x;
+    let a0 = calm_alpha();
     o.rho_a = smoothstep(a0, max(sqrt(o.full2), a0 + 1e-4), o.alpha);
     return o;
 }
@@ -8076,7 +8089,9 @@ fn stylised_water(
     // water to under half its reflection whatever the law said.
     var pv_f = min(water_fresnel(pv_nv, surf.alpha), water_reflect.look.composite.x);
     if (pv_grade() && eye_above) {
-        pv_f = pv_fresnel(pv_nv, surf.alpha);
+        // Under the gloss's grazing ceiling (`look.composite.w`): the law's 0.9 at the horizon
+        // reads as lacquer.
+        pv_f = min(pv_fresnel(pv_nv, surf.alpha), water_reflect.look.composite.w);
     }
     let f_surf = pv_f;
 #else

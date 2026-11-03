@@ -89,15 +89,16 @@ pub(super) fn drive_preview(
             lever::number("RIVER_SLOW", 1.0, 0.0, 1.0),
         )
     });
-    // The gains (caustics, lights, sparkles, river foam), the river mist's, and a forced rain and
-    // snow (-1: the zone weather's).
+    // The gains (caustics, lights, sparkles under the owner's gloss, river foam), the river
+    // mist's, and a forced rain and snow (-1: the zone weather's).
     static GAINS: std::sync::OnceLock<([f32; 4], f32, f32, f32)> = std::sync::OnceLock::new();
     let (gains, mist_gain, rain_forced, snow_forced) = *GAINS.get_or_init(|| {
         (
             [
                 lever::number("CAUSTICS_GAIN", 1.0, 0.0, 4.0),
                 lever::number("LIGHTS_GAIN", 1.0, 0.0, 4.0),
-                lever::number("SPARKLES_GAIN", 1.0, 0.0, 4.0),
+                lever::number("SPARKLES_GAIN", 1.0, 0.0, 4.0)
+                    * crate::look::gloss_sparkle(crate::look::gloss()),
                 lever::number("RIVER_FOAM_GAIN", 1.0, 0.0, 4.0),
             ],
             lever::number("RIVER_MIST_GAIN", 1.0, 0.0, 4.0),
