@@ -218,7 +218,8 @@ struct WaterBody {
     refr: vec4<f32>,
     // The terrain shadow's window: its centre's x and z and its half extent in yards, valid (1).
     shadow: vec4<f32>,
-    // x the sun's share (debug), y the deep stop's ceiling, z the night weight (debug), w spare.
+    // x the sun's share (debug), y the deep stop's ceiling, z the night weight (debug), w the
+    // share of the authored bed floor a known bed keeps (the owner's transparency, 0 to 1).
     spare: vec4<f32>,
     // rgb the sky's and the sun's irradiance in the terrain light's colour, for foam and the
     // underside: open, they add up to the terrain's open-sky light; w the swatch's own turbidity
@@ -330,10 +331,13 @@ struct WaterLook {
     // x the calm surface's roughness α0, y the ripple's anisotropy clamp, z and w where the
     // ripple's feature fade starts and ends, in pixels.
     surf: vec4<f32>,
-    // x the reflection grading's strength, y its far share, z its near share, w spare.
+    // x the reflection grading's strength, y its far share, z its near share, w the owner's
+    // depth falloff less 1 (0 the default; `benilla_water::body::BodyLook::depth_falloff`): on
+    // ADT water the authored depth the ramp's cap and the bed floor read scales by it.
     grade: vec4<f32>,
     // x the painted detail's contrast, y the gloss's roughness floor (GGX α² added to the calm
-    // α0², [`calm_alpha`]), zw spare.
+    // α0², [`calm_alpha`]), z and w the owner's body colour less 1 (0 the default): the albedo's
+    // saturation about its luminance and its brightness, hue-kept (`water_body_optics`).
     detail: vec4<f32>,
     // The slope variance the ripple octaves lose per axis over the pixel's footprint
     // (`ripple_loss_at`): row i holds every loss and the mips' share at row i's footprint, then at
@@ -4795,8 +4799,8 @@ struct BodyIn {
     // ramp coordinate (V over the deep ceiling, the ramp's deepest stop lying `dc` along the
     // zone's line from row 0 to row 63), and the share of the pixel its alpha blend leaves to the
     // bed, in linear light: the blend runs in gamma, so the water's colour holds `alpha(V)^2.2`
-    // of it and the bed the rest, `1 − alpha(V)^2.2`. 1 and 0 elsewhere (a WMO's byte is an
-    // opacity).
+    // of it and the bed the rest, `1 − alpha(V)^2.2`, scaled by the owner's transparency's share
+    // of it (`look.body.spare.w`). 1 and 0 elsewhere (a WMO's byte is an opacity).
     auth_x: f32,
     auth_t: f32,
     // A WMO interior pool: lit by 1, as the reference draws it.
@@ -5026,6 +5030,11 @@ fn water_body_optics(
     let fw = fwidth(x0 * 3.0);
     o.x = saturate(mix(x0, band_soft(x0, fw), look.y) + wake_push);
     o.a_lin = albedo_ramp(bi.s, bi.m, bi.d, o.x);
+    // The owner's body colour: saturation about the luminance, then brightness, the hue kept; the
+    // bed's own colours and the reflection are not touched.
+    let tone = vec2<f32>(1.0) + water_reflect.look.detail.zw;
+    let a_y = dot(o.a_lin, WU_LUMA);
+    o.a_lin = max(mix(vec3<f32>(a_y), o.a_lin, tone.x), vec3<f32>(0.0)) * tone.y;
     o.a_g = water_enc(o.a_lin);
     o.bed_lod = 0.0;
     return o;
@@ -9092,6 +9101,8 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
         let r0 = swatch_row(body_shallow, body_deep, 0.0, ocean).rgb;
         let r63 = swatch_row(body_shallow, body_deep, 63.0, false).rgb;
         let dc = water_reflect.look.body.spare.y;
+        let auth_floor = water_reflect.look.body.spare.w;
+        let depth_f = saturate(depth * (1.0 + water_reflect.look.grade.w));
         let sig = select(water_reflect.look.body.sig_river, water_reflect.look.body.sig_ocean, ocean);
         let sig_ramp = select(water_reflect.look.body.e_sky_foam.w, water_reflect.look.body.e_sun_foam.w, ocean);
         let unlit = w.path.x > 1.5;
@@ -9104,8 +9115,8 @@ fn fragment(in: LiquidVsOut) -> @location(0) vec4<f32> {
             sig_ramp,
             select(water_reflect.look.body.look.w * w.anim.x, 0.0, unlit),
             depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
-            select(1.0, saturate(depth / max(dc, 1e-3)), w.path.x < 0.5),
-            select(0.0, 1.0 - pow(swatch_at(shallow, deep, depth, ocean).w, 2.2), w.path.x < 0.5),
+            select(1.0, saturate(depth_f / max(dc, 1e-3)), w.path.x < 0.5),
+            select(0.0, auth_floor * (1.0 - pow(swatch_at(shallow, deep, depth_f, ocean).w, 2.2)), w.path.x < 0.5),
             unlit,
             w.path.x < 0.5,
         );

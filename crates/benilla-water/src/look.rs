@@ -16,7 +16,7 @@ use bevy::prelude::*;
 use bevy::render::camera::MipBias;
 use bevy::window::PrimaryWindow;
 
-use crate::body::{body_lanes, BodyLook, BODY_FLOATS};
+use crate::body::{body_lanes, transparency_clarity, transparency_floor, BodyLook, BODY_FLOATS};
 use crate::lighting::WowLighting;
 use crate::mcsh::WaterShadowWindow;
 use crate::view::WorldCamera;
@@ -191,9 +191,9 @@ fn grazing_limit() -> f32 {
 /// the three bands pull the ramp (0 unbanded), `$WOW_WATER_TURB=<0-4>` the turbidity's scale on
 /// both kinds, `$WOW_WATER_REFRACT=<0-8>` the refraction's strength (1 physical), or
 /// `$WOW_WATER_PROBE_REFOG=0|1` and `$WOW_WATER_FLOOR_REFOG=0|1` whether the probe's and the floor
-/// occluder's fog are re-based to the mirror's, or `$WOW_WATER_CLARITY=<0.25-8>` how clear the
-/// clear kinds are (`BodyLook::clarity`: 1 the default, 0.5 the first clarity pass's default, 0.25
-/// the look before it); each read once, to measure it.
+/// occluder's fog are re-based to the mirror's; each read once, to measure it. The clarity and the
+/// authored floor follow the debug panel's transparency each frame ([`LookSources::lanes`];
+/// `$WOW_WATER_CLARITY` sets its boot value, `dev_state::WaterDebug::transparency`).
 fn body_look() -> BodyLook {
     struct Forced {
         ceiling: Option<f32>,
@@ -202,7 +202,6 @@ fn body_look() -> BodyLook {
         refract: Option<f32>,
         probe_refog: Option<bool>,
         floor_refog: Option<bool>,
-        clarity: Option<f32>,
     }
     static FORCED: OnceLock<Forced> = OnceLock::new();
     let forced = FORCED.get_or_init(|| {
@@ -224,7 +223,6 @@ fn body_look() -> BodyLook {
             refract: ranged("WOW_WATER_REFRACT", 8.0),
             probe_refog: switch("WOW_WATER_PROBE_REFOG"),
             floor_refog: switch("WOW_WATER_FLOOR_REFOG"),
-            clarity: ranged("WOW_WATER_CLARITY", 8.0).filter(|c| *c > 0.0),
         }
     });
     let look = BodyLook::default();
@@ -237,7 +235,6 @@ fn body_look() -> BodyLook {
         refract: forced.refract.unwrap_or(look.refract),
         probe_refog: forced.probe_refog.unwrap_or(look.probe_refog),
         floor_refog: forced.floor_refog.unwrap_or(look.floor_refog),
-        clarity: forced.clarity.unwrap_or(look.clarity),
         ..look
     }
 }
@@ -342,6 +339,10 @@ pub(crate) struct LookInputs<'a> {
     pub(crate) loss: &'a [[f32; 4]],
     /// The body rows ([`body_lanes`]); `None` leaves them 0.
     pub(crate) body: Option<&'a [f32; BODY_FLOATS]>,
+    /// The owner's body knobs, each less 1 so 0 is the default: the depth falloff
+    /// ([`BodyLook::depth_falloff`]), the body colour's saturation and its brightness
+    /// (`look.grade.w`, `look.detail.zw`).
+    pub(crate) body_tone: [f32; 3],
     /// The render scale: the world camera's target over the window, in pixels (2 at render scale
     /// 2); the shader reads 0 as 1. The wave trains and the caustic ripples fade by the output
     /// pixel, which the view uniform does not know (`mip_bias` is 0 above native).
@@ -380,6 +381,7 @@ pub(crate) struct LookSources<'w, 's> {
     camera: Query<'w, 's, &'static Camera, With<WorldCamera>>,
     window: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
     shadow: Res<'w, WaterShadowWindow>,
+    dev: Res<'w, crate::dev_state::DebugState>,
     loss: Local<'s, LossTable>,
 }
 
@@ -389,7 +391,18 @@ impl LookSources<'_, '_> {
     pub(crate) fn lanes(&mut self, light: &WowLighting, dome: &[Vec4; 7]) -> [f32; LOOK_FLOATS] {
         let ripple = self.ripple.as_deref().copied().unwrap_or_default();
         let bias = self.bias.iter().next().map_or(0.0, |b| b.0);
-        let body = body_lanes(light, dome, &self.look.body, self.shadow.lanes());
+        // The owner's transparency, live from the debug panel: the clarity and the authored floor.
+        // The depth falloff and the body colour, the same.
+        let wa = &self.dev.water;
+        let t = wa.transparency;
+        let falloff = wa.depth_falloff.clamp(0.25, 4.0);
+        let look = BodyLook {
+            clarity: transparency_clarity(t),
+            auth_floor: transparency_floor(t),
+            depth_falloff: falloff,
+            ..self.look.body.clone()
+        };
+        let body = body_lanes(light, dome, &look, self.shadow.lanes());
         let target = self
             .camera
             .iter()
@@ -404,6 +417,11 @@ impl LookSources<'_, '_> {
             aniso: self.aniso.0,
             loss: self.loss.rows(&ripple, bias, self.look.feature_fade),
             body: Some(&body),
+            body_tone: [
+                falloff - 1.0,
+                wa.saturation.clamp(0.0, 2.0) - 1.0,
+                wa.brightness.clamp(0.5, 1.5) - 1.0,
+            ],
             render_scale,
         };
         look_lanes(&self.look, &inputs)
@@ -486,7 +504,7 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
             look.grade_strength,
             look.grade_c_far,
             look.grade_c_near,
-            0.0,
+            inputs.body_tone[0],
         ],
     );
     // `y` is the ripple sampler's anisotropy clamp, so the shader's minor-axis LOD is the probes'.
@@ -501,7 +519,12 @@ pub(crate) fn look_lanes(look: &WaterLook, inputs: &LookInputs) -> [f32; LOOK_FL
     );
     row(
         LOOK_DETAIL,
-        [look.painted_detail, gloss_floor2(look.gloss), 0.0, 0.0],
+        [
+            look.painted_detail,
+            gloss_floor2(look.gloss),
+            inputs.body_tone[1],
+            inputs.body_tone[2],
+        ],
     );
     for (i, loss) in inputs.loss.iter().take(RIPPLE_LOSS_ROWS).enumerate() {
         row(LOOK_RIPPLE_LOSS + 4 * i, *loss);

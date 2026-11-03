@@ -639,6 +639,45 @@ fn debug_panel_ui(
                             ui.checkbox(&mut wa.probe_world, "probes in the world");
                             ui.checkbox(&mut wa.probe_off, "probe off");
                             ui.checkbox(&mut wa.surface2, "dispersive wave surface (off: old ripples)");
+                            ui.add(
+                                egui::Slider::new(&mut wa.transparency, 0.0..=2.0)
+                                    .fixed_decimals(2)
+                                    .text("water transparency"),
+                            )
+                            .on_hover_text(
+                                "0 the first Improved body, 1 the default, 2 the clearest: \
+                                 the clarity and the authored bed floor together",
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut wa.depth_falloff, 0.25..=4.0)
+                                    .logarithmic(true)
+                                    .fixed_decimals(2)
+                                    .text("depth falloff"),
+                            )
+                            .on_hover_text(
+                                "how fast the water closes with depth: 1 the default, \
+                                 below 1 the bed stays visible deeper",
+                            );
+                            ui.add(
+                                egui::Slider::new(&mut wa.saturation, 0.0..=2.0)
+                                    .fixed_decimals(2)
+                                    .text("water saturation"),
+                            )
+                            .on_hover_text("the body colour: 0 grey, 1 the default, 2 rich");
+                            ui.add(
+                                egui::Slider::new(&mut wa.brightness, 0.5..=1.5)
+                                    .fixed_decimals(2)
+                                    .text("water brightness"),
+                            )
+                            .on_hover_text("the body colour's brightness, hue kept");
+                            ui.add(
+                                egui::Slider::new(&mut wa.caustics, 0.0..=3.0)
+                                    .fixed_decimals(2)
+                                    .text("caustics intensity"),
+                            )
+                            .on_hover_text(
+                                "the caustic net above and below water: 0 off, 1 the default",
+                            );
                             // The debug views: a pipeline variant, compiled on first use.
                             use benilla_world::dev_state::WATER_VIEWS;
                             egui::ComboBox::from_label("debug view")

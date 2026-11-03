@@ -7,7 +7,7 @@
 //!   list of names exactly those, a list of `-name` entries every feature but those.
 //! - `$WOW_PREVIEW_<NAME>=0` then turns one feature off (`=1` on), e.g. `WOW_PREVIEW_WAVES=0`.
 //! - Sub-levers, numbers ([`number`]): `ROUGH_CONE` (0.2), `SEA` (unset: the wind's),
-//!   `CAUSTICS_GAIN`, `LIGHTS_GAIN`, `SPARKLES_GAIN`, `RIVER_FOAM_GAIN`, `RIVER_MIST_GAIN` (1),
+//!   `CAUSTICS_GAIN` (the debug panel's caustics slider's boot value), `LIGHTS_GAIN`, `SPARKLES_GAIN`, `RIVER_FOAM_GAIN`, `RIVER_MIST_GAIN` (1),
 //!   `FORCE_RAIN` and `FORCE_SNOW` (0..1 over the zone weather), `RIVER_SLOW` (1: the rivers' slow
 //!   tier, flecks drifting in trails on water under the whitewater's speeds), `SWIMMER` (yards: a
 //!   phantom swimmer that far ahead of the camera, a body for the wave field; captures only) with

@@ -80,6 +80,29 @@ pub struct WaterDebug {
     /// Draw the Improved Water surface as the dispersive wave field (on) or the scrolled ripple
     /// layers (off, the default); `$WOW_PREVIEW_SURFACE2=1` turns the wave field on at boot.
     pub surface2: bool,
+    /// The Improved Water's transparency, 0 to 2 (the panel's "water transparency" slider, read
+    /// each frame): one value for every source of the clear water's transparency,
+    /// `benilla_water::body`'s clarity (`0.25·2^t`) and the authored bed floor's share (0 at 0, 0.6
+    /// at 1, 1 at 2). 0 is the first Improved body, 2 the very clear look of 3 Nov, 1 the default.
+    /// `$WOW_WATER_TRANSPARENCY=<0-2>` sets it at boot, or else `$WOW_WATER_CLARITY=<c>` as
+    /// `log2(c / 0.25)` (clamped to 0-2: clarity 0.5 is 1, 1 is 2).
+    pub transparency: f32,
+    /// How fast the Improved Water closes with depth, 0.25 to 4, 1 the default (the panel's "depth
+    /// falloff", read each frame): the absorption and the colour ramp's pace scale together, as if
+    /// the water were this many times as deep; < 1 a bed stays visible deeper.
+    /// `$WOW_WATER_DEPTH_FALLOFF` sets it at boot.
+    pub depth_falloff: f32,
+    /// The Improved Water body colour's saturation about its luminance, 0 (grey) to 2 (rich), 1 the
+    /// default (the panel's "water saturation"; `$WOW_WATER_SATURATION`). The bed and the
+    /// reflection keep theirs.
+    pub saturation: f32,
+    /// The body colour's brightness, hue kept, 0.5 to 1.5, 1 the default (the panel's "water
+    /// brightness"; `$WOW_WATER_BRIGHTNESS`).
+    pub brightness: f32,
+    /// The Improved Water caustic net's gain, 0 (off) to 3, 1 the default (the panel's "caustics
+    /// intensity", read each frame; the one net above and below water).
+    /// `$WOW_PREVIEW_CAUSTICS_GAIN` sets it at boot.
+    pub caustics: f32,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -99,9 +122,45 @@ impl Default for WaterDebug {
                     .map(str::trim),
                 Ok("1") | Ok("on")
             ),
+            transparency: water_transparency_from_env(),
+            depth_falloff: env_ranged("WOW_WATER_DEPTH_FALLOFF", 0.25, 4.0),
+            saturation: env_ranged("WOW_WATER_SATURATION", 0.0, 2.0),
+            brightness: env_ranged("WOW_WATER_BRIGHTNESS", 0.5, 1.5),
+            caustics: env_ranged("WOW_PREVIEW_CAUSTICS_GAIN", 0.0, 3.0),
             view: water_view_from_env(),
         }
     }
+}
+
+/// The transparency's default ([`WaterDebug::transparency`]), `benilla_water::body`'s
+/// `TRANSPARENCY_DEFAULT`.
+pub const WATER_TRANSPARENCY_DEFAULT: f32 = 1.0;
+
+/// A water knob at boot: `$var` clamped to `lo..=hi`, or 1.
+fn env_ranged(var: &str, lo: f32, hi: f32) -> f32 {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.trim().parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map_or(1.0, |v| v.clamp(lo, hi))
+}
+
+/// [`WaterDebug::transparency`] at boot: `$WOW_WATER_TRANSPARENCY`, or `$WOW_WATER_CLARITY` mapped
+/// to it, or the default.
+fn water_transparency_from_env() -> f32 {
+    let num = |var: &str| {
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite())
+    };
+    num("WOW_WATER_TRANSPARENCY")
+        .or_else(|| {
+            num("WOW_WATER_CLARITY")
+                .filter(|c| *c > 0.0)
+                .map(|c| (c / 0.25).log2())
+        })
+        .map_or(WATER_TRANSPARENCY_DEFAULT, |t| t.clamp(0.0, 2.0))
 }
 
 /// The Improved Water debug views by id (`WaterDebug::view`, `liquid.wgsl`'s `WV_*` consts); 0 is

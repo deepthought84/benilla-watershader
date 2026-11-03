@@ -89,13 +89,13 @@ pub(super) fn drive_preview(
             lever::number("RIVER_SLOW", 1.0, 0.0, 1.0),
         )
     });
-    // The gains (caustics, lights, sparkles under the owner's gloss, river foam), the river
-    // mist's, and a forced rain and snow (-1: the zone weather's).
+    // The gains (lights, sparkles under the owner's gloss, river foam; the caustics' follows the
+    // debug panel below), the river mist's, and a forced rain and snow (-1: the zone weather's).
     static GAINS: std::sync::OnceLock<([f32; 4], f32, f32, f32)> = std::sync::OnceLock::new();
-    let (gains, mist_gain, rain_forced, snow_forced) = *GAINS.get_or_init(|| {
+    let (mut gains, mist_gain, rain_forced, snow_forced) = *GAINS.get_or_init(|| {
         (
             [
-                lever::number("CAUSTICS_GAIN", 1.0, 0.0, 4.0),
+                1.0,
                 lever::number("LIGHTS_GAIN", 1.0, 0.0, 4.0),
                 lever::number("SPARKLES_GAIN", 1.0, 0.0, 4.0)
                     * crate::look::gloss_sparkle(crate::look::gloss()),
@@ -119,6 +119,9 @@ pub(super) fn drive_preview(
             f32::from(u8::from(surface2)),
         ],
     );
+    // The caustic net's gain, live from the debug panel ($WOW_PREVIEW_CAUSTICS_GAIN at boot): the
+    // one lane the net reads above water and the underwater rows copy below it.
+    gains[0] = dev.water.caustics.clamp(0.0, 3.0);
     row(PV_GAINS, gains);
     row(
         PV_CLOCKS,

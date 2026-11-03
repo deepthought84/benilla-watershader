@@ -54,6 +54,43 @@ pub const MODAL_SHALLOW_ALPHA: [f32; 2] = [0.5, 0.75];
 /// clearer still, the bed readable to mid depth, so the default is now what its lever gave at 2.
 pub const CLARITY_SWATCH: f32 = 0.25;
 
+/// The owner's water transparency at its default (the debug panel's slider, 0 to 2,
+/// `dev_state::WaterDebug::transparency`): one value that moves every source of the clear water's
+/// transparency together, the clarity ([`transparency_clarity`]) and the authored bed floor
+/// ([`transparency_floor`]). 0 is the first Improved body (the swatch's whole turbidity, no
+/// floor), 2 the very clear look of c9977864 and b47a12e5 (clarity 1, the whole floor), and the
+/// default 1 sits between, which the owner found too transparent at 2: the clarity of 53983599
+/// (the image loses a quarter of the swatch's turbidity) and [`TRANSPARENCY_FLOOR_MID`] of the
+/// floor.
+pub const TRANSPARENCY_DEFAULT: f32 = 1.0;
+
+/// The share of the authored bed floor ([`authored_pass`]) at transparency 1.
+pub const TRANSPARENCY_FLOOR_MID: f32 = 0.6;
+
+/// The clarity at transparency `t`: [`CLARITY_SWATCH`] doubled per unit, so 0 is the swatch's
+/// whole turbidity, 1 a quarter of it and 2 a sixteenth ([`turb_keep`]); the inverse of
+/// [`clarity_transparency`].
+pub fn transparency_clarity(t: f32) -> f32 {
+    CLARITY_SWATCH * t.max(0.0).exp2()
+}
+
+/// The transparency whose clarity is `clarity` ([`transparency_clarity`]), so `$WOW_WATER_CLARITY`
+/// still sets the slider's boot value: `log2(clarity / CLARITY_SWATCH)`.
+pub fn clarity_transparency(clarity: f32) -> f32 {
+    (clarity.max(CLARITY_SWATCH) / CLARITY_SWATCH).log2()
+}
+
+/// The share of the authored bed floor a known bed keeps at transparency `t`: none at 0,
+/// [`TRANSPARENCY_FLOOR_MID`] at 1, the whole floor from 2, linear between.
+pub fn transparency_floor(t: f32) -> f32 {
+    let t = t.clamp(0.0, 2.0);
+    if t <= 1.0 {
+        TRANSPARENCY_FLOOR_MID * t
+    } else {
+        TRANSPARENCY_FLOOR_MID + (1.0 - TRANSPARENCY_FLOOR_MID) * (t - 1.0)
+    }
+}
+
 /// The murk (a kind's turbidity over [`TURB_REF`]) between which the clarity's reach fades from
 /// whole to none: a lake, a harbour or a coast at the modal alpha (murk 1 to 1.6: Loch Modan's,
 /// Booty Bay's, Westfall's, Darkshore's rows) takes it whole; a yellow-green hollow (Felwood's
@@ -81,10 +118,21 @@ pub struct BodyLook {
     pub turb_scale: [f32; 2],
     /// How clear the clear kinds are: the share of the swatch's turbidity the image loses is
     /// `(CLARITY_SWATCH / clarity)²` ([`turb_keep`]), so 0.25 is the swatch's whole turbidity, 0.5
-    /// a quarter of it (the first clarity pass's default), 1 (the default) a sixteenth and 2 a
+    /// (the default, transparency 1) a quarter of it, 1 a sixteenth and 2 a
     /// 64th (absorption alone from there). The swatch's turbidity still paces the
-    /// colour ramp, and a swamp's keeps the image whatever the clarity (`$WOW_WATER_CLARITY`).
+    /// colour ramp, and a swamp's keeps the image whatever the clarity. Set each frame from the
+    /// transparency ([`transparency_clarity`]).
     pub clarity: f32,
+    /// The share of the authored bed floor ([`authored_pass`]) a known bed on ADT water passes at
+    /// least, 0 to 1 (`look.body.spare.w`); set each frame from the transparency
+    /// ([`transparency_floor`]).
+    pub auth_floor: f32,
+    /// How fast the water closes with depth, 1 the default (the debug panel's "depth falloff",
+    /// 0.25 to 4): the absorption along the path and the colour ramp's pace both scale by it
+    /// ([`body_lanes`]), and on ADT water the authored depth the ramp's cap and the bed floor read
+    /// (`liquid.wgsl`'s `look.grade.w`), as if the water were this many times as deep; the
+    /// turbidity stays the transparency's.
+    pub depth_falloff: f32,
     /// The swatch ramp's rate against the turbidity.
     pub ramp_rate: f32,
     /// The three bands' push and edge.
@@ -119,7 +167,9 @@ impl Default for BodyLook {
         Self {
             k_phys: 0.25,
             turb_scale: [1.0; 2],
-            clarity: 1.0,
+            clarity: transparency_clarity(TRANSPARENCY_DEFAULT),
+            auth_floor: transparency_floor(TRANSPARENCY_DEFAULT),
+            depth_falloff: 1.0,
             ramp_rate: 0.615,
             band_push: 0.5,
             band_edge: 0.22,
@@ -455,7 +505,16 @@ pub fn body_lanes(
         let (shallow, deep, alpha, _) = light.water_colors_noon(kind);
         kind_optics(shallow, deep, alpha, kind == LiquidKind::Ocean, look)
     };
-    let (still, ocean) = (optics(LiquidKind::Still), optics(LiquidKind::Ocean));
+    // The depth falloff scales the absorption and the ramp's pace, not the turbidity.
+    let falloff = |o: KindOptics| KindOptics {
+        sigma_abs: o.sigma_abs.map(|s| s * look.depth_falloff),
+        sigma_ramp: o.sigma_ramp * look.depth_falloff,
+        ..o
+    };
+    let (still, ocean) = (
+        falloff(optics(LiquidKind::Still)),
+        falloff(optics(LiquidKind::Ocean)),
+    );
     let sig = |o: KindOptics| {
         let [r, g, b] = o.sigma_abs;
         [r, g, b, o.sigma_turb]
@@ -487,7 +546,7 @@ pub fn body_lanes(
             f32::from(u8::from(look.floor_refog)),
         ],
         shadow,
-        [e.sun_share, look.deep_ceiling, e.night, 0.0],
+        [e.sun_share, look.deep_ceiling, e.night, look.auth_floor],
         // The foam rows' spare lanes carry each kind's ramp turbidity, river then ocean.
         rgb(e.e_sky_foam, still.sigma_ramp),
         rgb(e.e_sun_foam, ocean.sigma_ramp),
@@ -1023,8 +1082,10 @@ mod tests {
             "o.t_bed = select(o.t_bed, max(o.t_bed, vec3<f32>(bi.auth_t)), o.known);",
             "o.w_in = min(o.w_in, 1.0 - max(o.t_bed.r, max(o.t_bed.g, o.t_bed.b)));",
             "let x0 = select(min(1.0 - exp(-look.x * tau_ramp), bi.auth_x), 1.0, below);",
-            "select(1.0, saturate(depth / max(dc, 1e-3)), w.path.x < 0.5),",
-            "select(0.0, 1.0 - pow(swatch_at(shallow, deep, depth, ocean).w, 2.2), w.path.x < 0.5),",
+            "select(1.0, saturate(depth_f / max(dc, 1e-3)), w.path.x < 0.5),",
+            "select(0.0, auth_floor * (1.0 - pow(swatch_at(shallow, deep, depth_f, ocean).w, 2.2)), w.path.x < 0.5),",
+            "let depth_f = saturate(depth * (1.0 + water_reflect.look.grade.w));",
+            "let auth_floor = water_reflect.look.body.spare.w;",
             "depth * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),",
             "w.path.x < 0.5,",
         ] {
@@ -1255,6 +1316,27 @@ mod tests {
     /// of itself and the ramp at its deep stop, where 1.12's blend leaves it about two fifths of
     /// the pixel in linear light, under its shallow rows. The authored clarity keeps both, in the bed's own colours; the open sea
     /// (byte 255) and a deep river pass nothing and keep the deep stop.
+    /// The transparency's ends and its default: 0 the swatch's whole turbidity and no floor, 1 a
+    /// quarter of it and [`TRANSPARENCY_FLOOR_MID`] of the floor, 2 the clarity of 1 and the whole
+    /// floor; continuous between, and `$WOW_WATER_CLARITY`'s mapping its inverse.
+    #[test]
+    fn the_transparency_moves_the_clarity_and_the_floor_together() {
+        assert_eq!(transparency_clarity(0.0), CLARITY_SWATCH);
+        assert_eq!(transparency_clarity(1.0), 0.5);
+        assert_eq!(transparency_clarity(2.0), 1.0);
+        assert_eq!(
+            [0.0, 1.0, 2.0].map(transparency_floor),
+            [0.0, TRANSPARENCY_FLOOR_MID, 1.0]
+        );
+        for c in [0.25, 0.5, 0.7, 1.0] {
+            assert!((transparency_clarity(clarity_transparency(c)) - c).abs() < 1e-6);
+        }
+        let d = BodyLook::default();
+        assert_eq!(d.clarity, transparency_clarity(TRANSPARENCY_DEFAULT));
+        assert_eq!(d.auth_floor, transparency_floor(TRANSPARENCY_DEFAULT));
+        assert_eq!(turb_keep(1.0, d.clarity), 0.25);
+    }
+
     #[test]
     fn the_authored_clarity_keeps_a_bank_the_sea_draws_through() {
         let (shallow, deep) = (
