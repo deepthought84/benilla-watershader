@@ -15,9 +15,9 @@
 //!   then, so a burst shows its wake form and age in place), `SWIMMER_STOP` (seconds: it halts
 //!   there), `SWIMMER_TURN` (degrees a second: from its pass it turns a quarter turn at that rate)
 //!   and `SWIMMER_DEPTH` (yards it swims under its floating depth); `WAKE_FOAM_GAIN` (1: the wave
-//!   field's foam, its breaking rate and its strokes', `ripple_sim`). `SURFACE2` (1: the
-//!   dispersive wave field, `benilla_water`'s `surface2`, draws the surface under `waves`; 0 the
-//!   five ripple octaves, for an A/B), `SURFACE2_GAIN` and `SURFACE2_SWELL` (1: its steepness
+//!   field's foam, its breaking rate and its strokes', `ripple_sim`). `SURFACE2` (unset or 0:
+//!   the five ripple octaves draw the surface under `waves`; 1: the dispersive wave field,
+//!   `benilla_water`'s `surface2`; the debug panel's Water section switches it live), `SURFACE2_GAIN` and `SURFACE2_SWELL` (1: its steepness
 //!   and its swell's), `SURFACE2_THIN` (the band Medium sums every other train from, 1-based:
 //!   1 all, 10 none; unset the shader's default, the two shortest).
 //!
@@ -193,20 +193,6 @@ pub fn number(name: &str, default: f32, lo: f32, hi: f32) -> f32 {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite() && (lo..=hi).contains(v))
         .unwrap_or(default)
-}
-
-/// Whether the dispersive wave field draws the surface under `waves` (`$WOW_PREVIEW_SURFACE2`,
-/// on unless `0`), read once.
-pub fn surface2() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !matches!(
-            std::env::var("WOW_PREVIEW_SURFACE2")
-                .as_deref()
-                .map(str::trim),
-            Ok("0") | Ok("off")
-        )
-    })
 }
 
 #[cfg(test)]

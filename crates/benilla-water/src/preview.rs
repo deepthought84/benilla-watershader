@@ -73,6 +73,7 @@ pub(super) fn drive_preview(
     weather: Option<Res<WeatherState>>,
     glint: Res<benilla_world::sun::SunGlintVisibility>,
     mut lanes: ResMut<PreviewLanes>,
+    dev: Res<crate::dev_state::DebugState>,
 ) {
     let secs = clock.secs();
     let at = |lane: usize| lane - PREVIEW_LANES.start;
@@ -107,7 +108,7 @@ pub(super) fn drive_preview(
     let cone = if lever::on(lever::ROUGH) { cone } else { 0.0 };
     // The slow tier's lane holds 1 − gain, so an unwritten (zero) lane runs it; `w` says whether
     // the dispersive surface draws under `waves`.
-    let surface2 = lever::on(lever::WAVES) && lever::surface2();
+    let surface2 = lever::on(lever::WAVES) && dev.water.surface2;
     row(
         PV_MASK,
         [

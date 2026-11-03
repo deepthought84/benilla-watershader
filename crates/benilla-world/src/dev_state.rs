@@ -77,6 +77,9 @@ pub struct WaterDebug {
     pub probe_world: bool,
     /// Turn the reflection probe off: no capture, and the water falls back to the other tiers.
     pub probe_off: bool,
+    /// Draw the Improved Water surface as the dispersive wave field (on) or the scrolled ripple
+    /// layers (off, the default); `$WOW_PREVIEW_SURFACE2=1` turns the wave field on at boot.
+    pub surface2: bool,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -90,6 +93,12 @@ impl Default for WaterDebug {
             probe_minimap: armed,
             probe_world: armed,
             probe_off: false,
+            surface2: matches!(
+                std::env::var("WOW_PREVIEW_SURFACE2")
+                    .as_deref()
+                    .map(str::trim),
+                Ok("1") | Ok("on")
+            ),
             view: water_view_from_env(),
         }
     }
