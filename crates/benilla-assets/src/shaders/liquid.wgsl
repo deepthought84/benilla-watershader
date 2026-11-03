@@ -299,8 +299,11 @@ struct WaterPreview {
     falls: array<vec4<f32>, 16>,
     // The view from below the surface.
     under: UnderLanes,
+    // The owner's look switches, each 1 where its switch is off (the debug panel's water section):
+    // x the soft shoreline ([`sc_soft_edge`]), yzw spare.
+    looks: vec4<f32>,
     // Room for shader-only iteration.
-    spare: array<vec4<f32>, 8>,
+    spare: array<vec4<f32>, 7>,
     // The dispersive surface's wave trains (`benilla_water`'s `surface2`), three rows each: (k·d / 2π
     // in cycles a yard, the phase in cycles, the wind sea's slope amplitude), (the swell's slope
     // amplitude, Q·λ/2π of the orbital displacement, the Stokes share, –), (the direction, 1/λ²,
@@ -5427,6 +5430,39 @@ fn sc_geometry_release(h: vec3<u32>) -> ScGeom {
     return ScGeom(a.x, a.y, b.x, b.y, unpack2x16snorm(h.z));
 }
 
+/// The soft shoreline's fade (the owner's switch, `preview.looks.x`): the water's coverage rises
+/// from 0 where the surface meets the ground to 1 over this much column, yards; real water at a
+/// beach is a film the bed shows through before it is a body.
+const SC_SOFT_YD: f32 = 0.3;
+/// Where in the soft fade the wet line and the meniscus ride, as a share of its column: the water
+/// is first seen there, not at the ground's cut.
+const SC_SOFT_LINE: f32 = 0.25;
+/// The farthest the soft shoreline moves the wet line off the ground's cut, yards.
+const SC_SOFT_SHIFT_MAX: f32 = 0.75;
+
+/// Whether the soft shoreline is on (`preview.looks.x` 0, the default).
+fn pv_soft_shore() -> bool {
+    return water_reflect.preview.looks.x < 0.5;
+}
+
+/// The soft shoreline's fade column, yards: [`SC_SOFT_YD`], wider where one pixel spans more of the
+/// column than a third of it, so the edge stays a gradient over several pixels at distance.
+fn sc_soft_yd(g: ScGeom) -> f32 {
+    return max(SC_SOFT_YD, 3.0 * g.fw_col);
+}
+
+/// The edge's coverage under the soft shoreline: `t·(2 − t)` of the column's share `t` of
+/// [`sc_soft_yd`], from 0 at the ground's cut (no line where the cut was), three quarters by half
+/// the fade, so a shallow shelf a hand under the surface still reads as water; 1 where the bed is
+/// not known.
+fn sc_soft_edge(g: ScGeom) -> f32 {
+    if (g.h_ray < 0.0) {
+        return 1.0;
+    }
+    let t = saturate(g.col / sc_soft_yd(g));
+    return t * (2.0 - t);
+}
+
 /// The terms where the shore draws nothing: the edge's coverage `cover` and today's foam colour.
 fn sc_neutral(cover: f32) -> ShoreContact {
     return ShoreContact(cover, 0.0, water_dec(FOAM_COLOR), 0.0, 0.0, 0.0, 0.0);
@@ -5603,7 +5639,20 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
     // World yards a pixel spans on the surface.
     let yd_px = max(sqrt(length(i.d_xz_dx) * length(i.d_xz_dy)), 1e-4);
 
-    var o = sc_neutral(sc_edge_cover(g));
+    let soft_on = pv_soft_shore();
+    var o = sc_neutral(select(sc_edge_cover(g), sc_soft_edge(g), soft_on));
+    // Under the soft shoreline the wet line rides where the water is first seen, `SC_SOFT_LINE` of
+    // the fade's column in: that many yards of column over the bank's local slope (column per yard
+    // of shore distance, from the two footprints), at most [`SC_SOFT_SHIFT_MAX`]; and only over
+    // the fade's column, never as a stripe out in deeper water where the slope reads flat.
+    var soft_shift = 0.0;
+    var soft_gate = 1.0;
+    if (soft_on && g.h_ray >= 0.0) {
+        let e = sc_soft_yd(g);
+        let slope = g.fw_col / max(i.fw_shore, 1e-4);
+        soft_shift = min(SC_SOFT_LINE * e / max(slope, 0.05), SC_SOFT_SHIFT_MAX);
+        soft_gate = 1.0 - smoothstep(0.6 * e, 1.2 * e, g.col);
+    }
     o.foam_albedo = water_dec(SC_FOAM_CREAM);
     // The opaque foam's coverage before the bubble cut, and the wet line's.
     var foam_c = 0.0;
@@ -5620,7 +5669,7 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
 #ifdef WATER_TIER_LOW
     surf = false;
 #endif
-    if (i.to_shore < lap + SC_SHORE_REACH || surf) {
+    if (i.to_shore < lap + SC_SHORE_REACH + soft_shift || surf) {
         // The nearest waterline point: a field read there varies along the shore and not across
         // it, so the whole band breathes as one and the swash's tongues run up the beach.
         let at = xz + i.shore_offset;
@@ -5644,9 +5693,12 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
         // The water's edge this instant, yards seaward of the waterline.
         let edge = max(lap * (1.0 - fill) * (1.0 + 0.7 * tongue), 0.0);
         let d_edge = i.to_shore - edge;
+        // The hairlines (the wet line, the meniscus) ride the soft edge; the foam behind them stays
+        // on the waterline, where it gathers.
+        let d_line = d_edge - soft_shift;
         // A waterline the depth shows standing in deep water is a seam between two batches of the
         // same water, not a shore: the line, the front and the meniscus stay off it.
-        let real = select(1.0, 1.0 - smoothstep(0.3, 0.7, g.col), g.h_ray >= 0.0);
+        let real = select(1.0, 1.0 - smoothstep(0.3, 0.7, g.col), g.h_ray >= 0.0) * soft_gate;
 
         // Shoreward of the edge, thin water has drained: the ground shows, wet, and glossy for a
         // while after the water left it.
@@ -5659,13 +5711,21 @@ fn shore_contact(i: ScIn, g: ScGeom) -> ShoreContact {
         // The bed under the last of the water, and the drained ground, wet.
         o.wet = (1.0 - smoothstep(lap + 0.25, lap + 0.75, i.to_shore))
             * (1.0 - smoothstep(0.22, 0.5, g.col));
+        if (soft_on && g.h_ray >= 0.0) {
+            // Soft: the wet bed darkens in from the ground's cut over the fade's first part, ahead
+            // of the water itself, and holds a little deeper as the fade is wider.
+            let e = sc_soft_yd(g);
+            o.wet = (1.0 - smoothstep(lap + 0.25, lap + 0.75 + soft_shift, i.to_shore))
+                * smoothstep(0.0, 0.4 * e, g.col)
+                * (1.0 - smoothstep(0.22 + 0.6 * e, 0.5 + 0.8 * e, g.col));
+        }
         // The wet line and the meniscus ride the edge: hairlines, and at distance only the share of
         // the pixel they cover, so neither becomes an outline.
         let fw = max(i.fw_shore, 1e-4);
-        o.meniscus = (1.0 - smoothstep(0.0, SC_MENISCUS_YD + aa, d_edge)) * smoothstep(-aa, 0.0, d_edge)
+        o.meniscus = (1.0 - smoothstep(0.0, SC_MENISCUS_YD + aa, d_line)) * smoothstep(-aa, 0.0, d_line)
             * saturate(SC_MENISCUS_YD / fw) * real;
         let hw = max(0.5 * SC_LINE_YD, aa);
-        let shape = 1.0 - smoothstep(0.5 * hw, hw, abs(d_edge - hw));
+        let shape = 1.0 - smoothstep(0.5 * hw, hw, abs(d_line - hw));
         let kind_gain = select(mix(kinds.x, kinds.y, rapids), kinds.z, ocean);
         line = gains.x * kind_gain * shape * saturate(SC_LINE_YD / fw) * real;
         // Round 3: a thin broken lace behind the line, thinning over two thirds of a yard, so a

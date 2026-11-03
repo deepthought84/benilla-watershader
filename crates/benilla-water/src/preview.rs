@@ -8,8 +8,8 @@ use bevy::prelude::*;
 
 use benilla_assets::preview as lever;
 use benilla_world::liquid::{
-    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_MASK, PV_SWELL, PV_TRAINS,
-    PV_WEATHER, PV_WIND,
+    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_LOOKS, PV_MASK, PV_SWELL,
+    PV_TRAINS, PV_WEATHER, PV_WIND,
 };
 use benilla_world::weather::{storm_blend, WeatherKind, WeatherState};
 
@@ -123,6 +123,9 @@ pub(super) fn drive_preview(
     // one lane the net reads above water and the underwater rows copy below it.
     gains[0] = dev.water.caustics.clamp(0.0, 3.0);
     row(PV_GAINS, gains);
+    // The owner's look switches, live from the debug panel, each lane 1 where its switch is off.
+    let off = |on: bool| f32::from(u8::from(!on));
+    row(PV_LOOKS, [off(dev.water.soft_shore), 0.0, 0.0, 0.0]);
     row(
         PV_CLOCKS,
         [

@@ -639,6 +639,10 @@ fn debug_panel_ui(
                             ui.checkbox(&mut wa.probe_world, "probes in the world");
                             ui.checkbox(&mut wa.probe_off, "probe off");
                             ui.checkbox(&mut wa.surface2, "dispersive wave surface (off: old ripples)");
+                            ui.checkbox(&mut wa.soft_shore, "soft shoreline").on_hover_text(
+                                "the water fades in over its first third of a yard of depth, \
+                                 the wet bed and wet line with it (off: the hard cut)",
+                            );
                             ui.add(
                                 egui::Slider::new(&mut wa.transparency, 0.0..=2.0)
                                     .fixed_decimals(2)

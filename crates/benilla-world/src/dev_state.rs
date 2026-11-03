@@ -103,6 +103,11 @@ pub struct WaterDebug {
     /// intensity", read each frame; the one net above and below water).
     /// `$WOW_PREVIEW_CAUSTICS_GAIN` sets it at boot.
     pub caustics: f32,
+    /// Fade the Improved Water in over its first third of a yard of column to the bed (the panel's
+    /// "soft shoreline", read each frame): the waterline's coverage, wet bed and wet line follow a
+    /// soft edge instead of the hard cut where the surface meets the ground. On by default;
+    /// `$WOW_WATER_SOFT_SHORE=0` turns it off at boot.
+    pub soft_shore: bool,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -127,6 +132,7 @@ impl Default for WaterDebug {
             saturation: env_ranged("WOW_WATER_SATURATION", 0.0, 2.0),
             brightness: env_ranged("WOW_WATER_BRIGHTNESS", 0.5, 1.5),
             caustics: env_ranged("WOW_PREVIEW_CAUSTICS_GAIN", 0.0, 3.0),
+            soft_shore: env_switch("WOW_WATER_SOFT_SHORE"),
             view: water_view_from_env(),
         }
     }
@@ -143,6 +149,14 @@ fn env_ranged(var: &str, lo: f32, hi: f32) -> f32 {
         .and_then(|v| v.trim().parse::<f32>().ok())
         .filter(|v| v.is_finite())
         .map_or(1.0, |v| v.clamp(lo, hi))
+}
+
+/// A water switch at boot, on unless `$var` is `0` or `off`.
+fn env_switch(var: &str) -> bool {
+    !matches!(
+        std::env::var(var).as_deref().map(str::trim),
+        Ok("0") | Ok("off")
+    )
 }
 
 /// [`WaterDebug::transparency`] at boot: `$WOW_WATER_TRANSPARENCY`, or `$WOW_WATER_CLARITY` mapped
