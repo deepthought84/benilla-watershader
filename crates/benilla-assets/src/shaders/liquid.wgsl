@@ -301,10 +301,14 @@ struct WaterPreview {
     under: UnderLanes,
     // The owner's look switches, each 1 where its switch is off (the debug panel's water section):
     // x the soft shoreline ([`sc_soft_edge`]), y the lively reflection ([`pv_fresnel_lively`]), z
-    // the surface height ([`pv_surface_height`]), w spare.
+    // the surface height ([`pv_surface_height`]), w the waves in the reflections
+    // ([`pv_reflect_waves`]).
     looks: vec4<f32>,
+    // More of them: x the sky across the waves ([`pv_sky_waves`]), y the crests' shading
+    // ([`pv_crest_shade`]), zw spare.
+    looks2: vec4<f32>,
     // Room for shader-only iteration.
-    spare: array<vec4<f32>, 7>,
+    spare: array<vec4<f32>, 6>,
     // The dispersive surface's wave trains (`benilla_water`'s `surface2`), three rows each: (k·d / 2π
     // in cycles a yard, the phase in cycles, the wind sea's slope amplitude), (the swell's slope
     // amplitude, Q·λ/2π of the orbital displacement, the Stokes share, –), (the direction, 1/λ²,
@@ -2577,6 +2581,7 @@ fn planar_read(
     n: vec3<f32>,
     frag_coord: vec2<f32>,
     tilt: f32,
+    wave_off: vec3<f32>,
 ) -> vec4<f32> {
     let plane_error = abs(world_pos.y - params.x);
     let trust = plane_trust(plane_error, params.w, tilt);
@@ -2616,7 +2621,9 @@ fn planar_read(
         // change.
         let mirror_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * water_reflect.march.y;
         let lift = 2.0 * (params.x - mirror_pos.y);
-        let lifted = position_world_to_ndc(mirror_pos + vec3<f32>(0.0, lift, 0.0));
+        // `wave_off`: the waves' turn of the reflected ray at the reflected thing's distance
+        // ([`pv_mirror_wave_off`]; zero off the preview).
+        let lifted = position_world_to_ndc(mirror_pos + vec3<f32>(0.0, lift, 0.0) + wave_off);
         // Behind the eye (reverse-Z puts `w < 0` there, and the divide flips `z` negative with it)
         // or thrown well off the side, the reprojection means nothing; the uncorrected UV is the
         // image this drew before the correction existed and is the honest fallback.
@@ -2973,9 +2980,10 @@ fn planar_read_rough(
     tilt: f32,
     lobe: RoughLobe,
     d_hit: f32,
+    wave_off: vec3<f32>,
 ) -> vec4<f32> {
     if (pv_rough_gain() <= 0.0 || !rough_chain_ready(second)) {
-        return planar_read(params, second, world_pos, n, frag_coord, tilt);
+        return planar_read(params, second, world_pos, n, frag_coord, tilt, wave_off);
     }
     let trust = plane_trust(abs(world_pos.y - params.x), params.w, tilt);
     let eye = view.world_position.xyz;
@@ -2989,7 +2997,7 @@ fn planar_read_rough(
     // base stays crisp in its reflection while what stands further off wavers.
     let slide = water_reflect.march.y * mix(0.3, 1.0, rough_contact(d_hit, distance(eye, world_pos)));
     let mirror_pos = world_pos + vec3<f32>(n.x, 0.0, n.z) * slide;
-    let p = mirror_pos + vec3<f32>(0.0, 2.0 * (params.x - mirror_pos.y), 0.0);
+    let p = mirror_pos + vec3<f32>(0.0, 2.0 * (params.x - mirror_pos.y), 0.0) + wave_off;
     let lifted = position_world_to_ndc(p);
     let usable = lifted.z > 0.0 && all(abs(lifted.xy) < vec2<f32>(1.5));
     let uv = select(frag_coord_to_uv(frag_coord), ndc_to_uv(lifted.xy), usable);
@@ -3272,22 +3280,33 @@ fn ripple_loss_at(lod: f32) -> vec2<f32> {
 /// One octave's mip-filtered slope on its rotated lattice, back in world XZ (as Rᵀ g), less the
 /// map's mean (the bias of its 8-bit truncation), × weight × the feature fade's keep.
 fn octave_slope(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> vec2<f32> {
+    return octave_sample(uv, fp, weight, rot).xy;
+}
+
+/// [`octave_slope`] in xy and, in z, the same read's height (the map's blue channel, 2·(b − ½),
+/// the slope's integral up to the octave's scale) × weight × keep: positive on a crest.
+fn octave_sample(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> vec3<f32> {
     let r = mat2x2<f32>(rot.x, -rot.y, rot.y, rot.x);
-    let g = textureSampleBias(ripples, ripples_samp, uv, view.mip_bias).rg * 2.0 - 1.0
-        - water_reflect.look.ripple_mean.xy;
-    return transpose(r) * g * (weight * fp.keep);
+    let t = textureSampleBias(ripples, ripples_samp, uv, view.mip_bias).rgb;
+    let g = t.rg * 2.0 - 1.0 - water_reflect.look.ripple_mean.xy;
+    let kw = weight * fp.keep;
+    return vec3<f32>(transpose(r) * g * kw, (t.b * 2.0 - 1.0) * kw);
 }
 
 /// One octave: its slope (world XZ, × weight × keep) and its feature wavelength in pixels.
 struct Octave {
     slope: vec2<f32>,
     feat_px: f32,
+    // Its height in the map's unit (± 1 at the map's extremes) × weight × keep ([`octave_sample`]).
+    h: f32,
 };
 
 /// One still octave on its own rotated lattice.
 fn ripple_octave(uv: vec2<f32>, fp: OctaveFootprint, weight: f32, rot: vec2<f32>) -> Octave {
     var o: Octave;
-    o.slope = octave_slope(uv, fp, weight, rot);
+    let t = octave_sample(uv, fp, weight, rot);
+    o.slope = t.xy;
+    o.h = t.z;
     o.feat_px = fp.feat_px;
     return o;
 }
@@ -3315,20 +3334,22 @@ fn ripple_octave_flowing(
     // The second phase reads another stretch of the map, scaled by the current, so still water
     // keeps its one pattern.
     let apart = vec2<f32>(0.37, 0.61) * saturate(length(flow)) / inv_wavelength;
-    let a = octave_slope(
+    let a = octave_sample(
         octave_uv(xz - flow * ph0 * FLOW_PERIOD_S, rot, inv_wavelength, drift),
         fp,
         weight,
         rot,
     );
-    let b = octave_slope(
+    let b = octave_sample(
         octave_uv(xz - flow * ph1 * FLOW_PERIOD_S + apart, rot, inv_wavelength, drift),
         fp,
         weight,
         rot,
     );
     var o: Octave;
-    o.slope = a * w0 + b * (1.0 - w0);
+    let ab = a * w0 + b * (1.0 - w0);
+    o.slope = ab.xy;
+    o.h = ab.z;
     o.feat_px = fp.feat_px;
     return o;
 }
@@ -3339,6 +3360,12 @@ fn ripple_octave_flowing(
 struct WaterSurface {
     n: vec3<f32>,
     n_lo: vec3<f32>,
+    // The resolved normal the reflections are distorted by ([`octave_rf`]): every octave whose
+    // features span at least ~6 px, the finer ones fading out by 3 px, ahead of the Nyquist fade.
+    n_rf: vec3<f32>,
+    // The resolved waves' crest factor ([`octave_crest`]): above 0 on a crest, below in a trough,
+    // 0 where no wave is resolved.
+    crest: f32,
     alpha: f32,
     a2: vec3<f32>,
     rho_a: f32,
@@ -3353,6 +3380,23 @@ struct WaterSurface {
 /// An octave's slope if its features span at least ~8 px: the resolved low band.
 fn octave_low(o: Octave) -> vec2<f32> {
     return o.slope * smoothstep(4.0, 8.0, o.feat_px);
+}
+
+/// The feature span in pixels, along the footprint's major axis, over which an octave joins the
+/// reflections' distortion ([`octave_rf`]): none at 3 px, whole from 6 px. The Nyquist fade
+/// (`look.surf.zw`) takes the octave from the normal between 4 and 2 px, so what distorts a
+/// reflection is always resolved, and what is not resolved blurs it through the tensor instead.
+const RF_FEAT_PX: vec2<f32> = vec2<f32>(3.0, 6.0);
+
+/// An octave's slope for the reflections' distortion: the resolved band down to ~3 px.
+fn octave_rf(o: Octave) -> vec2<f32> {
+    return o.slope * smoothstep(RF_FEAT_PX.x, RF_FEAT_PX.y, o.feat_px);
+}
+
+/// An octave's share of the crest factor: its height where its features span 8 px or more, the
+/// low band's rule, so a crest is a wave the eye sees as one.
+fn octave_crest(o: Octave) -> f32 {
+    return o.h * smoothstep(4.0, 8.0, o.feat_px);
 }
 
 /// The five ripple octaves, tiles of 110.4, 40.8, 12, 3.6 and 1.44 yd, each on its own rotated
@@ -3392,6 +3436,8 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
     let slope = o0.slope + o1.slope + o2.slope + o3.slope + o4.slope;
     let slope_lo = octave_low(o0) + octave_low(o1) + octave_low(o2) + octave_low(o3)
         + octave_low(o4);
+    let slope_rf = octave_rf(o0) + octave_rf(o1) + octave_rf(o2) + octave_rf(o3) + octave_rf(o4);
+    let crest = octave_crest(o1) + octave_crest(o2) + octave_crest(o3) + octave_crest(o4);
     // `probe_box_min.w` scales the whole ripple: 1, 0 for a dead-flat surface.
     let scale = water_reflect.probe_box_min.w;
     var s: WaterSurface;
@@ -3408,6 +3454,12 @@ fn water_surface(xz: vec2<f32>, flow: vec2<f32>, wake_slope: vec2<f32>) -> Water
         1.0,
         slope_lo.y * s.k + wake_slope.y * scale,
     ));
+    s.n_rf = normalize(vec3<f32>(
+        slope_rf.x * s.k + wake_slope.x * scale,
+        1.0,
+        slope_rf.y * s.k + wake_slope.y * scale,
+    ));
+    s.crest = crest * scale;
     // GGX α² is twice the slope variance per axis (Beckmann): A = α0² I + 2k² cov, with cov the
     // loss at the footprint alone, so on still water α holds still while the phases move. Along
     // the footprint's major axis A takes the whole loss; across it the finer mips an anisotropic
@@ -3582,6 +3634,8 @@ struct WaveGains {
 struct Swell {
     slope: vec2<f32>,
     slope_lo: vec2<f32>,
+    // The reflections' distortion ([`octave_rf`]'s band), the whole slope where resolved.
+    slope_rf: vec2<f32>,
     lost: vec3<f32>,
 };
 
@@ -3752,6 +3806,7 @@ fn wg_train(
     // Half of it slides the reflections' lookup point, so a long swell bends them without
     // tearing them apart (waves-glint's risk 1).
     o.slope_lo = d * (0.5 * s * keep * smoothstep(4.0, 8.0, feat));
+    o.slope_rf = d * (s * keep * smoothstep(RF_FEAT_PX.x, RF_FEAT_PX.y, feat));
     let lost = amp * amp * (1.0 + WG_SWELL_STOKES * WG_SWELL_STOKES) * (1.0 - keep * keep);
     o.lost = vec3<f32>(d.x * d.x, d.y * d.y, d.x * d.y) * lost;
     return o;
@@ -3761,7 +3816,7 @@ fn wg_train(
 /// where the gain is 0 (rivers, canals, pools).
 fn wg_swell(xz: vec2<f32>, px: PixelFootprint, gain: f32) -> Swell {
     if (gain <= 0.0) {
-        return Swell(vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0));
+        return Swell(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0));
     }
     let p = water_reflect.preview.swell;
     let a = wg_train(xz, px, WG_SWELL_DIR0, WG_SWELL_LAMBDA.x, WG_SWELL_SLOPE.x * gain, p.x);
@@ -3770,6 +3825,7 @@ fn wg_swell(xz: vec2<f32>, px: PixelFootprint, gain: f32) -> Swell {
     return Swell(
         a.slope + b.slope + c.slope,
         a.slope_lo + b.slope_lo + c.slope_lo,
+        a.slope_rf + b.slope_rf + c.slope_rf,
         a.lost + b.lost + c.lost,
     );
 }
@@ -3840,6 +3896,11 @@ fn water_surface_wg(
         m,
         octave_low(o0) + octave_low(o1) + octave_low(o2) + octave_low(o3) + octave_low(o4),
     );
+    let slope_rf = wg_sym_mul(
+        m,
+        octave_rf(o0) + octave_rf(o1) + octave_rf(o2) + octave_rf(o3) + octave_rf(o4),
+    );
+    let crest = octave_crest(o1) + octave_crest(o2) + octave_crest(o3) + octave_crest(o4);
     let sw = wg_swell(xz, px, g.swell);
     // `probe_box_min.w` scales the whole surface: 1, 0 for a dead-flat one.
     let scale = water_reflect.probe_box_min.w;
@@ -3855,6 +3916,12 @@ fn water_surface_wg(
         1.0,
         slope_lo.y * s.k + (sw.slope_lo.y + wake_slope.y) * scale,
     ));
+    s.n_rf = normalize(vec3<f32>(
+        slope_rf.x * s.k + (sw.slope_rf.x + wake_slope.x) * scale,
+        1.0,
+        slope_rf.y * s.k + (sw.slope_rf.y + wake_slope.y) * scale,
+    ));
+    s.crest = crest * scale;
     // The roughness tensor: the loss table's view-aligned loss at the gains, the capillary
     // octave's faded share and the wind's sub-pixel share, all shaped along the wind; the swell's
     // faded share along each train; the calm surface's α0.
@@ -3965,6 +4032,9 @@ fn s2_keep(q: f32, so2: f32) -> f32 {
 /// The resolved low band the reflections slide by: a band whose longest train spans 10 px along
 /// the footprint's major axis (q = 1/100) slides them whole, one of 6 px (q = 1/36) not at all.
 const S2_LO_Q: vec2<f32> = vec2<f32>(1.0 / 36.0, 56.25);
+/// The band the reflections are distorted by ([`RF_FEAT_PX`]): a longest train of 6 px (q = 1/36)
+/// whole, one of 3 px (q = 1/9) not at all.
+const S2_RF_Q: vec2<f32> = vec2<f32>(1.0 / 9.0, 12.0);
 /// A band under this slope variance (α², an rms slope of 0.2°) is not drawn, only counted.
 const S2_BAND_MIN: f32 = 1e-5;
 
@@ -3973,6 +4043,8 @@ const S2_BAND_MIN: f32 = 1e-5;
 struct S2Field {
     slope: vec2<f32>,
     slope_lo: vec2<f32>,
+    // The reflections' distortion: the bands whose longest train spans 6 px whole, none at 3 px.
+    slope_rf: vec2<f32>,
     lost: vec3<f32>,
     full: f32,
 };
@@ -3985,7 +4057,7 @@ struct S2Field {
 /// to the filter joins the tensor along the band's direction tensor too, and the band's share of
 /// the low band is its longest train's.
 fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
-    var f = S2Field(vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0), 0.0);
+    var f = S2Field(vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), vec3<f32>(0.0), 0.0);
     // The point the trains are read at: the long trains' orbital displacement moves it for the
     // shorter ones.
     var xz = xz0;
@@ -4022,6 +4094,7 @@ fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
             continue;
         }
         let lo = saturate((S2_LO_Q.x - q_band) * S2_LO_Q.y);
+        let rf = saturate((S2_RF_Q.x - q_band) * S2_RF_Q.y);
         let has_q = water_reflect.preview.trains[3 * i32(bl.y) + 1].y > 0.0;
         var band_slope = vec2<f32>(0.0);
         var band_lost = 0.0;
@@ -4056,6 +4129,7 @@ fn s2_field(xz0: vec2<f32>, px: PixelFootprint, g: WaveGains) -> S2Field {
         }
         f.slope += band_slope;
         f.slope_lo += band_slope * lo;
+        f.slope_rf += band_slope * rf;
         f.lost += tensor * band_lost;
     }
     return f;
@@ -4085,6 +4159,7 @@ fn water_surface_s2(
         f = S2Field(
             mix(fb.slope, fa.slope, w0),
             mix(fb.slope_lo, fa.slope_lo, w0),
+            mix(fb.slope_rf, fa.slope_rf, w0),
             mix(fb.lost, fa.lost, w0),
             fa.full,
         );
@@ -4105,6 +4180,13 @@ fn water_surface_s2(
         1.0,
         (f.slope_lo.y + wake_slope.y) * scale,
     ));
+    s.n_rf = normalize(vec3<f32>(
+        (f.slope_rf.x + wake_slope.x) * scale,
+        1.0,
+        (f.slope_rf.y + wake_slope.y) * scale,
+    ));
+    // The trains carry no crest factor (the body's crest shading is the map's).
+    s.crest = 0.0;
     // The roughness tensor: the calm surface's α0, every train's unresolved share along itself,
     // and the wind's sub-train share below the shortest train.
     let a0 = calm_alpha();
@@ -4706,6 +4788,93 @@ fn pv_fresnel(n_dot_v: f32, alpha: f32) -> f32 {
 /// Whether the lively reflection is on (`preview.looks.y` 0, the default).
 fn pv_lively() -> bool {
     return water_reflect.preview.looks.y < 0.5;
+}
+
+// ---- the waves in the reflections, the sky across them, the crests' shading -------------------
+//
+// Away from the sun the water read flat: the mirrors and the probe were read for a point the low
+// band slid (`n_lo`, octaves of 8 px and more) by 3 yd per unit of tilt, and along the FLAT
+// reflected ray, and the sky floor along the flat ray alone, so the waves moved the reflected
+// picture by a fraction of a pixel past the first few yards and never moved the sky at all; only
+// the glint and the reflectance answered them. Three switches in the debug panel's water section.
+
+/// Whether the reflections follow the resolved waves (`preview.looks.w` 0, the default): the
+/// mirrors and the probe are read for the point the resolved normal down to ~3 px slides
+/// ([`octave_rf`], `WaterSurface::n_rf`), the mirrors along its reflected ray at the reflected
+/// thing's distance ([`pv_mirror_wave_off`]), the probe along its reflected ray
+/// ([`pv_wave_dir`] at [`RF_PROBE_K`]).
+fn pv_reflect_waves() -> bool {
+    return water_reflect.preview.looks.w < 0.5;
+}
+
+/// Whether the sky floor is read along the resolved wave's reflected ray (`preview.looks2.x` 0, the
+/// default) instead of the flat one: a facet tilted toward the horizon reflects the brighter low
+/// sky, one tilted up the deeper zenith.
+fn pv_sky_waves() -> bool {
+    return water_reflect.preview.looks2.x < 0.5;
+}
+
+/// Whether the body shades its crests and troughs ([`pv_crest_shade`]; `preview.looks2.y` 0, the
+/// default).
+fn pv_crest_on() -> bool {
+    return water_reflect.preview.looks2.y < 0.5;
+}
+
+/// The share of the resolved normal's tilt the probe's direction takes. The cube is parallax
+/// corrected for its capture point, not for this fragment, so a whole swing of its direction at a
+/// grazing view repeats content (the probe's note above its read); half of it breaks the
+/// picture into the waves' patches and stays put.
+const RF_PROBE_K: f32 = 0.5;
+/// How far behind the water a mirror's reflected thing is taken to lie where no march said
+/// (yards), and the most the mirror's direction term reaches: a lake's far bank. A contact
+/// (`d_hit` 0) moves not at all, as a reflection's displacement goes with the reflected thing's
+/// distance.
+const RF_MIRROR_D: vec2<f32> = vec2<f32>(20.0, 40.0);
+/// The share of the resolved normal's reflected-ray tilt the mirrors' direction term takes.
+const RF_MIRROR_K: f32 = 0.4;
+/// The lowest a reflected ray leaves the mean surface, as the sine of its elevation: a facet's ray
+/// sent below meets the next wave's back and leaves upward again, so it is folded up.
+const RF_FOLD_MIN: f32 = 0.01;
+
+/// The ray reflected off `n` turned toward the mean surface `flat_n` by `1 − k`, folded above it.
+fn pv_wave_dir(to_view: vec3<f32>, flat_n: vec3<f32>, n: vec3<f32>, k: f32) -> vec3<f32> {
+    let nk = normalize(mix(flat_n, n, k));
+    let r = reflect(-to_view, nk);
+    let e = dot(r, flat_n);
+    return normalize(r + flat_n * (max(abs(e), RF_FOLD_MIN) - e));
+}
+
+/// The mirrors' direction term, world yards added to the lifted lookup point ([`planar_read`]):
+/// the resolved wave's reflected ray less the flat one, mirrored about the plane as the capture
+/// is, times the reflected thing's distance `d_hit` (negative unknown: [`RF_MIRROR_D`]'s x), so the
+/// far bank and the hills wobble with the waves by the angle they turn the ray, a contact not at
+/// all. The point slide by the normal stays for what lies close.
+fn pv_mirror_wave_off(to_view: vec3<f32>, n: vec3<f32>, d_hit: f32) -> vec3<f32> {
+    let up = vec3<f32>(0.0, 1.0, 0.0);
+    let dr = pv_wave_dir(to_view, up, n, 1.0) - reflect(-to_view, up);
+    let d = min(select(RF_MIRROR_D.x, d_hit, d_hit >= 0.0), RF_MIRROR_D.y);
+    return vec3<f32>(dr.x, -dr.y, dr.z) * (RF_MIRROR_K * d);
+}
+
+/// The crests' shading's depth: a crest's in-scatter at most this much over the mean, a trough's
+/// as much under: thinner water at a crest lets the light through, a trough's deeper column holds
+/// it back.
+const PV_CREST_GAIN: f32 = 0.15;
+/// The crest factor ([`WaterSurface::crest`], the resolved octaves' summed height in the map's
+/// unit) that reads as a whole crest.
+const PV_CREST_FULL: f32 = 0.8;
+
+/// The crest factor in [−1, 1] from the surface's resolved octaves' height ([`octave_crest`]).
+fn pv_crest(surf: WaterSurface) -> f32 {
+    return clamp(surf.crest / PV_CREST_FULL, -1.0, 1.0);
+}
+
+/// The body's light with its crests lighter and its troughs darker by the crest factor `c`
+/// ([`pv_crest`]), on the in-scatter, so under the sun and the sky it is lit by.
+fn pv_crest_shade(l: BodyLight, c: f32) -> BodyLight {
+    var o = l;
+    o.in_scatter = l.in_scatter * (1.0 + PV_CREST_GAIN * c);
+    return o;
 }
 
 /// [`pv_fresnel`] averaged over the unresolved facets: the cosine `mu` spread by `sig`, its
@@ -7485,6 +7654,7 @@ fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSur
     }
     var full = vec2<f32>(0.0);
     var lo = vec2<f32>(0.0);
+    var rf = vec2<f32>(0.0);
     var unresolved = 0.0;
     for (var i = NWG_RAIN_FIRST; i < 2; i = i + 1) {
         let d = nwg_drop(i);
@@ -7503,6 +7673,7 @@ fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSur
             let ring = nwg_rings(xz, d, chance, amp * keep, 40u + u32(i) * 8u);
             full += ring;
             lo += ring * smoothstep(4.0, 8.0, lam / fr.major);
+            rf += ring * smoothstep(RF_FEAT_PX.x, RF_FEAT_PX.y, lam / fr.major);
         }
     }
     var o = s;
@@ -7511,6 +7682,8 @@ fn nwg_weather_surface(s: WaterSurface, xz: vec2<f32>, fr: NwgFrame) -> WaterSur
     o.n = normalize(vec3<f32>(n_s.x, 1.0, n_s.y));
     let n_lo_s = o.n_lo.xz / max(o.n_lo.y, 1e-3) + lo;
     o.n_lo = normalize(vec3<f32>(n_lo_s.x, 1.0, n_lo_s.y));
+    let n_rf_s = o.n_rf.xz / max(o.n_rf.y, 1e-3) * still + rf;
+    o.n_rf = normalize(vec3<f32>(n_rf_s.x, 1.0, n_rf_s.y));
     let add = rain * (NWG_RAIN_A2.x + NWG_RAIN_A2.y * unresolved);
     o.a2 = s.a2 + vec3<f32>(add, add, 0.0);
     o.alpha = sqrt(sqrt(max(o.a2.x * o.a2.y - o.a2.z * o.a2.z, 1e-12)));
@@ -8103,6 +8276,21 @@ fn stylised_water(
 #endif
     let to_view = normalize(view.world_position.xyz - world_pos);
 #ifdef WATER_PREVIEW
+    // The waves in the reflections ([`pv_reflect_waves`]): the resolved normal down to ~3 px for
+    // the mirrors' and the probe's lookups; the low band where the switch is off.
+    var n_refl = n_slide;
+    if (pv_reflect_waves()) {
+        n_refl = surf.n_rf;
+    }
+    // The crests' shading ([`pv_crest`]).
+    let pv_crest_c = pv_crest(surf);
+#ifdef WATER_VIEW
+    n_refl = select(n_refl, flat_n, flat_view);
+#endif
+#else
+    let n_refl = n_slide;
+#endif
+#ifdef WATER_PREVIEW
     // `rough`: the reflections' lobe, the surface's unresolved roughness; none from below.
     let rr_gain = select(0.0, pv_rough_gain(), view.world_position.y > world_pos.y);
     let lobe = rough_lobe(surf.a2, to_view, flat_n, rr_gain);
@@ -8133,8 +8321,12 @@ fn stylised_water(
         optics.w_in,
     );
 #endif
+    var body_raw = water_body_light(optics, world_pos, vis, bi, wave_tilt);
+    if (pv_crest_on()) {
+        body_raw = pv_crest_shade(body_raw, pv_crest_c);
+    }
     let body_light = nwg_light_pool(
-        water_body_light(optics, world_pos, vis, bi, wave_tilt),
+        body_raw,
         optics.a_g,
         nwg_pool(world_pos),
         bi.unlit,
@@ -8166,8 +8358,18 @@ fn stylised_water(
     // and the body as on mirror water.
     let r_rip = reflect(-to_view, n);
 #ifdef WATER_PREVIEW
+    let eye_above_w = view.world_position.y > world_pos.y;
+    var n_refl_sky = surf.n_rf;
+#ifdef WATER_VIEW
+    n_refl_sky = select(n_refl_sky, flat_n, flat_view);
+#endif
     // `rough_sky`: the floor on the mirrors' lobe, lifted and blurred alike, where their chain runs.
     var sky_dir = reflect(-to_view, flat_n);
+    // `sky waves` ([`pv_sky_waves`]): along the resolved wave's reflected ray, folded above the
+    // mean surface, so the dome's gradient lies across the waves.
+    if (pv_sky_waves() && eye_above_w) {
+        sky_dir = pv_wave_dir(to_view, flat_n, n_refl_sky, 1.0);
+    }
     var sky_alpha = sqrt(surface_lost2(surf));
     if (rr_gain > 0.0 && pv_on(PV_ROUGH_SKY) && rough_chain_ready(false)) {
         sky_dir = rough_lift_dir(sky_dir, lobe.lift);
@@ -8299,8 +8501,15 @@ fn stylised_water(
         // solved for is a real change of viewpoint on a real place, and cannot repeat.
         // About the facet's geometric normal, as the march does: on a sloping stream straight up
         // is off by the slope, and the reflected ray twice that.
-        let r = reflect(-to_view, flat_n);
-        let probe_pos = world_pos + vec3<f32>(n_slide.x, 0.0, n_slide.z) * water_reflect.march.y;
+        var r = reflect(-to_view, flat_n);
+#ifdef WATER_PREVIEW
+        // The waves in the reflections: part of the resolved wave's turn of the ray
+        // ([`RF_PROBE_K`]), folded above the mean surface.
+        if (pv_reflect_waves()) {
+            r = pv_wave_dir(to_view, flat_n, n_refl, RF_PROBE_K);
+        }
+#endif
+        let probe_pos = world_pos + vec3<f32>(n_refl.x, 0.0, n_refl.z) * water_reflect.march.y;
         // **The tier's strength is how much of this cell's spot shares a cube covers**: the sum of
         // the taps' weights (availability times share), so it does not depend on which tap ranks
         // first. A cell between two spots whose second has no cube (only the spots nearest the
@@ -8411,13 +8620,18 @@ fn stylised_water(
         let pv_ts = pv_to_shore(shore, shore_offset);
         rr_hit = select(-1.0, pv_ts, pv_ts < 20.0);
     }
-    let m1 = planar_read_rough(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt, lobe, rr_hit)
+    // The waves in the reflections: the mirrors' direction term at the reflected thing's distance.
+    var wave_off = vec3<f32>(0.0);
+    if (pv_reflect_waves()) {
+        wave_off = pv_mirror_wave_off(to_view, n_refl, rr_hit);
+    }
+    let m1 = planar_read_rough(water_reflect.params, false, world_pos, n_refl, frag_coord, tilt, lobe, rr_hit, wave_off)
         * serve;
-    let m2 = planar_read_rough(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt, lobe, rr_hit)
+    let m2 = planar_read_rough(water_reflect.mirror2, true, world_pos, n_refl, frag_coord, tilt, lobe, rr_hit, wave_off)
         * serve;
 #else
-    let m1 = planar_read(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt) * serve;
-    let m2 = planar_read(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt) * serve;
+    let m1 = planar_read(water_reflect.params, false, world_pos, n_slide, frag_coord, tilt, vec3<f32>(0.0)) * serve;
+    let m2 = planar_read(water_reflect.mirror2, true, world_pos, n_slide, frag_coord, tilt, vec3<f32>(0.0)) * serve;
 #endif
     // The colour favours the mirror whose plane is nearer this water — both are trusted across
     // their whole tolerance, so without this a body between the two planes took an even mix of a

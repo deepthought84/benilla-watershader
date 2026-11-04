@@ -118,6 +118,21 @@ pub struct WaterDebug {
     /// surface rises and falls and has a moving silhouette against the shore, posts and hulls. On
     /// by default; `$WOW_WATER_SURFACE_HEIGHT=0` turns it off at boot.
     pub surface_height: bool,
+    /// Distort the Improved Water's reflections by the resolved waves (the panel's "waves in the
+    /// reflection", read each frame): the mirrors and the probe are read along the resolved wave
+    /// normal down to about 3 px of feature instead of the long waves alone, the mirrors at the
+    /// reflected thing's distance, so near water breaks the reflected picture into moving
+    /// patches. On by default; `$WOW_WATER_REFLECT_WAVES=0` turns it off at boot.
+    pub reflect_waves: bool,
+    /// Read the sky the Improved Water reflects along each resolved wave's reflected ray instead
+    /// of the flat one (the panel's "sky across the waves", read each frame): facets tilted toward
+    /// the horizon reflect the brighter low sky, those tilted up the zenith. On by default;
+    /// `$WOW_WATER_SKY_WAVES=0` turns it off at boot.
+    pub sky_waves: bool,
+    /// Shade the Improved Water's body by its resolved waves' height (the panel's "crest
+    /// shading", read each frame): crests a little lighter, troughs a little darker, under the
+    /// light the body is lit by. On by default; `$WOW_WATER_CREST_SHADE=0` turns it off at boot.
+    pub crest_shade: bool,
     /// The Improved Water debug view, an id into [`WATER_VIEWS`]; 0 (off) by default,
     /// `$WOW_WATER_VIEW=<name|id>` picks one at boot. Any other value compiles the stylised
     /// pipelines' `WATER_VIEW` variant.
@@ -145,6 +160,9 @@ impl Default for WaterDebug {
             soft_shore: env_switch("WOW_WATER_SOFT_SHORE"),
             lively: env_switch("WOW_WATER_LIVELY"),
             surface_height: env_switch("WOW_WATER_SURFACE_HEIGHT"),
+            reflect_waves: env_switch("WOW_WATER_REFLECT_WAVES"),
+            sky_waves: env_switch("WOW_WATER_SKY_WAVES"),
+            crest_shade: env_switch("WOW_WATER_CREST_SHADE"),
             view: water_view_from_env(),
         }
     }

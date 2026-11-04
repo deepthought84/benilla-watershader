@@ -651,6 +651,19 @@ fn debug_panel_ui(
                                 "the surface rises and falls with the long waves and the wake \
                                  near the eye, on a finer grid there (off: a flat sheet)",
                             );
+                            ui.checkbox(&mut wa.reflect_waves, "waves in the reflection")
+                                .on_hover_text(
+                                    "the reflected picture follows the resolved waves, near \
+                                     water breaks it into moving patches (off: the long waves only)",
+                                );
+                            ui.checkbox(&mut wa.sky_waves, "sky across the waves").on_hover_text(
+                                "each wave reflects the sky along its own ray: tilted to the \
+                                 horizon brighter, tilted up deeper (off: one flat sky)",
+                            );
+                            ui.checkbox(&mut wa.crest_shade, "crest shading").on_hover_text(
+                                "crests a little lighter, troughs a little darker, under the \
+                                 light the water is lit by (off: none)",
+                            );
                             ui.add(
                                 egui::Slider::new(&mut wa.transparency, 0.0..=2.0)
                                     .fixed_decimals(2)

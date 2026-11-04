@@ -8,8 +8,8 @@ use bevy::prelude::*;
 
 use benilla_assets::preview as lever;
 use benilla_world::liquid::{
-    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_LOOKS, PV_MASK, PV_SWELL,
-    PV_TRAINS, PV_WEATHER, PV_WIND,
+    PREVIEW_LANES, PV_CAP, PV_CLOCKS, PV_DRIFT, PV_GAINS, PV_GUST, PV_LOOKS, PV_LOOKS2, PV_MASK,
+    PV_SWELL, PV_TRAINS, PV_WEATHER, PV_WIND,
 };
 use benilla_world::weather::{storm_blend, WeatherKind, WeatherState};
 
@@ -131,6 +131,15 @@ pub(super) fn drive_preview(
             off(dev.water.soft_shore),
             off(dev.water.lively),
             off(dev.water.surface_height),
+            off(dev.water.reflect_waves),
+        ],
+    );
+    row(
+        PV_LOOKS2,
+        [
+            off(dev.water.sky_waves),
+            off(dev.water.crest_shade),
+            0.0,
             0.0,
         ],
     );
