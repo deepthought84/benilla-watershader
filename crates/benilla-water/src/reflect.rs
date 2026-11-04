@@ -1461,12 +1461,11 @@ fn upload_reflect(
         (LOOK_WATER_RECT * 4) as u64,
         bytemuck::cast_slice(&r),
     );
-    // `quality.y`'s and `quality.z`'s one writer, for the same reason: whether the floor is
-    // occluded, and whether the body's visibility rays are traced, this frame is known after
-    // visibility. Off, the fragment neither marches nor reads the rays, and nothing reads the
-    // pyramids and the plane pass's images, which this frame did not build.
+    // `quality.y`'s one writer, for the same reason: whether the floor is occluded this frame is
+    // known after visibility. Off, the fragment does not march, and nothing reads the pyramids
+    // and the plane pass's images, which this frame did not build.
     let floor = floor.map_or_else(FloorOnScreen::default, |f| *f);
-    let on = [f32::from(floor.occluded), f32::from(floor.body)];
+    let on = [f32::from(floor.occluded)];
     queue.write_buffer(
         &buffer.0,
         ((LOOK_QUALITY + 1) * 4) as u64,
@@ -1576,16 +1575,16 @@ mod tests {
                 "e_sun_foam: vec4<f32>",
             ]
         );
-        // The rect row and the floor occlusion's and the body rays' lanes have one writer:
-        // `upload_reflect` in the render world, over the zeros `look_lanes` leaves there.
+        // The rect row and the floor occlusion's lane have one writer: `upload_reflect` in the
+        // render world, over the zeros `look_lanes` leaves there.
         let src = include_str!("reflect.rs");
         let upload = &src[src.find("fn upload_reflect(").unwrap()..];
         let upload = &upload[..upload.find("\n}\n").unwrap()];
         assert!(upload.contains("(LOOK_WATER_RECT * 4) as u64"));
         assert!(upload.contains("((LOOK_QUALITY + 1) * 4) as u64"));
-        // `quality.y` holds the floor's occlusion and `quality.z` the body's rays, and each
-        // shader reader takes its own lane.
-        assert!(upload.contains("[f32::from(floor.occluded), f32::from(floor.body)]"));
+        // `quality.y` holds the floor's occlusion; the body's light reads no screen depth, so
+        // `body_visibility` reads no lane and no image at all.
+        assert!(upload.contains("[f32::from(floor.occluded)]"));
         let wgsl = include_str!("../../benilla-assets/src/shaders/liquid.wgsl");
         let shader_fn = |name: &str| {
             let at = wgsl.find(&format!("\nfn {name}(")).unwrap();
@@ -1593,8 +1592,8 @@ mod tests {
         };
         let floor = shader_fn("floor_occlusion_wanted");
         assert!(floor.contains("look.quality.y > 0.5") && !floor.contains("quality.z"));
-        let rays = shader_fn("body_visibility");
-        assert!(rays.contains("look.quality.z < 0.5") && !rays.contains("quality.y"));
+        let vis = shader_fn("body_visibility");
+        assert!(!vis.contains("quality") && !vis.contains("water_occl"));
         let lanes = super::super::look::look_lanes(
             &super::super::look::WaterLook::default(),
             &super::super::look::LookInputs::default(),

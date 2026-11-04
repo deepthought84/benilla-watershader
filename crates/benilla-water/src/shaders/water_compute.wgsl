@@ -5,9 +5,7 @@
 // the view's resolution (an eighth on Low). Each texel finds the plane point under its pixel and
 // marches the reflected ray through the pyramids by the floor march law, the same text the water's
 // fragment runs per pixel off the planes; the fragment reads the two images bilinearly at its
-// rippled lookup point. On Medium and High (`WATER_SKY_VIS`) the same point also traces how much
-// of the sky and of the lighting sun the frame shows open above it, for the body's light, and
-// `occl_vis_smooth` then smooths that answer over the neighbouring plane texels.
+// rippled lookup point. The body's light reads none of it: it is shaded by world data alone.
 
 #import bevy_render::view::View
 
@@ -21,9 +19,8 @@
 @group(0) @binding(5) var scene_samp: sampler;
 // The reflection block (`liquid.wgsl`'s `WaterReflect`) as rows.
 @group(0) @binding(6) var<storage, read> lanes: array<vec4<f32>>;
-// r the open sky v, g and b the body's sky and sun visibility (1 where they are not traced), a 1
-// where the march reached a verdict. On Medium and High the plane pass writes it into `vis_raw`
-// instead, its visibility scaled by `VIS_STORE`, and `occl_vis_smooth` writes this image.
+// r the open sky v, g and b 1 (the body's light reads none of the screen), a 1 where the march
+// reached a verdict.
 @group(0) @binding(7) var water_occl: texture_storage_2d<rgba8unorm, write>;
 // a rho_c; rgb unused (0): the occluder's tone is a world source, never the screen's.
 @group(0) @binding(8) var floor_occ: texture_storage_2d<rgba16float, write>;
@@ -32,9 +29,8 @@ struct OcclParams {
     // The texels of the dispatch: the quarter-resolution tiles covering the water's rectangle.
     tile_origin: vec2<u32>,
     tile_end: vec2<u32>,
-    // xyz the lighting sun's travel direction (`WowLighting::sun_dir`); w 1 where the sky floor's
-    // march runs this frame, 0 where the pass runs for the body's visibility alone.
-    sun_travel: vec4<f32>,
+    // x 1 where the sky floor's march runs this frame; yzw spare.
+    march: vec4<f32>,
 };
 @group(0) @binding(9) var<uniform> params: OcclParams;
 
@@ -368,86 +364,6 @@ fn floor_from_march(m: FloorMarch) -> FloorOcc {
 }
 // ---- floor march law: end ----
 
-#ifdef WATER_SKY_VIS
-// ---- the body's visibility ----
-//
-// How much of the sky and of the lighting sun the frame shows open above a plane point, for the
-// body's in-scatter: rays fixed in the world, the zenith and the four compass diagonals 45° up
-// (the hemisphere's cosine weights) and the sun, so the answer does not turn with the camera, each
-// walked through the nearest-depth pyramid in steps growing from half a yard to 30 yd.
-
-/// A ray's steps, the first one's length in yards and each next one's growth.
-const VIS_STEPS: i32 = 8;
-const VIS_FIRST_YD: f32 = 0.5;
-const VIS_GROWTH: f32 = 1.8;
-/// How far in front of a ray's point the frame's surface must stand to block it, yards.
-const VIS_BIAS_YD: f32 = 0.1;
-/// The coarsest pyramid level a step reads: its cells about three view pixels wide at rs2. A
-/// coarser cell's nearest surface stands for the whole cell, so a reed or a beam would block
-/// every ray crossing its cell and shade the water in blocks.
-const VIS_LEVEL_MAX: i32 = 1;
-/// The screen border's width, in UV, over which a block found there fades toward open, so an
-/// occluder entering the frame fades in rather than pops.
-const VIS_EDGE: f32 = 0.1;
-/// The plane pass stores the body's visibility scaled to at most byte 254, under the 255 of a texel
-/// with no plane point (`(1, 1, 1, 0)`), so [`occl_vis_smooth`] can tell the two apart.
-const VIS_STORE: f32 = 254.0 / 255.0;
-const VIS_PLANE_MAX: f32 = 254.5 / 255.0;
-
-/// The share of the ray `origin + t·dir` the frame leaves open: 1 where it leaves the frame or
-/// passes its last step unblocked. A step is blocked where the nearest surface the pyramid holds
-/// over the step's footprint (at most [`VIS_LEVEL_MAX`]) stands in front of the ray's point by more
-/// than [`VIS_BIAS_YD`] and within the floor march law's slab ([`LAW_THICKNESS`]) of it: a surface
-/// far in front (the avatar, a trunk beside the camera, a beam over the eye) is not over the
-/// water. A block near the frame's border counts open by how near the border it lies.
-fn vis_ray(origin: vec3<f32>, dir: vec3<f32>, near: f32, top: i32, base: vec2<f32>) -> f32 {
-    var prev = law_world_to_screen(origin).xy;
-    var t = VIS_FIRST_YD;
-    for (var i = 0; i < VIS_STEPS; i = i + 1) {
-        let c = view.clip_from_world * vec4<f32>(origin + dir * t, 1.0);
-        if (c.w <= 0.0) {
-            return 1.0;
-        }
-        let s = vec3<f32>(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5, c.z / c.w);
-        if (any(s.xy < vec2<f32>(0.0)) || any(s.xy >= vec2<f32>(1.0)) || s.z <= 0.0) {
-            return 1.0;
-        }
-        let level = clamp(i32(log2(max(length((s.xy - prev) * base), 1.0))), 0, min(top, VIS_LEVEL_MAX));
-        let res = vec2<f32>(textureDimensions(hiz_tex, level));
-        let hz = textureLoad(hiz_tex, vec2<i32>(s.xy * res), level).r;
-        // View distances: the ray's point less the surface's (sky, depth 0, never blocks).
-        let gap = near / s.z - near / max(hz, 1e-20);
-        if (hz > 0.0 && gap > VIS_BIAS_YD && gap < LAW_THICKNESS) {
-            let edge = min(min(s.x, 1.0 - s.x), min(s.y, 1.0 - s.y));
-            return 1.0 - smoothstep(0.0, VIS_EDGE, edge);
-        }
-        prev = s.xy;
-        t = t * VIS_GROWTH;
-    }
-    return 1.0;
-}
-
-/// The open share of the sky above `p` (half the zenith's, an eighth each compass diagonal's) and
-/// of the lighting sun travelling along `sun_travel`, from a tenth of a yard over the plane.
-fn body_vis(p: vec3<f32>, sun_travel: vec3<f32>) -> vec2<f32> {
-    let near = law_near();
-    let top = i32(textureNumLevels(hiz_tex)) - 1;
-    let base = vec2<f32>(textureDimensions(hiz_tex, 0));
-    let o = p + vec3<f32>(0.0, 0.1, 0.0);
-    let hemi = 0.5 * vis_ray(o, vec3<f32>(0.0, 1.0, 0.0), near, top, base)
-        + 0.125 * (vis_ray(o, vec3<f32>(0.5, 0.70710678, 0.5), near, top, base)
-            + vis_ray(o, vec3<f32>(-0.5, 0.70710678, 0.5), near, top, base)
-            + vis_ray(o, vec3<f32>(0.5, 0.70710678, -0.5), near, top, base)
-            + vis_ray(o, vec3<f32>(-0.5, 0.70710678, -0.5), near, top, base));
-    let to_sun = -sun_travel;
-    var sun = 1.0;
-    if (to_sun.y > 1e-4) {
-        sun = vis_ray(o, normalize(to_sun), near, top, base);
-    }
-    return vec2<f32>(hemi, sun);
-}
-#endif
-
 /// The candidate point on a mirror plane at height `h` under the view ray `dir` from the eye, and
 /// whether it qualifies: an active plane below the eye, in front of the opaque surface the pixel
 /// shows (`z_s`, view Z yards, 0 where nothing was drawn).
@@ -493,53 +409,12 @@ fn occl_plane(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let p = pick.xyz;
     var o = FloorOcc(1.0, 0.0, 0.0);
-    if (params.sun_travel.w > 0.5) {
+    if (params.march.x > 0.5) {
         let m = floor_march(p + vec3<f32>(0.0, 0.05, 0.0), vec3<f32>(dir.x, -dir.y, dir.z), FLOOR_MARCH_LEVEL, FLOOR_MARCH_STEPS);
         o = floor_from_march(m);
     }
-    var vis = vec2<f32>(1.0);
-#ifdef WATER_SKY_VIS
-    vis = body_vis(p, params.sun_travel.xyz) * VIS_STORE;
-#endif
-    textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, vis, o.known));
+    // g and b open: the body's light is shaded by world data alone (`liquid.wgsl`'s
+    // `body_visibility`), never by the screen's depth.
+    textureStore(water_occl, vec2<i32>(q), vec4<f32>(o.v, 1.0, 1.0, o.known));
     textureStore(floor_occ, vec2<i32>(q), vec4<f32>(0.0, 0.0, 0.0, o.rho_c));
 }
-
-#ifdef WATER_SKY_VIS
-// ---- the body's visibility, smoothed ----
-//
-// Each ray's verdict is binary and a texel spans four view pixels, so read bilinearly an
-// occluder's shadow on the water would step along the texel grid and a reed blade would leave a
-// hard fleck. On Medium and High the plane pass writes into `vis_raw` and this entry writes the
-// occlusion image: the sky floor's answer as the pass found it, the body's visibility as a 3×3
-// tent over the neighbouring plane texels only, so a texel with no plane point (a deck, a hull, the
-// bank) never lightens the water beside it.
-
-@group(0) @binding(10) var vis_raw: texture_2d<f32>;
-
-@compute @workgroup_size(8, 8, 1)
-fn occl_vis_smooth(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let q = params.tile_origin + gid.xy;
-    if (any(q >= params.tile_end) || any(q >= textureDimensions(vis_raw))) {
-        return;
-    }
-    let c = textureLoad(vis_raw, vec2<i32>(q), 0);
-    if (c.g > VIS_PLANE_MAX) {
-        textureStore(water_occl, vec2<i32>(q), c);
-        return;
-    }
-    let lo = vec2<i32>(params.tile_origin);
-    let hi = vec2<i32>(min(params.tile_end, textureDimensions(vis_raw))) - 1;
-    var sum = vec2<f32>(0.0);
-    var weight = 0.0;
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-        for (var dx = -1; dx <= 1; dx = dx + 1) {
-            let n = textureLoad(vis_raw, clamp(vec2<i32>(q) + vec2<i32>(dx, dy), lo, hi), 0);
-            let w = f32((2 - abs(dx)) * (2 - abs(dy))) * select(0.0, 1.0, n.g <= VIS_PLANE_MAX);
-            sum = sum + w * n.gb;
-            weight = weight + w;
-        }
-    }
-    textureStore(water_occl, vec2<i32>(q), vec4<f32>(c.r, sum / (weight * VIS_STORE), c.a));
-}
-#endif

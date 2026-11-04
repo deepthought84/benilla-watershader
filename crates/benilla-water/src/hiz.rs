@@ -114,9 +114,8 @@ impl WaterHizConsumers {
     /// The sun's and moon's per-pixel visibility for the glint; no system sets it.
     #[allow(dead_code)]
     pub(crate) const SUN_VISIBILITY: u32 = 1 << 2;
-    /// The body's sky and sun visibility rays in the plane pass (`water_compute`), on Medium and
-    /// High while plane water is on screen (`floor_share`).
-    pub(crate) const BODY_VISIBILITY: u32 = 1 << 3;
+    // Bit 3 was the body's sky and sun visibility rays', deleted: the body's light reads no
+    // screen depth (a character in it drew shadows on the water).
 
     /// Whether any reader walks the pyramid.
     pub(crate) fn any(self) -> bool {

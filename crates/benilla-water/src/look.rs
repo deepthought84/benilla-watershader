@@ -2,9 +2,9 @@
 //! `WaterLook`): the owner's and the developer's knobs, written whole by `drive_reflection` every
 //! frame, so every row is valid on the frames the mirror is off.
 //!
-//! Each row has one writer. [`look_lanes`] writes every row but `water_rect`, `quality.y` and
-//! `quality.z`, which it leaves 0: the water's screen rectangle, and whether its floor is occluded
-//! and its body's visibility traced this frame (`floor_share`), are known only after visibility,
+//! Each row has one writer. [`look_lanes`] writes every row but `water_rect` and `quality.y`,
+//! which it leaves 0: the water's screen rectangle, and whether its floor is occluded this frame
+//! (`floor_share`), are known only after visibility,
 //! which runs after the mirror's system, so the render world writes them itself
 //! (`reflect::upload_reflect`). The body's rows are `body::body_lanes`, from the resolved light and
 //! the dome.

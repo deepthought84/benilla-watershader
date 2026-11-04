@@ -319,9 +319,8 @@ struct WaterPreview {
 // preview's: one writer per row, and a row no writer fills reads 0.
 struct WaterLook {
     // x the quality tier 0/1/2 (a copy: the code branches on the tier's defs), y the sky floor's
-    // occlusion this frame (1 on, with water on screen the floor can serve), z the body's
-    // visibility rays traced this frame (1 on Medium and High with plane water on screen); y and
-    // z written by the render world; w the render scale (the world camera's target over the
+    // occlusion this frame (1 on, with water on screen the floor can serve), written by the
+    // render world; z spare (0); w the render scale (the world camera's target over the
     // window, in pixels; 0 reads as 1), by which the trains and the caustic ripples fade on the
     // output pixel.
     quality: vec4<f32>,
@@ -4952,20 +4951,13 @@ fn body_irradiance(world_pos: vec3<f32>, column: f32, vis: vec4<f32>, adt: bool)
     );
 }
 
-/// How much of the sky and of the lighting sun the frame shows open above the surface point
-/// `world_pos` (`g` the sky, `b` the sun; `r` the reflected ray's open sky): on a mirror plane the
-/// compute pass's world-anchored rays at the pixel, read bilinearly and weighed by the plane's
-/// share; 1 off the planes, under the eye, and on a frame the rays were not traced (Low, or no
-/// plane water on screen), where MCSH and its shadow floor alone shade the body. The specular ray's
-/// verdict is never a diffuse visibility.
+/// How much of the sky (`g`) and of the lighting sun (`b`) reach the body at `world_pos`, beyond
+/// what [`body_irradiance`] takes from the world: open, 1. The body is shaded by world data alone,
+/// the terrain's MCSH for the sun as the land beside it is, never by the screen's depth: rays traced
+/// through it found the avatar and every creature standing in the water, and drew each a shadow on
+/// the water, several around the player, where 1.12 draws none on land (its only shadow is MCSH).
 fn body_visibility(world_pos: vec3<f32>, frag_coord: vec2<f32>) -> vec4<f32> {
-    let wp = occl_plane_weight(world_pos.y);
-    if (water_reflect.look.quality.z < 0.5 || wp <= 0.0 || view.world_position.y <= world_pos.y) {
-        return vec4<f32>(1.0);
-    }
-    let uv = (frag_coord - view.viewport.xy) / view.viewport.zw;
-    let o = textureSampleLevel(water_occl, scene_samp, uv, 0.0);
-    return mix(vec4<f32>(1.0), vec4<f32>(o.rgb, 1.0), wp);
+    return vec4<f32>(1.0);
 }
 
 /// The light the eye-below look lights the dome's stops with, gamma: the sky's and the sun's
