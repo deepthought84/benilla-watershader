@@ -76,6 +76,7 @@ use bevy::render::render_resource::{
 use bevy::render::renderer::RenderQueue;
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::tasks::{block_on, AsyncComputeTaskPool, Task};
 use rustfft::num_complex::Complex;
 use rustfft::{Fft, FftPlanner};
 
@@ -232,13 +233,22 @@ struct Spectral {
     /// Per cell: |k| and ω = √(g·|k|).
     kmag: Vec<f32>,
     omega: Vec<f32>,
-    /// The last step's rotation, per cell: (cos ω·dt, sin(ω·dt)/ω, ω·sin ω·dt) and the decay,
-    /// kept while the step stays the same (a capture's fixed step, a steady frame rate:
-    /// [`SIM_DT_QUANTUM`]). At ω = 0 (the mean, and the Nyquist axes, which carry nothing) the
-    /// middle term is `dt`, the drift of a free mode.
-    rot_dt: f32,
-    rot_cs: Vec<[f32; 3]>,
-    rot_decay: Vec<f32>,
+    /// The rotations of the last few steps, most recent first ([`ROTATIONS_KEPT`]): a frame rate
+    /// that wanders by a few quanta ([`SIM_DT_QUANTUM`]) reuses them rather than recomputing a
+    /// sine, a cosine and two exponentials per cell each frame.
+    rotations: Vec<Rotation>,
+}
+
+/// The step rotations [`Spectral`] keeps.
+const ROTATIONS_KEPT: usize = 8;
+
+/// One step's rotation, per cell: (cos ω·dt, sin(ω·dt)/ω, ω·sin ω·dt) and the decay. At ω = 0
+/// (the mean, and the Nyquist axes, which carry nothing) the middle term is `dt`, the drift of a
+/// free mode.
+struct Rotation {
+    dt: f32,
+    cs: Vec<[f32; 3]>,
+    decay: Vec<f32>,
 }
 
 impl Spectral {
@@ -280,26 +290,37 @@ impl Spectral {
             k1,
             kmag,
             omega,
-            rot_dt: 0.0,
-            rot_cs: vec![[1.0, 0.0, 0.0]; n * n],
-            rot_decay: vec![1.0; n * n],
+            rotations: Vec::with_capacity(ROTATIONS_KEPT),
         }
     }
 
-    /// The rotation tables for a step of `dt`, recomputed only when the step changes.
-    fn rotation(&mut self, dt: f32) {
-        if dt == self.rot_dt {
-            return;
+    /// The rotation tables for a step of `dt`: a kept one, or computed into the oldest's place.
+    fn rotation(&mut self, dt: f32) -> &Rotation {
+        if let Some(i) = self.rotations.iter().position(|r| r.dt == dt) {
+            self.rotations[..=i].rotate_right(1);
+            return &self.rotations[0];
         }
-        self.rot_dt = dt;
+        let nn = SIM_CELLS * SIM_CELLS;
+        let mut r = if self.rotations.len() == ROTATIONS_KEPT {
+            self.rotations.pop().expect("full")
+        } else {
+            Rotation {
+                dt: 0.0,
+                cs: vec![[1.0, 0.0, 0.0]; nn],
+                decay: vec![1.0; nn],
+            }
+        };
+        r.dt = dt;
         let decay0 = (-dt / DAMP_TAU).exp();
-        for i in 0..SIM_CELLS * SIM_CELLS {
+        for i in 0..nn {
             let w = self.omega[i];
             let (s, c) = (w * dt).sin_cos();
-            self.rot_cs[i] = [c, if w > 0.0 { s / w } else { dt }, w * s];
+            r.cs[i] = [c, if w > 0.0 { s / w } else { dt }, w * s];
             let k = self.kmag[i];
-            self.rot_decay[i] = decay0 * (-dt * VISCOSITY * k * k).exp();
+            r.decay[i] = decay0 * (-dt * VISCOSITY * k * k).exp();
         }
+        self.rotations.insert(0, r);
+        &self.rotations[0]
     }
 
     /// The 2-D transform in place: every row, a transpose, every row again, and back.
@@ -328,13 +349,36 @@ fn transpose(z: &mut [Complex<f32>]) {
     }
 }
 
-/// The live height field and the image the shader reads it through.
+/// The wave field and the image the shader reads it through.
+///
+/// The step runs on the async compute pool, off the main thread: the frame's bodies go with the
+/// field, and the next frame takes it back and publishes its texture, a frame (a third of a cell
+/// at swimming speed) behind the bodies.
 #[derive(Resource)]
 pub(crate) struct RippleSim {
     /// The texture the liquid materials bind: R/G the surface slope, B the height, A the foam.
     /// Same slope convention as the tiling ripple map beside it (`super::ripple`), so the shader
     /// reads the two the same way.
     pub(crate) image: Handle<Image>,
+    /// The field, here between steps; `None` while a step has it.
+    field: Option<Box<WaveField>>,
+    /// The step in flight.
+    step: Option<Task<Stepped>>,
+    /// The lower corner (world XZ yards) of the field the published texture holds.
+    shown: Vec2,
+}
+
+/// A step's result: the field back, its encoded texture and the corner it was encoded at, and
+/// the step's own time, seconds.
+struct Stepped {
+    field: Box<WaveField>,
+    pixels: Vec<u8>,
+    corner: Vec2,
+    cost: f64,
+}
+
+/// The live height field.
+struct WaveField {
     /// The height (yards) and its rate (yd/s), and the foam on it (0-1).
     h: Vec<f32>,
     v: Vec<f32>,
@@ -346,8 +390,8 @@ pub(crate) struct RippleSim {
     gx: Vec<Complex<f32>>,
     gy: Vec<Complex<f32>>,
     spectral: Spectral,
-    /// The encoded RGBA the render world uploads — staged here so the step and the encode stay in
-    /// the main world and the render side only ever copies bytes.
+    /// The encoded RGBA the render world uploads — staged here so the render side only ever
+    /// copies bytes.
     pixels: Vec<u8>,
     /// The window's lower corner, as a whole number of cells in **Bevy** XZ. Whole cells is the
     /// point — see the module doc.
@@ -360,11 +404,10 @@ pub(crate) struct RippleSim {
     quiet: bool,
 }
 
-impl RippleSim {
-    fn new(image: Handle<Image>) -> Self {
+impl WaveField {
+    fn new() -> Self {
         let n = SIM_CELLS * SIM_CELLS;
         Self {
-            image,
             h: vec![0.0; n],
             v: vec![0.0; n],
             foam: vec![0.0; n],
@@ -557,7 +600,7 @@ impl RippleSim {
                 }
             }
         }
-        self.spectral.rotation(dt);
+        let rot = self.spectral.rotation(dt);
         for y in 0..n {
             let my = (n - y) % n;
             for x in 0..n {
@@ -576,8 +619,8 @@ impl RippleSim {
                 let vv = (zj - zm) * Complex::new(0.0, -0.5);
                 let d = forcing[i];
                 let eta = hh + d;
-                let [c, sw, ws] = self.spectral.rot_cs[i];
-                let decay = self.spectral.rot_decay[i];
+                let [c, sw, ws] = rot.cs[i];
+                let decay = rot.decay[i];
                 let eta2 = (eta * c + vv * sw) * decay;
                 let vv2 = (vv * c - eta * ws) * decay;
                 let hh2 = eta2 - d;
@@ -745,7 +788,12 @@ fn sim_image() -> Image {
 
 fn setup_ripple_sim(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     let image = images.add(sim_image());
-    commands.insert_resource(RippleSim::new(image));
+    commands.insert_resource(RippleSim {
+        image,
+        field: Some(Box::new(WaveField::new())),
+        step: None,
+        shown: Vec2::ZERO,
+    });
 }
 
 /// What the driver remembers of a body between frames: where it was, how fast it has been going,
@@ -806,18 +854,54 @@ pub(crate) fn drive_ripple_sim(
     index: Res<WaterIndex>,
     // A unit's transform is streamed without a velocity, and a wake is made of velocity.
     mut tracks: Local<EntityHashMap<Track>>,
-    // The phantom swimmer's body (captures only), a source like the avatar.
-    phantom: Res<super::preview_rows::PhantomBody>,
-    // `$WOW_WAKE_COST=1`: the step's CPU time, logged every 600 stepped frames.
-    mut cost: Local<Option<(u32, f64)>>,
+    // The phantom swimmer's body (captures only), a source like the avatar; absent with the
+    // preview off.
+    phantom: Option<Res<super::preview_rows::PhantomBody>>,
+    // `$WOW_WAKE_COST=1`: the step's CPU time on the pool and the main thread's wait for it,
+    // logged every 600 stepped frames.
+    mut cost: Local<Option<(u32, f64, f64)>>,
     mut cost_read: Local<bool>,
 ) {
     if !*cost_read {
         *cost_read = true;
         if std::env::var_os("WOW_WAKE_COST").is_some_and(|v| v == "1") {
-            *cost = Some((0, 0.0));
+            *cost = Some((0, 0.0, 0.0));
         }
     }
+    // Last frame's step: the field back, and its texture published.
+    if let Some(task) = sim.step.take() {
+        let t0 = std::time::Instant::now();
+        let done = block_on(task);
+        let RippleSim {
+            image,
+            field,
+            shown,
+            ..
+        } = &mut *sim;
+        *field = Some(done.field);
+        *shown = done.corner;
+        *frame = RippleFrame {
+            id: image.id(),
+            pixels: Some(Arc::new(done.pixels)),
+        };
+        if let Some((frames, step, wait)) = cost.as_mut() {
+            *frames += 1;
+            *step += done.cost;
+            *wait += t0.elapsed().as_secs_f64();
+            if *frames == 600 {
+                info!(
+                    "wave field: {:.0} us a stepped frame on the pool, {:.0} us waited on the main thread, over {frames} frames",
+                    *step * 1e6 / *frames as f64,
+                    *wait * 1e6 / *frames as f64,
+                );
+                (*frames, *step, *wait) = (0, 0.0, 0.0);
+            }
+        }
+    }
+    let shown = sim.shown;
+    let Some(field) = sim.field.as_deref_mut() else {
+        return;
+    };
     // x/y = the window's lower corner, z = 1/extent, w = strength.
     let mut params = [0.0f32; 4];
     if !style.is_stylised() {
@@ -833,7 +917,7 @@ pub(crate) fn drive_ripple_sim(
         data.0[16..20].copy_from_slice(&params);
         return;
     };
-    sim.recentre(Vec2::new(centre.x, centre.z));
+    field.recentre(Vec2::new(centre.x, centre.z));
 
     // The surface height under a point, through the same index the foam decals use — a hash lookup
     // per unit, not a walk over every loaded surface.
@@ -846,7 +930,7 @@ pub(crate) fn drive_ripple_sim(
             .map(|surface| surface - w[2])
     };
 
-    let dt = sim.take_dt(time.delta_secs());
+    let dt = field.take_dt(time.delta_secs());
     let strokes = lever::on(lever::RINGS);
     let foaming = lever::on(lever::WAKE_FOAM);
 
@@ -855,7 +939,7 @@ pub(crate) fn drive_ripple_sim(
     if let Some(body) = viewer.at {
         bodies.push((Entity::PLACEHOLDER, body, viewer.height));
     }
-    if let Some((body, height)) = phantom.0 {
+    if let Some((body, height)) = phantom.and_then(|p| p.0) {
         bodies.push((super::preview_rows::PHANTOM, body, height));
     }
     for (entity, transform, unit) in &units {
@@ -916,45 +1000,38 @@ pub(crate) fn drive_ripple_sim(
     // Nothing pressing and the water already flat: the texture holds flat water, nothing to do.
     let idle = sources.is_empty() && kicks.is_empty();
     if !idle {
-        sim.quiet = false;
+        field.quiet = false;
     }
-    if dt > 0.0 && !sim.quiet {
-        let started = cost.is_some().then(std::time::Instant::now);
-        for &(at, sigma) in &kicks {
-            sim.splat(0, at, sigma, STROKE_RATE);
-            if foaming {
-                sim.splat(1, at, sigma, (STROKE_FOAM * foam_gain()).min(1.0));
+    if dt > 0.0 && !field.quiet {
+        let mut field = sim.field.take().expect("the field is home between steps");
+        sim.step = Some(AsyncComputeTaskPool::get().spawn(async move {
+            let t0 = std::time::Instant::now();
+            for &(at, sigma) in &kicks {
+                field.splat(0, at, sigma, STROKE_RATE);
+                if foaming {
+                    field.splat(1, at, sigma, (STROKE_FOAM * foam_gain()).min(1.0));
+                }
             }
-        }
-        sim.step(dt, &sources);
-        if idle && sim.settle() {
-            sim.quiet = true;
-        }
-        sim.encode(dt, foaming);
-        if let (Some(t0), Some((frames, total))) = (started, cost.as_mut()) {
-            *frames += 1;
-            *total += t0.elapsed().as_secs_f64();
-            if *frames == 600 {
-                info!(
-                    "wave field: {:.0} us a stepped frame over {frames} frames, {} bodies pressing",
-                    *total * 1e6 / *frames as f64,
-                    sources.len()
-                );
-                (*frames, *total) = (0, 0.0);
+            field.step(dt, &sources);
+            if idle && field.settle() {
+                field.quiet = true;
             }
-        }
-        let RippleSim { pixels, image, .. } = &mut *sim;
-        *frame = RippleFrame {
-            id: image.id(),
-            pixels: Some(Arc::new(std::mem::take(pixels))),
-        };
-        // `Arc` is what the extract clones each frame, so the staging buffer is handed over rather
-        // than copied; take a fresh one for the next step.
-        *pixels = vec![0u8; SIM_CELLS * SIM_CELLS * 4];
+            field.encode(dt, foaming);
+            // The staging buffer goes with the result, which the extract shares behind an `Arc`;
+            // the field takes a fresh one for its next step.
+            let pixels = std::mem::replace(&mut field.pixels, vec![0u8; SIM_CELLS * SIM_CELLS * 4]);
+            let corner = field.corner();
+            Stepped {
+                field,
+                pixels,
+                corner,
+                cost: t0.elapsed().as_secs_f64(),
+            }
+        }));
     }
 
-    let corner = sim.corner();
-    params = [corner.x, corner.y, 1.0 / SIM_YARDS, 1.0];
+    // The window the published texture holds, which trails a moving body's by the frame in flight.
+    params = [shown.x, shown.y, 1.0 / SIM_YARDS, 1.0];
     data.0[16..20].copy_from_slice(&params);
 }
 
@@ -986,20 +1063,20 @@ mod tests {
 
     const DT: f32 = 1.0 / 60.0;
 
-    fn sim() -> RippleSim {
-        let mut s = RippleSim::new(Handle::default());
+    fn sim() -> WaveField {
+        let mut s = WaveField::new();
         s.recentre(Vec2::splat(SIM_YARDS * 0.5));
         s
     }
 
-    fn at(s: &RippleSim, p: Vec2) -> f32 {
+    fn at(s: &WaveField, p: Vec2) -> f32 {
         let c = s.cells(p).as_ivec2();
         s.h[c.y as usize * SIM_CELLS + c.x as usize]
     }
 
     /// A human swimming at `speed` along +x through the window's middle for `seconds`, from the
     /// left; returns the body's final position.
-    fn swim(s: &mut RippleSim, speed: f32, seconds: f32, submerged: f32) -> Vec2 {
+    fn swim(s: &mut WaveField, speed: f32, seconds: f32, submerged: f32) -> Vec2 {
         let mut x = 6.0;
         let steps = (seconds / DT) as usize;
         for i in 0..steps {
