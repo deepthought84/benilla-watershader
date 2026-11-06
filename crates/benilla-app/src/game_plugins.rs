@@ -987,12 +987,16 @@ pub(crate) mod schedule_tests {
     ///   creates); the gizmos read `DebugState` a frame late at worst;
     /// - the Improved Water preview's dry sky and haze (`lighting::resolve::update_dry_sky`,
     ///   `ffx_glow::sync_haze`, `ffx_glow::sync_gain`) against `publish_viewer` and the glue
-    ///   booth's FFX sync: they read the viewer and the glue's gain a frame late at worst.
+    ///   booth's FFX sync: they read the viewer and the glue's gain a frame late at worst;
+    /// - the surface height's fine ring swap (`liquid::surface::swap_fine_liquids`, 82 pairs)
+    ///   against the `Mesh3d` writers, the exclusive drains and the `WaterStyle`/`WaterQuality`
+    ///   writers: it swaps the mesh of ADT liquid surfaces only, which no other system meshes, and
+    ///   reads the style, the tier and the debug switch a frame late at worst.
     ///
     /// Raising the ceiling is a claim that a new undeclared order is acceptable: make it with the
     /// reason read off the dump, or declare the order (`.after`, a set, a `chain`). A resource
     /// that commutes by construction belongs in [`Classes`].
-    const UPDATE_ACTIONABLE_CEILING: usize = 1_481;
+    const UPDATE_ACTIONABLE_CEILING: usize = 1_563;
     const UPDATE_ACTIONABLE_SLACK: usize = 40;
 
     fn ratchet(what: &str, n: usize, ceiling: usize, slack: usize) {
