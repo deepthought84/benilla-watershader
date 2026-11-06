@@ -3143,10 +3143,13 @@ fn sample_probe_rough(
     r: vec3<f32>,
     steps: i32,
     lobe: RoughLobe,
+    // The waves' turn of the ray ([`pv_reflect_waves`]), added to the corrected direction: the
+    // parallax march runs along the flat ray, whose taps stay coherent across the pixels.
+    turn: vec3<f32>,
 ) -> vec3<f32> {
     let top = water_reflect.probe_box_max.z;
     if (pv_rough_gain() <= 0.0 || top < 1.0) {
-        return sample_probe(sl, idx, p, r, steps);
+        return sample_probe(sl, idx, p, normalize(r + turn), steps);
     }
     var dir: vec3<f32>;
     if (water_reflect.probe_extra.z > 1.5) {
@@ -3154,6 +3157,7 @@ fn sample_probe_rough(
     } else {
         dir = probe_dir_depth(p, r, sl.at.xyz, idx, steps);
     }
+    dir = normalize(dir + turn);
     let d_geom = textureSampleLevel(probe_tex, probe_samp, dir, idx, 0.0).a;
     let shares = probe_fog_shares(dir, d_geom, sl.at.xyz, p);
     let hit = sl.at.xyz + dir * d_geom;
@@ -8501,12 +8505,13 @@ fn stylised_water(
         // solved for is a real change of viewpoint on a real place, and cannot repeat.
         // About the facet's geometric normal, as the march does: on a sloping stream straight up
         // is off by the slope, and the reflected ray twice that.
-        var r = reflect(-to_view, flat_n);
+        let r = reflect(-to_view, flat_n);
+        var r_turn = vec3<f32>(0.0);
 #ifdef WATER_PREVIEW
         // The waves in the reflections: part of the resolved wave's turn of the ray
-        // ([`RF_PROBE_K`]), folded above the mean surface.
+        // ([`RF_PROBE_K`]), folded above the mean surface, as a change of direction.
         if (pv_reflect_waves()) {
-            r = pv_wave_dir(to_view, flat_n, n_refl, RF_PROBE_K);
+            r_turn = pv_wave_dir(to_view, flat_n, n_refl, RF_PROBE_K) - r;
         }
 #endif
         let probe_pos = world_pos + vec3<f32>(n_refl.x, 0.0, n_refl.z) * water_reflect.march.y;
@@ -8526,7 +8531,7 @@ fn stylised_water(
             let sl = water_reflect.probes[idx[k]];
 #ifdef WATER_PREVIEW
             probe_rgb = probe_rgb
-                + sample_probe_rough(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w), lobe)
+                + sample_probe_rough(sl, idx[k], probe_pos, r, i32(water_reflect.probe_extra.w), lobe, r_turn)
                     * (w[k] / wsum);
 #else
             probe_rgb = probe_rgb
