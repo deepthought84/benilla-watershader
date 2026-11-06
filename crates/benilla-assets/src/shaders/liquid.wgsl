@@ -9217,8 +9217,49 @@ fn stylised_water(
 /// inside the fine ring's (`FINE_RING_IN`, 64 yd to a chunk's nearest point).
 const PV_HEIGHT_NEAR: f32 = 34.0;
 const PV_HEIGHT_FAR: f32 = 56.0;
-/// The shortest dispersive train whose height is drawn, yards: the fine grid is about a yard.
+/// The shortest dispersive train whose height is drawn, yards: eight of the fine grid's half-yard
+/// cells at High, four of its two-yard ones below.
+#ifdef WATER_TIER_HIGH
 const PV_HEIGHT_MIN_L: f32 = 4.0;
+#else
+const PV_HEIGHT_MIN_L: f32 = 8.0;
+#endif
+
+/// The ADT liquid lattice's cell, yards (a chunk's eighth; the world's corners are whole cells),
+/// the waterline cells' split ([`benilla_world::liquid::surface`]'s `SHORE_CELL_SUB`) and the
+/// fine ring's open cells' split per tier (its `fine_ring_sub`).
+const PV_HEIGHT_CELL: f32 = 33.333333 / 8.0;
+const PV_HEIGHT_SHORE_SUB: f32 = 8.0;
+#ifdef WATER_TIER_HIGH
+const PV_HEIGHT_OPEN_SUB: f32 = 8.0;
+#else
+const PV_HEIGHT_OPEN_SUB: f32 = 2.0;
+#endif
+
+/// The stitch of a vertex on a cell's edge between two points of the open grid: the offsets to the
+/// grid points below and above it along the edge, and the upper one's share of its height;
+/// `t` < 0 off such an edge. Bevy XZ, the corners on whole multiples of the cell.
+struct PvStitch {
+    lo: vec2<f32>,
+    hi: vec2<f32>,
+    t: f32,
+}
+
+fn pv_height_stitch(xz: vec2<f32>) -> PvStitch {
+    let step = PV_HEIGHT_CELL / PV_HEIGHT_SHORE_SUB;
+    let q = round(xz / step);
+    let k = PV_HEIGHT_SHORE_SUB / PV_HEIGHT_OPEN_SUB;
+    let edge = abs(q - PV_HEIGHT_SHORE_SUB * round(q / PV_HEIGHT_SHORE_SUB)) < vec2<f32>(0.5);
+    let q0 = k * floor((q + 0.5) / k);
+    let off = abs(q - q0) > vec2<f32>(0.5);
+    var st = PvStitch(vec2<f32>(0.0), vec2<f32>(0.0), -1.0);
+    if (edge.x && off.y) {
+        st = PvStitch(vec2<f32>(0.0, (q0.y - q.y) * step), vec2<f32>(0.0, (q0.y + k - q.y) * step), (q.y - q0.y) / k);
+    } else if (edge.y && off.x) {
+        st = PvStitch(vec2<f32>((q0.x - q.x) * step, 0.0), vec2<f32>((q0.x + k - q.x) * step, 0.0), (q.x - q0.x) / k);
+    }
+    return st;
+}
 
 /// Whether the surface height is on (`preview.looks.z` 0, the default) and the waves draw.
 fn pv_surface_height_on() -> bool {
@@ -9394,13 +9435,21 @@ fn vertex(in: LiquidVertex) -> LiquidVsOut {
         if (reach > 0.0) {
             let ocean = w.kind.y > 0.5;
             let up = select(1.0, out.surface_normal.y, dot(out.surface_normal, out.surface_normal) > 0.25);
-            let h = reach * pv_surface_height(
-                out.world_position.xz,
-                out.flow,
-                out.shore,
-                clamp(out.depth, 0.0, 1.0) * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean),
-                up,
-            );
+            let column = clamp(out.depth, 0.0, 1.0) * select(REF_RIVER_V_YD, REF_OCEAN_V_YD, ocean);
+            let xz = out.world_position.xz;
+            var h = pv_surface_height(xz, out.flow, out.shore, column, up);
+            // The stitch: a vertex on a cell's edge between two of the coarser open grid's points
+            // ([`PV_HEIGHT_OPEN_SUB`]) takes their heights' blend along the edge, so a waterline
+            // cell's finer edge meets an open cell's without a crack.
+            let st = pv_height_stitch(xz);
+            if (st.t >= 0.0) {
+                h = mix(
+                    pv_surface_height(xz + st.lo, out.flow, out.shore, column, up),
+                    pv_surface_height(xz + st.hi, out.flow, out.shore, column, up),
+                    st.t,
+                );
+            }
+            h = reach * h;
             out.height = h;
             out.world_position.y = out.world_position.y + h;
             out.clip_position = position_world_to_clip(out.world_position.xyz);

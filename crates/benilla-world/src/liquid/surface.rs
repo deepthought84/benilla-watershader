@@ -236,11 +236,19 @@ pub(crate) fn spawn_liquids<'a>(
     }
 }
 
-/// The fine ring's open cells are split this many ways a side, half a yard, for the Improved
-/// Water's surface height (`liquid.wgsl`'s `pv_surface_height`), which the 4.17 yd lattice cannot
-/// carry: the waterline cells' own [`SHORE_CELL_SUB`], so no edge of a risen surface has a vertex
-/// its neighbour lacks (a T-junction there opens a crack the sky shows through).
-const FINE_RING_SUB: usize = SHORE_CELL_SUB;
+/// The fine ring's open cells are split this many ways a side for the Improved Water's surface
+/// height (`liquid.wgsl`'s `pv_surface_height`), which the 4.17 yd lattice cannot carry: two
+/// yards below High, half a yard (the waterline cells' own [`SHORE_CELL_SUB`]) at High. The heavy
+/// fragment pays for every thin far triangle in the quads it half covers: at Loch Modan, Medium,
+/// the half-yard ring cost 2.7 ms of GPU, the two-yard one 0.5. The shader stitches a waterline
+/// cell's finer edge to the open grid (`pv_height_stitch`, its `PV_HEIGHT_OPEN_SUB` the same per
+/// tier), so no edge of a risen surface opens a crack.
+fn fine_ring_sub(quality: super::WaterQuality) -> usize {
+    match quality {
+        super::WaterQuality::High => SHORE_CELL_SUB,
+        _ => SHORE_CELL_SUB / 4,
+    }
+}
 /// A chunk takes its fine mesh when its nearest point comes this near the eye, horizontally, and
 /// gives it back past [`FINE_RING_OUT`]. The shader's height is gone by 56 yd, so a chunk drawn
 /// coarse is always flat and the two meshes meet without a crack.
@@ -250,7 +258,7 @@ const FINE_RING_OUT: f32 = 80.0;
 const FINE_RING_BUILDS: usize = 6;
 
 /// What an ADT surface needs to build its fine mesh on demand, and the two meshes: the Improved
-/// Water's surface height draws the chunks near the eye on a yard grid ([`FINE_RING_SUB`]), the far
+/// Water's surface height draws the chunks near the eye on a finer grid ([`fine_ring_sub`]), the far
 /// ones on the reference's lattice, unchanged.
 #[derive(Component)]
 pub(crate) struct LiquidFine {
@@ -259,7 +267,8 @@ pub(crate) struct LiquidFine {
     shoreline: Option<Arc<Shoreline>>,
     planar: Option<Arc<dyn WaterClasses>>,
     coarse: Handle<Mesh>,
-    fine: Option<Handle<Mesh>>,
+    /// The fine mesh and the split it was built at.
+    fine: Option<(Handle<Mesh>, usize)>,
     // The wet cells' bounds in Bevy XZ, for the distance to the eye.
     lo: Vec2,
     hi: Vec2,
@@ -305,18 +314,21 @@ pub(super) fn swap_fine_liquids(
     eye: Query<&GlobalTransform, With<crate::view::WorldCamera>>,
     dev: Option<Res<crate::dev_state::DebugState>>,
     style: Res<super::WaterStyle>,
+    quality: Option<Res<super::WaterQuality>>,
     mut surfaces: Query<(&mut Mesh3d, &mut LiquidFine)>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
     let on = *style == super::WaterStyle::Stylised
         && dev.as_ref().is_some_and(|d| d.water.surface_height);
     let eye = eye.iter().next().map(|t| t.translation());
+    let sub = fine_ring_sub(quality.map_or(super::WaterQuality::Medium, |q| *q));
     let mut builds = 0;
     for (mut mesh, mut fine) in &mut surfaces {
         let d = eye.map_or(f32::MAX, |e| fine.distance(Vec2::new(e.x, e.z)));
         let want = on && (d < FINE_RING_IN || (fine.fine.is_some() && d < FINE_RING_OUT));
         if want {
-            if fine.fine.is_none() {
+            // None yet, or built at another tier's split.
+            if fine.fine.as_ref().is_none_or(|(_, s)| *s != sub) {
                 if builds >= FINE_RING_BUILDS {
                     continue;
                 }
@@ -328,15 +340,17 @@ pub(super) fn swap_fine_liquids(
                     fine.planar.as_deref(),
                     true,
                     fine.shoreline.as_deref(),
-                    FINE_RING_SUB,
+                    sub,
                 );
-                fine.fine = Some(meshes.add(m));
+                if let Some((old, _)) = fine.fine.replace((meshes.add(m), sub)) {
+                    meshes.remove(&old);
+                }
             }
-            let h = fine.fine.clone().expect("built above");
+            let h = fine.fine.as_ref().expect("built above").0.clone();
             if mesh.0 != h {
                 mesh.0 = h;
             }
-        } else if let Some(h) = fine.fine.take() {
+        } else if let Some((h, _)) = fine.fine.take() {
             mesh.0 = fine.coarse.clone();
             meshes.remove(&h);
         }
@@ -796,7 +810,7 @@ fn liquid_bevy_mesh(
 }
 
 /// [`liquid_bevy_mesh`] with every open cell (one not on the waterline) split `open_sub` ways a
-/// side: the fine ring's mesh ([`LiquidFine`]) at [`FINE_RING_SUB`], the far one's at 1.
+/// side: the fine ring's mesh ([`LiquidFine`]) at [`fine_ring_sub`], the far one's at 1.
 fn liquid_bevy_mesh_sub(
     lq: &LiquidMesh,
     body_color: Option<[f32; 3]>,
