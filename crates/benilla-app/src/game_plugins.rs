@@ -926,8 +926,12 @@ pub(crate) mod schedule_tests {
     /// `Transform` against the conform and rig writers, its falls' rows the props' materials
     /// against the straddle twins, and the sun's glint visibility the camera's `GlobalTransform`
     /// against the nameplate, raid-mark and model-particle placers: each a frame late at worst.
+    /// The glue booth's `seat_on_stage_bones` writes its stage models' `Transform` beside the
+    /// mirror, probe and ripple cameras' drivers (disjoint entities), and the loading screen's
+    /// `hand_back_the_pointer` sets the `Window`'s cursor while the mirror driver's look rows
+    /// read it.
     /// `WOW_AMBIGUITY_DUMP=1` prints every pair after `Update`'s.
-    const POST_UPDATE_CEILING: usize = 393;
+    const POST_UPDATE_CEILING: usize = 396;
     const POST_UPDATE_SLACK: usize = 20;
     /// The actionable pairs in `Update`: conflicting access, no declared order, and nothing
     /// [`Classes`] explains, so the executor orders them however the graph falls. The count may
