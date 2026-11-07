@@ -282,8 +282,12 @@ impl Plugin for LiquidPlugin {
                     .after(WaterPassSet),
             )
             .add_systems(Update, hooks::stamp_world_camera_layers)
-            // The Improved Water's fine ring, for its surface height.
-            .add_systems(Update, surface::swap_fine_liquids)
+            // The Improved Water's fine ring, for its surface height. After the frame's script
+            // calls, whose `waterStyle` and `waterQuality` callbacks write what it reads.
+            .add_systems(
+                Update,
+                surface::swap_fine_liquids.after(crate::schedule::WorldStage::Present),
+            )
             .add_systems(
                 Update,
                 (
