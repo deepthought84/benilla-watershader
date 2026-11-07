@@ -301,33 +301,38 @@ fn fragment_prepass(in: GxVsOut) {
         discard;
     }
 #ifdef GX_CUTOUT
-    // The cutout needs the texel's alpha and only its alpha, so this is the sample above with
-    // the colour work left out — the same layer, the same sampler choice, the same bias.
-    if ((in.word & WORD_TEXTURED) != 0u) {
-        let layer = i32(recs[in.word & 0xffffu].x);
-        let wrap_x = (in.word & WORD_WRAP_X) != 0u;
-        let wrap_y = (in.word & WORD_WRAP_Y) != 0u;
-        let dims = vec2<f32>(textureDimensions(tex_array).xy);
-        let inset = 0.5 / dims;
-        var uv_mixed = in.uv;
-        if (!wrap_x) {
-            uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
-        }
-        if (!wrap_y) {
-            uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
-        }
-        let a_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias).a;
-        let a_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias).a;
-        let a_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias).a;
-        var a = a_repeat;
-        if (!wrap_x && !wrap_y) {
+    // The cutout needs the texel's alpha and only its alpha, so this is the sample in `fragment`
+    // with the colour work left out: the same layer, the same sampler choice, the same bias, and
+    // like there every sample runs unconditionally before the textured flag selects (implicit
+    // derivatives need uniform control flow; `word` is a per-primitive fragment input).
+    let textured = (in.word & WORD_TEXTURED) != 0u;
+    let wrap_x = (in.word & WORD_WRAP_X) != 0u;
+    let wrap_y = (in.word & WORD_WRAP_Y) != 0u;
+    let layer = select(0, i32(recs[in.word & 0xffffu].x), textured);
+    let dims = vec2<f32>(textureDimensions(tex_array).xy);
+    let inset = 0.5 / dims;
+    var uv_mixed = in.uv;
+    if (!wrap_x) {
+        uv_mixed.x = clamp(uv_mixed.x, inset.x, 1.0 - inset.x);
+    }
+    if (!wrap_y) {
+        uv_mixed.y = clamp(uv_mixed.y, inset.y, 1.0 - inset.y);
+    }
+    let a_repeat = textureSampleBias(tex_array, samp_repeat, in.uv, layer, view.mip_bias).a;
+    let a_clamp = textureSampleBias(tex_array, samp_clamp, in.uv, layer, view.mip_bias).a;
+    let a_mixed = textureSampleBias(tex_array, samp_repeat, uv_mixed, layer, view.mip_bias).a;
+    var a = 1.0;
+    if (textured) {
+        if (wrap_x && wrap_y) {
+            a = a_repeat;
+        } else if (!wrap_x && !wrap_y) {
             a = a_clamp;
-        } else if (!(wrap_x && wrap_y)) {
+        } else {
             a = a_mixed;
         }
-        if (a < VANILLA_ALPHA_KEY) {
-            discard;
-        }
+    }
+    if (a < VANILLA_ALPHA_KEY) {
+        discard;
     }
 #endif
 }
